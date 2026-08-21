@@ -1,0 +1,65 @@
+name: Tag release
+
+# Step two of two in cutting a release.
+#
+# prepare-release.yml opens a pull request with the CHANGELOG.md update. When
+# that pull request is merged, this tags the merge commit and starts the build.
+#
+# Why it is split: main is a protected branch, so the release job cannot push a
+# commit to it directly. Rather than granting the release bot an exemption, the
+# release commit goes through review like every other change in this repository.
+# Tags are not branch-protected, so they can be pushed from here.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    # Only merged release pull requests. `closed` also fires on a pull request
+    # that was closed without merging, which must not tag anything.
+    if: >-
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the merge commit
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Push the tag
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          TAG="${HEAD_REF#release/}"
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::branch '$HEAD_REF' does not name a version tag"; exit 1 ;;
+          esac
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::tag $TAG already exists"; exit 1
+          fi
+          git config user.name  'release[bot]'
+          git config user.email 'release@users.noreply.github.com'
+          git tag -a "$TAG" -m "$TAG (upstream bee $(cat .upstream-base))"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_ENV"
+
+      - name: Start the build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # A tag pushed with GITHUB_TOKEN does NOT trigger workflows listening
+          # on tag pushes — GitHub suppresses that to prevent recursion. The
+          # build therefore has to be dispatched explicitly.
+          gh workflow run release.yaml --repo "$GITHUB_REPOSITORY" --ref "$tag"
+          echo "dispatched release.yaml for $tag"

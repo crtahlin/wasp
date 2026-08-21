@@ -1,8 +1,15 @@
 name: Prepare release
 
-# Cuts a release: derive the next version and changelog from the first-parent
-# spine of main with git-cliff, commit CHANGELOG.md, and push the tag. Pushing
-# the tag is what triggers release.yaml.
+# Step one of two in cutting a release.
+#
+# Derives the next version and changelog from the first-parent spine of main
+# with git-cliff, then opens a PULL REQUEST containing the CHANGELOG.md update.
+# It deliberately does not push to main and does not tag: main is protected, and
+# the release commit goes through review like every other change here rather
+# than the release bot getting an exemption.
+#
+# Merging that pull request triggers tag-release.yml, which tags the merge
+# commit and starts the build.
 #
 # Manual on purpose. Releases here carry experimental changes onto other
 # people's nodes, so the decision to cut one is a human one.
@@ -21,6 +28,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   prepare:
@@ -86,11 +94,14 @@ jobs:
             exit 1
           fi
 
-      - name: Commit changelog and push tag
+      - name: Open release pull request
         if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           NEXT='${{ steps.v.outputs.next }}'
+          BRANCH="release/$NEXT"
           # --prepend requires the file to exist, and on the first release it
           # does not. git-cliff does not re-emit the header when prepending to a
           # file that already has one, so this is safe on every later release too.
@@ -98,8 +109,30 @@ jobs:
           git-cliff --tag "$NEXT" --prepend CHANGELOG.md --unreleased
           git config user.name 'release[bot]'
           git config user.email 'release@users.noreply.github.com'
+          git switch -c "$BRANCH"
           git add CHANGELOG.md
           git commit -m "chore(release): $NEXT"
-          git tag -a "$NEXT" -m "$NEXT (upstream bee $(cat .upstream-base))"
-          git push origin main
-          git push origin "$NEXT"
+          git push -u origin "$BRANCH" --force-with-lease
+
+          BODY_FILE="$(mktemp)"
+          {
+            echo "Release **$NEXT**, built on upstream bee \`$(cat .upstream-base)\`."
+            echo
+            echo "Merging this pull request tags the merge commit and starts the build."
+            echo "The tag is pushed by \`tag-release.yml\`; it is not created here."
+            echo
+            echo "Check the changelog below is only this fork's changes. If any entry"
+            echo "starts with \`Merge \` or \`Pull from upstream\`, something was"
+            echo "squash-merged and the changelog is misattributing upstream's work."
+            echo
+            echo '---'
+            echo
+            git-cliff --tag "$NEXT" --unreleased
+            echo
+            echo 'Generated with help of AI.'
+          } > "$BODY_FILE"
+
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore(release): $NEXT" \
+            --body-file "$BODY_FILE" \
+            --label release --label chore
