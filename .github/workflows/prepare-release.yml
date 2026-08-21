@@ -14,6 +14,10 @@ on:
         description: 'Preview the version and changelog without committing or tagging'
         type: boolean
         default: true
+      version:
+        description: 'Explicit tag to cut, e.g. v0.1.0-test.1. Leave empty to let git-cliff compute it. A semver prerelease suffix (-test, -rc) makes goreleaser mark the GitHub release as a pre-release and suppresses the rolling latest / major / minor Docker tags.'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -29,20 +33,38 @@ jobs:
           ref: main
 
       - name: Install git-cliff
-        uses: orhun/git-cliff-action@v4
-        with:
-          version: latest
-          args: --version
+        # Installed as a pinned binary rather than via orhun/git-cliff-action:
+        # that action runs git-cliff itself and does NOT leave it on PATH, so
+        # every later step failed with "git-cliff: command not found". Pinning
+        # the version also means a release is reproducible — an unpinned
+        # "latest" could change changelog grouping between two releases.
         env:
-          OUTPUT: /dev/null
+          GIT_CLIFF_VERSION: '2.13.1'
+        run: |
+          set -euo pipefail
+          ASSET="git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          URL="https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/${ASSET}"
+          curl -fsSL "$URL" -o /tmp/git-cliff.tar.gz
+          tar -xzf /tmp/git-cliff.tar.gz -C /tmp
+          sudo install -m 0755 "/tmp/git-cliff-${GIT_CLIFF_VERSION}/git-cliff" /usr/local/bin/git-cliff
+          git-cliff --version
 
       - name: Compute next version
         id: v
         run: |
           set -euo pipefail
-          NEXT="$(git-cliff --bumped-version)"
+          if [ -n "${{ inputs.version }}" ]; then
+            NEXT="${{ inputs.version }}"
+            case "$NEXT" in
+              v[0-9]*) ;;
+              *) echo "::error::version must start with v followed by a digit (got '$NEXT')"; exit 1 ;;
+            esac
+            echo "Using explicit version: $NEXT"
+          else
+            NEXT="$(git-cliff --bumped-version)"
+            echo "Computed next version: $NEXT"
+          fi
           echo "next=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "Next version: $NEXT"
 
       - name: Preview changelog
         run: |
