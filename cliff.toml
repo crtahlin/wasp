@@ -1,0 +1,96 @@
+# Changelog configuration for bee-experimental.
+#
+# WHY NOT release-please: it fetches history through GitHub's GraphQL
+# Commit.history, which has no first-parent option, and stops only at the
+# previous release's commit. Merging upstream into main would therefore drag
+# every upstream commit newer than our last release into our changelog and into
+# our version calculation, including any upstream `feat!:` forcing a major bump
+# on us. The pollution is bounded by date rather than ancestry, so its size
+# varies unpredictably per release. No configuration fixes that.
+#
+# git-cliff can express what is needed, because it exposes `merge_commit` to its
+# parsers. Skipping non-merge commits reduces main to exactly its first-parent
+# spine: one entry per feature, which is precisely the fork's own changes.
+#
+# THE CONSEQUENCE, and it is load-bearing: a merge commit's SUBJECT becomes the
+# changelog entry. Every pull request must be merged with a conventional-commit
+# subject:
+#     gh pr merge <n> --merge --subject "feat(scope): what changed (#<n>)"
+# See docs/agent-playbooks/release-process.md.
+
+[changelog]
+header = """
+# Changelog
+
+Changes this fork makes to upstream Bee. Upstream's own changes are absorbed as
+single `chore(upstream)` entries — see `.upstream-base` for the release this
+build derives from, and upstream's release notes for what it contains.\n
+"""
+body = """
+{% set repo = "https://github.com/crtahlin/bee-experimental" -%}
+{% if version -%}
+## [{{ version | trim_start_matches(pat="v") }}]({{ repo }}/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## Unreleased
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}\
+- {{ commit.message | split(pat="\n") | first | trim }}
+{% endfor %}\
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+protect_breaking_commits = false
+filter_commits = false
+
+# Only this fork's own release tags are release boundaries. ANCHORED on purpose:
+# an unanchored "v[0-9]*" also matches refs/tags/upstream/v2.8.1, which would
+# make an upstream release act as one of ours.
+tag_pattern = "^v[0-9]"
+
+# NOTE: `replace` is a plain regex replacement — Tera variables from the
+# [changelog] section do not interpolate here, so the URL is spelled out.
+commit_preprocessors = [
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/crtahlin/bee-experimental/pull/${1}))" },
+]
+
+# ORDER IS LOAD-BEARING: git-cliff applies the first matching parser.
+commit_parsers = [
+  # Keep only merge commits. Everything else on main arrived inside an upstream
+  # sync merge and is not a change this fork made.
+  { field = "merge_commit", pattern = "^false$", skip = true },
+
+  # Merge commits that are NOT ours. Note the trailing space: this catches
+  # "Merge branch ...", "Merge pull request ...", and also "Merge from
+  # upstream", which a narrower pattern misses. Our own merge subjects are
+  # conventional-commit lines and never begin with "Merge".
+  { message = "^Merge ", skip = true },
+  # One historical oddity in upstream's pre-v1 history that starts with neither.
+  { message = "^Pull from upstream", skip = true },
+  { message = "^chore\\(release\\)", skip = true },
+
+  { message = "^chore\\(upstream\\)", group = "Upstream" },
+  { message = "^[Ff]eat",     group = "Features" },
+  { message = "^[Ff]ix",      group = "Bug fixes" },
+  { message = "^[Pp]erf",     group = "Performance" },
+  { message = "^[Rr]efactor", group = "Refactor" },
+  { message = "^[Dd]oc",      group = "Documentation" },
+  { message = "^[Tt]est",     group = "Testing" },
+  { message = "^[Bb]uild",    group = "Build" },
+  { message = "^ci",          group = "CI" },
+  { message = "^[Cc]hore",    group = "Miscellaneous" },
+  { message = ".*",           group = "Other" },
+]
+
+[bump]
+# 0.x line: a feature is a patch bump and a breaking change is a minor bump,
+# which is what semver prescribes below 1.0.0.
+features_always_bump_minor = false
+breaking_always_bump_major = false
+initial_tag = "v0.1.0"

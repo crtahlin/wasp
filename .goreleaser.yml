@@ -1,4 +1,4 @@
-project_name: bee
+project_name: bee-experimental
 
 version: 2
 
@@ -13,6 +13,17 @@ release:
 
 git:
   prerelease_suffix: "-"
+  # Experiment marker tags (docs/experiments/INDEX.md) name merge commits and
+  # must never be mistaken for a release tag. The Makefile guards this too, via
+  # git describe --match 'v[0-9]*'.
+  ignore_tags:
+    - 'exp/*'
+    # Upstream release tags live in a separate namespace (refs/tags/upstream/*,
+    # see scripts/setup-upstream.sh). goreleaser reads git tags directly rather
+    # than through the Makefile's --match guard, so without this it derives the
+    # version from an upstream tag — and the slash in "upstream/v2.8.1" then
+    # lands in package filenames as a path separator and the build fails.
+    - 'upstream/*'
 
 builds:
   - id: linux
@@ -26,6 +37,7 @@ builds:
       - -X github.com/ethersphere/bee/v2.version={{ .Version }}
       - -X github.com/ethersphere/bee/v2.commitHash={{ .ShortCommit }}
       - -X github.com/ethersphere/bee/v2.commitTime={{ .CommitTimestamp }}
+      - -X github.com/ethersphere/bee/v2.upstreamBase={{ .Env.UPSTREAM_BASE }}
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
@@ -49,6 +61,7 @@ builds:
       - -X github.com/ethersphere/bee/v2.version={{ .Version }}
       - -X github.com/ethersphere/bee/v2.commitHash={{ .ShortCommit }}
       - -X github.com/ethersphere/bee/v2.commitTime={{ .CommitTimestamp }}
+      - -X github.com/ethersphere/bee/v2.upstreamBase={{ .Env.UPSTREAM_BASE }}
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
@@ -74,6 +87,7 @@ builds:
       - -X github.com/ethersphere/bee/v2.version={{ .Version }}
       - -X github.com/ethersphere/bee/v2.commitHash={{ .ShortCommit }}
       - -X github.com/ethersphere/bee/v2.commitTime={{ .CommitTimestamp }}
+      - -X github.com/ethersphere/bee/v2.upstreamBase={{ .Env.UPSTREAM_BASE }}
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
@@ -93,6 +107,7 @@ builds:
       - -X github.com/ethersphere/bee/v2.version={{ .Version }}
       - -X github.com/ethersphere/bee/v2.commitHash={{ .ShortCommit }}
       - -X github.com/ethersphere/bee/v2.commitTime={{ .CommitTimestamp }}
+      - -X github.com/ethersphere/bee/v2.upstreamBase={{ .Env.UPSTREAM_BASE }}
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
@@ -111,6 +126,7 @@ builds:
       - -X github.com/ethersphere/bee/v2.version={{ .Version }}
       - -X github.com/ethersphere/bee/v2.commitHash={{ .ShortCommit }}
       - -X github.com/ethersphere/bee/v2.commitTime={{ .CommitTimestamp }}
+      - -X github.com/ethersphere/bee/v2.upstreamBase={{ .Env.UPSTREAM_BASE }}
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
@@ -120,60 +136,23 @@ builds:
       - arm64
 
 snapshot:
-  name_template: "{{.Tag}}-snapshot"
-
-signs:
-  - artifacts: checksum
-    args: [
-      "--pinentry-mode", "loopback",
-      "--passphrase", "{{ .Env.GPG_PASSPHRASE }}",
-      "-u", "{{ .Env.GPG_FINGERPRINT }}",
-      "--output", "${signature}",
-      "--detach-sign", "${artifact}",
-    ]
+  version_template: "{{.Tag}}-snapshot"
 
 archives:
-  -
-    id: scoop
-    builds:
-    - windows
-    name_template: "{{ tolower .ProjectName }}-{{ tolower .Os }}-{{ tolower .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
-    format: zip
-    wrap_in_directory: false
-    files:
-    - packaging/scoop/bee.yaml
-    - LICENSE
-    - README.md
+
   -
     name_template: "{{ tolower .ProjectName }}-{{ tolower .Os }}-{{ tolower .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
-    format: binary
-    builds:
+    # goreleaser v2 renamed `format` to `formats` (a list) and `builds` to `ids`.
+    # Upstream still uses the deprecated spellings; corrected here so that
+    # `goreleaser check` is clean.
+    formats:
+    - binary
+    ids:
     - linux
     - windows
     - darwin-amd64
     - darwin-arm64
-  -
-    id: homebrew-amd64
-    builds:
-    - darwin-amd64
-    name_template: "{{ tolower .ProjectName }}-{{ tolower .Os }}-{{ tolower .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
-    files:
-    - src: 'packaging/homebrew-amd64/*'
-      dst: '.'
-      strip_parent: true
-    - LICENSE
-    - README.md
-  -
-    id: homebrew-arm64
-    builds:
-    - darwin-arm64
-    name_template: "{{ tolower .ProjectName }}-{{ tolower .Os }}-{{ tolower .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
-    files:
-    - src: 'packaging/homebrew-arm64/*'
-      dst: '.'
-      strip_parent: true
-    - LICENSE
-    - README.md
+
 
 nfpms:
   - file_name_template: >-
@@ -184,15 +163,27 @@ nfpms:
 
     id: packages
 
-    vendor: Swarm Foundation
+    package_name: bee-experimental
 
-    homepage: https://www.ethswarm.org
+    vendor: crtahlin
 
-    maintainer: Swarm Devops <devops@ethswarm.org>
+    homepage: https://github.com/crtahlin/bee-experimental
 
-    description: Ethereum Swarm node
+    maintainer: Crt Ahlin <crt.ahlin@gmail.com>
 
-    license: GPL-3
+    description: |-
+      Ethereum Swarm node (experimental fork of ethersphere/bee).
+      Not affiliated with or endorsed by the Swarm Foundation.
+
+    # Upstream declares GPL-3 here, but the project is BSD-3-Clause: see LICENSE,
+    # and upstream's own scoops.license which says BSD-3-Clause. Upstream bug,
+    # corrected in this fork.
+    license: BSD-3-Clause
+
+    # This fork carries its own version line starting at 0.1.0, which sorts below
+    # upstream's 2.8.x. Without an epoch, apt would read an install over upstream
+    # as a downgrade and refuse it. 1:0.1.0 outranks 0:2.8.1.
+    epoch: "1"
 
     dependencies:
       - ca-certificates
@@ -214,8 +205,19 @@ nfpms:
         dst: /etc/default/bee
         type: config
 
+    # Drop-in replacement for upstream's `bee` package. All three directives are
+    # needed and do different jobs:
+    #   Conflicts — refuse to be co-installed with upstream bee
+    #   Replaces  — permitted to take over files it owns (/usr/bin/bee, the unit
+    #               file, /etc/bee/bee.yaml)
+    #   Provides  — satisfy anything that depends on the name `bee`
+    # Conflicts alone blocks the install; Replaces alone allows a silent
+    # file-ownership fight; Provides alone does neither.
     overrides:
       deb:
+        conflicts: [bee]
+        replaces: [bee]
+        provides: [bee]
         dependencies:
           - passwd
           - ca-certificates
@@ -225,6 +227,11 @@ nfpms:
           preremove: ./packaging/deb/prerm
           postremove: ./packaging/deb/postrm
       rpm:
+        # RPM has no Replaces; nfpm maps `replaces` onto Obsoletes for the rpm
+        # packager. Verify on the first real build with `rpm -qp --obsoletes`.
+        conflicts: [bee]
+        replaces: [bee]
+        provides: [bee]
         dependencies:
           - ca-certificates
           - shadow-utils
@@ -242,102 +249,9 @@ nfpms:
 
     bindir: /usr/bin
 
-publishers:
-  - name: gemfury
-    ids:
-      - packages
-    dir: "{{ dir .ArtifactPath }}"
-    cmd: bash -c "if [[ \"{{ .Prerelease }}\" == \"\" ]]; then curl -F package=@{{ .ArtifactName }} https://{{ .Env.GEMFURY_TOKEN }}@push.fury.io/ethersphere/; else echo SKIPPING PRERELEASE!; fi"
-
-scoops:
-  - url_template: "https://github.com/ethersphere/bee/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
-    repository:
-      owner: ethersphere
-      name: scoop
-      token: "{{ .Env.SCOOP_PAT }}"
-
-    commit_author:
-      name: bee-worker
-      email: bee-worker@ethswarm.org
-
-    commit_msg_template: "Scoop update for {{ .ProjectName }} version {{ .Tag }}"
-
-    homepage: "https://github.com/ethersphere/bee"
-
-    description: "Swarm client implemented in Go."
-
-    license: BSD-3-Clause
-
-    persist:
-    - "data"
-    - "packaging/scoop/bee.yaml"
-
-    post_install:
-      - "Write-Host 'Running postinstall command'"
-      - "if(!(Test-Path $persist_dir\\bee.yaml)){New-Item -ItemType SymbolicLink -Path \"$persist_dir\\bee.yaml\" -Target \"$persist_dir\\packaging\\scoop\\bee.yaml\" | Out-Null}"
-      - "(Get-Content -path $persist_dir\\bee.yaml -Raw) -replace './bee.yaml',\"$persist_dir\\bee.yaml\" | Set-Content -Path $persist_dir\\bee.yaml"
-      - "(Get-Content -path $persist_dir\\bee.yaml -Raw) -replace './data',\"$persist_dir\\data\" | Set-Content -Path $persist_dir\\bee.yaml"
-      - "(Get-Content -path $persist_dir\\bee.yaml -Raw) -replace './password',\"$persist_dir\\password\" | Set-Content -Path $persist_dir\\bee.yaml"
-      - "if(!(Test-Path $persist_dir\\password)){[System.Web.Security.Membership]::GeneratePassword(32,5) | Set-Content -Path $persist_dir\\password}"
-      - "if(sc.exe query SwarmBeeSvc | Select-String FAILED){sc.exe create SwarmBeeSvc binPath= \"$dir\\bee.exe start --config=$persist_dir\\bee.yaml\" type= share start= auto displayName= \"Bee\"; sc.exe description SwarmBeeSvc \"Swarm client implemented in Go.\"}"
-      - "if($global){$ETH_ADDRESS = (((C:\\ProgramData\\scoop\\shims\\bee.exe init --config=$persist_dir\\bee.yaml | Select-String ethereum) -split ' ‘)[-1]).Trim('\"')} else {$ETH_ADDRESS = (((bee.exe init --config=$persist_dir\\bee.yaml | Select-String ethereum) -split ' ‘)[-1]).Trim('\"')}; Write-Host \"Please make sure there is XDAI and, if required, XBZZ available on the following Ethereum address on Gnosis Chain: $ETH_ADDRESS\nLearn how to fund your node by visiting our docs at https://docs.ethswarm.org/docs/installation/fund-your-node\""
-      - "Write-Host \"Bee requires a Gnosis Chain RPC endpoint to function. By default this is expected to be found at ws://localhost:8546.\nPlease see https://docs.ethswarm.org/docs/installation/install for more details on how to configure your node.\nConfig: $persist_dir\\bee.yaml\""
-      - "Write-Host \"Once your node's wallet has received the funds deploy Bee chequebook with [sudo] $dir\\bee.exe deploy --config=$persist_dir\\bee.yaml\""
-      - "Write-Host 'Start Bee service with [sudo] sc.exe start SwarmBeeSvc'"
-
-brews:
-  - name: swarm-bee
-    repository:
-      owner: ethersphere
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_PAT }}"
-    ids:
-      - homebrew-amd64
-      - homebrew-arm64
-    commit_author:
-      name: bee-worker
-      email: bee-worker@ethswarm.org
-    homepage: https://swarm.ethereum.org/
-    description: Ethereum Swarm node
-    # Setting this will prevent goreleaser to actually try to commit the updated
-    # formula - instead, the formula file will be stored on the dist directory
-    # only, leaving the responsibility of publishing it to the user.
-    # If set to auto, the release will not be uploaded to the homebrew tap
-    # in case there is an indicator for prerelease in the tag e.g. v1.0.0-rc1
-    #
-    # Templates: allowed.
-    skip_upload: auto
-    caveats: |
-        Logs:   #{var}/log/swarm-bee/bee.log
-        Config: #{etc}/swarm-bee/bee.yaml
-
-        Bee requires a Gnosis Chain RPC endpoint to function. By default this is expected to be found at ws://localhost:8546.
-
-        Please see https://docs.ethswarm.org/docs/installation/install for more details on how to configure your node.
-
-        After you finish configuration run 'bee-get-addr' and fund your node with XDAI, and also XBZZ if so desired.
-    test: |
-      system "#{bin}/bee version"
-    install: |
-      (etc/"swarm-bee").mkpath
-      (var/"lib/swarm-bee").mkpath
-      bin.install ["bee", "bee-get-addr"]
-      etc.install "bee.yaml" => "swarm-bee/bee.yaml" unless File.exists? etc/"swarm-bee/bee.yaml"
-    post_install: |
-      unless File.exists? "#{var}/lib/swarm-bee/password"
-      system("openssl", "rand", "-out", var/"lib/swarm-bee/password", "-base64", "32")
-      end
-      system(bin/"bee", "init", "--config", etc/"swarm-bee/bee.yaml", ">/dev/null", "2>&1")
-    service: |
-      run [bin/"bee", "start", "--config", etc/"swarm-bee/bee.yaml"]
-      keep_alive true
-      error_log_path var/"log/swarm-bee/bee.log"
-      log_path var/"log/swarm-bee/bee.log"
-
 dockers:
 - image_templates:
-  - "ethersphere/bee:{{ .Version }}-amd64"
-  - "quay.io/ethersphere/bee:{{ .Version }}-amd64"
+  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64"
   use: buildx
   ids:
     - linux
@@ -351,8 +265,7 @@ dockers:
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}"
 - image_templates:
-  - "ethersphere/bee:{{ .Version }}-armv7"
-  - "quay.io/ethersphere/bee:{{ .Version }}-armv7"
+  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7"
   use: buildx
   ids:
     - linux
@@ -367,8 +280,7 @@ dockers:
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}"
 - image_templates:
-  - "ethersphere/bee:{{ .Version }}-arm64v8"
-  - "quay.io/ethersphere/bee:{{ .Version }}-arm64v8"
+  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8"
   use: buildx
   ids:
     - linux
@@ -382,8 +294,7 @@ dockers:
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}"
 - image_templates:
-  - "ethersphere/bee:{{ .Version }}-amd64-slim"
-  - "quay.io/ethersphere/bee:{{ .Version }}-amd64-slim"
+  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim"
   use: buildx
   ids:
     - linux-slim
@@ -397,8 +308,7 @@ dockers:
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}-slim"
 - image_templates:
-  - "ethersphere/bee:{{ .Version }}-armv7-slim"
-  - "quay.io/ethersphere/bee:{{ .Version }}-armv7-slim"
+  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim"
   use: buildx
   ids:
     - linux-slim
@@ -413,8 +323,7 @@ dockers:
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}-slim"
 - image_templates:
-  - "ethersphere/bee:{{ .Version }}-arm64v8-slim"
-  - "quay.io/ethersphere/bee:{{ .Version }}-arm64v8-slim"
+  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim"
   use: buildx
   ids:
     - linux-slim
@@ -428,115 +337,47 @@ dockers:
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}-slim"
 docker_manifests:
-- name_template: ethersphere/bee:{{ .Major }}
+- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}
   image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64
-  - ethersphere/bee:{{ .Version }}-armv7
-  - ethersphere/bee:{{ .Version }}-arm64v8
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
   skip_push: auto
-- name_template: ethersphere/bee:{{ .Major }}.{{ .Minor }}
+- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}
   image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64
-  - ethersphere/bee:{{ .Version }}-armv7
-  - ethersphere/bee:{{ .Version }}-arm64v8
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
   skip_push: auto
-- name_template: ethersphere/bee:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}
+- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}
   image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64
-  - ethersphere/bee:{{ .Version }}-armv7
-  - ethersphere/bee:{{ .Version }}-arm64v8
-- name_template: ethersphere/bee:latest
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
+- name_template: ghcr.io/crtahlin/bee-experimental:latest
   image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64
-  - ethersphere/bee:{{ .Version }}-armv7
-  - ethersphere/bee:{{ .Version }}-arm64v8
-- name_template: ethersphere/bee:stable
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
+- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}-slim
   image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64
-  - ethersphere/bee:{{ .Version }}-armv7
-  - ethersphere/bee:{{ .Version }}-arm64v8
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim
   skip_push: auto
-- name_template: quay.io/ethersphere/bee:{{ .Major }}
+- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}-slim
   image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim
   skip_push: auto
-- name_template: quay.io/ethersphere/bee:{{ .Major }}.{{ .Minor }}
+- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}-slim
   image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8
-  skip_push: auto
-- name_template: quay.io/ethersphere/bee:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
+- name_template: ghcr.io/crtahlin/bee-experimental:latest-slim
   image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8
-- name_template: quay.io/ethersphere/bee:latest
-  image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8
-- name_template: quay.io/ethersphere/bee:stable
-  image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8
-  skip_push: auto
-- name_template: ethersphere/bee:{{ .Major }}-slim
-  image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64-slim
-  - ethersphere/bee:{{ .Version }}-armv7-slim
-  - ethersphere/bee:{{ .Version }}-arm64v8-slim
-  skip_push: auto
-- name_template: ethersphere/bee:{{ .Major }}.{{ .Minor }}-slim
-  image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64-slim
-  - ethersphere/bee:{{ .Version }}-armv7-slim
-  - ethersphere/bee:{{ .Version }}-arm64v8-slim
-  skip_push: auto
-- name_template: ethersphere/bee:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}-slim
-  image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64-slim
-  - ethersphere/bee:{{ .Version }}-armv7-slim
-  - ethersphere/bee:{{ .Version }}-arm64v8
-- name_template: ethersphere/bee:latest-slim
-  image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64-slim
-  - ethersphere/bee:{{ .Version }}-armv7-slim
-  - ethersphere/bee:{{ .Version }}-arm64v8-slim
-- name_template: ethersphere/bee:stable-slim
-  image_templates:
-  - ethersphere/bee:{{ .Version }}-amd64-slim
-  - ethersphere/bee:{{ .Version }}-armv7-slim
-  - ethersphere/bee:{{ .Version }}-arm64v8-slim
-  skip_push: auto
-- name_template: quay.io/ethersphere/bee:{{ .Major }}-slim
-  image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8-slim
-  skip_push: auto
-- name_template: quay.io/ethersphere/bee:{{ .Major }}.{{ .Minor }}-slim
-  image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8-slim
-  skip_push: auto
-- name_template: quay.io/ethersphere/bee:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}-slim
-  image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8-slim
-- name_template: quay.io/ethersphere/bee:latest-slim
-  image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8-slim
-- name_template: quay.io/ethersphere/bee:stable-slim
-  image_templates:
-  - quay.io/ethersphere/bee:{{ .Version }}-amd64-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-armv7-slim
-  - quay.io/ethersphere/bee:{{ .Version }}-arm64v8-slim
-  skip_push: auto
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
+  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim
