@@ -26,4 +26,3 @@ build derives from, and upstream's release notes for what it contains.
 
 ### Performance
 - scope CodeQL to Go changes and cache the build ([#41](https://github.com/crtahlin/bee-experimental/pull/41))
-
