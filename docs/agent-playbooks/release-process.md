@@ -59,17 +59,36 @@ load-bearing — git-cliff takes the first match.
    subjects in there, stop**: the merge-commit discipline has been broken
    somewhere and the changelog is lying.
 
-3. Trigger the release workflow (`workflow_dispatch`). It runs `git-cliff
-   --bump --prepend CHANGELOG.md`, commits, and pushes the tag, which triggers
-   the goreleaser build.
+3. Run the **Prepare release** workflow (`workflow_dispatch`). Leave
+   `dry_run` on first: it prints the computed version and the exact changelog
+   without committing anything. Re-run with `dry_run` off to commit
+   `CHANGELOG.md`, tag, and push — pushing the tag is what triggers the
+   goreleaser build in `release.yaml`.
+
+   The workflow carries a tripwire for the one failure mode that silently
+   corrupts a release: if any entry starts with `Merge ` or
+   `Pull from upstream`, upstream commits have reached the first-parent spine
+   (something was squash-merged) and the job fails rather than publishing a
+   changelog that misattributes upstream's work to this fork.
 
 ## What gets built
 
 Five build targets (linux amd64/386/arm64/armv7, a upx-compressed linux-slim,
 windows, darwin amd64 and arm64), plus:
 
-- Docker images to `ghcr.io/crtahlin/bee-experimental`
+- Docker images to `ghcr.io/crtahlin/bee-experimental`, authenticated with the
+  workflow's own `GITHUB_TOKEN` so no long-lived registry credential exists
 - `.deb` and `.rpm` packages
+
+Everything upstream publishes to Ethersphere-owned destinations — Docker Hub,
+Quay, Gemfury, the Homebrew tap, the Scoop bucket, and the GPG signing that
+needs their keys — is removed from `.goreleaser.yml` rather than repointed. The
+`stable` Docker tags are gone too: `stable` implies a support commitment this
+fork does not make.
+
+The `linux-slim` build runs `upx` in a post hook. Upstream never installs it,
+so `release.yaml` does so explicitly — assuming it is present on the runner is
+how that build breaks.
 
 The packages are **drop-in replacements** for upstream's `bee` package: the
 binary stays at `/usr/bin/bee`, the systemd unit and `/etc/bee/bee.yaml` paths

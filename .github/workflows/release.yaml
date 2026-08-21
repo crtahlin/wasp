@@ -1,5 +1,12 @@
 name: Release
 
+# Fires on this fork's own release tags, pushed by prepare-release.yml.
+#
+# Rewritten from upstream's release workflow: every publishing target upstream
+# uses (Docker Hub, Quay, Gemfury, the Homebrew tap, the Scoop bucket) belongs
+# to Ethersphere and needs organisation secrets this fork does not and must not
+# have. Artifacts go to this repository's own releases and to GHCR.
+
 on:
   push:
     branches-ignore:
@@ -7,9 +14,14 @@ on:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -32,23 +44,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-release-
             ${{ runner.os }}-go-
-      - name: Docker Hub and Quay Login
-        run: |
-          printf ${{ secrets.DOCKERHUB_PASSWORD }} | docker login --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-          printf ${{ secrets.QUAY_PASSWORD }} | docker login --username ${{ secrets.QUAY_USERNAME }} quay.io --password-stdin
+      - name: GHCR login
+        # GITHUB_TOKEN is enough for this repository's own package namespace,
+        # so no long-lived registry credential has to exist anywhere.
+        run: printf '%s' '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Import GPG key
-        run: |
-          echo "$GPG_PRIVATE_KEY" | gpg --import --passphrase "$GPG_PASSPHRASE" --batch --allow-secret-key-import
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-      - name: Set the API version
+      - name: Install upx
+        # The linux-slim build has a post hook that runs upx. Upstream never
+        # installs it; assuming it is on the runner is how that build breaks.
+        run: sudo apt-get update && sudo apt-get install -y upx-ucl
+      - name: Set build-time versions
         run: |
           echo "BEE_API_VERSION=$(grep '^  version:' openapi/Swarm.yaml | awk '{print $2}')" >> $GITHUB_ENV
+          echo "UPSTREAM_BASE=$(cat .upstream-base)" >> $GITHUB_ENV
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
         with:
@@ -56,9 +67,5 @@ jobs:
           args: release --clean --timeout 1h
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_PAT: ${{ secrets.GHA_PAT_BASIC }}
-          SCOOP_PAT: ${{ secrets.GHA_PAT_BASIC }}
-          GEMFURY_TOKEN: ${{ secrets.GEMFURY_TOKEN }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          GPG_FINGERPRINT: ${{ secrets.GPG_FINGERPRINT }}
           BEE_API_VERSION: ${{ env.BEE_API_VERSION }}
+          UPSTREAM_BASE: ${{ env.UPSTREAM_BASE }}

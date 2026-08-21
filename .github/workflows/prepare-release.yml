@@ -1,0 +1,79 @@
+name: Prepare release
+
+# Cuts a release: derive the next version and changelog from the first-parent
+# spine of main with git-cliff, commit CHANGELOG.md, and push the tag. Pushing
+# the tag is what triggers release.yaml.
+#
+# Manual on purpose. Releases here carry experimental changes onto other
+# people's nodes, so the decision to cut one is a human one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview the version and changelog without committing or tagging'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Install git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          version: latest
+          args: --version
+        env:
+          OUTPUT: /dev/null
+
+      - name: Compute next version
+        id: v
+        run: |
+          set -euo pipefail
+          NEXT="$(git-cliff --bumped-version)"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next version: $NEXT"
+
+      - name: Preview changelog
+        run: |
+          echo '--- entries that will ship ---'
+          git-cliff --unreleased --tag '${{ steps.v.outputs.next }}'
+          echo '--- end ---'
+          echo
+          echo 'If upstream commit subjects appear above, STOP: the merge-commit'
+          echo 'discipline has been broken and the changelog is wrong. See'
+          echo 'docs/agent-playbooks/release-process.md.'
+
+      - name: Guard against upstream leakage
+        # Cheap tripwire for the one failure mode that silently corrupts a
+        # release: a squashed merge putting upstream commits on the spine.
+        run: |
+          set -euo pipefail
+          if git-cliff --unreleased --tag '${{ steps.v.outputs.next }}' | grep -qE '^- (Merge |Pull from upstream)'; then
+            echo "::error::Upstream merge commits leaked into the changelog. Do not release."
+            exit 1
+          fi
+
+      - name: Commit changelog and push tag
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          NEXT='${{ steps.v.outputs.next }}'
+          git-cliff --tag "$NEXT" --prepend CHANGELOG.md --unreleased
+          git config user.name 'release[bot]'
+          git config user.email 'release@users.noreply.github.com'
+          git add CHANGELOG.md
+          git commit -m "chore(release): $NEXT"
+          git tag -a "$NEXT" -m "$NEXT (upstream bee $(cat .upstream-base))"
+          git push origin main
+          git push origin "$NEXT"
