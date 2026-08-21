@@ -11,14 +11,39 @@
 #
 name: "CodeQL"
 permissions: read-all
+# Scoped to Go changes on purpose. CodeQL's Go analysis has to build the whole
+# tree, which takes 10-15 minutes. This fork's pull requests are mostly docs,
+# workflows and configuration: of the first seven, SIX touched no Go file at all
+# and each still paid a full build-and-analyse. That is roughly 75 minutes of
+# compute spent analysing code that had not changed.
+#
+# The paths filter removes that waste without losing coverage: any change that
+# could affect the analysis result necessarily touches one of these paths, and
+# the weekly schedule re-scans the whole tree regardless.
+#
+# Do NOT make this a required status check while the paths filter is in place —
+# a skipped job never reports, so required-check merges would block forever.
 on:
   push:
     branches: [ "main" ]
+    # Written out twice rather than shared with a YAML anchor: GitHub Actions
+    # does not support anchors or aliases in workflow files.
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/codeql.yml'
   pull_request:
     # The branches below must be a subset of the branches above
     branches: [ "main" ]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/codeql.yml'
   schedule:
     - cron: '23 1 * * 2'
+  workflow_dispatch:
 
 jobs:
   analyze:
@@ -41,6 +66,18 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
+
+    # Autobuild runs `go build`, so the Go build cache applies. Bee is a large
+    # tree and a cold build is most of this job's runtime.
+    - name: Cache Go modules and build cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-codeql-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-codeql-go-
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
