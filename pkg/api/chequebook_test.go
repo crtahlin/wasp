@@ -17,6 +17,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/bigint"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
+	"github.com/ethersphere/bee/v2/pkg/postage/postagecontract"
 	"github.com/ethersphere/bee/v2/pkg/sctx"
 	"github.com/ethersphere/bee/v2/pkg/settlement/swap/chequebook"
 	"github.com/ethersphere/bee/v2/pkg/settlement/swap/chequebook/mock"
@@ -24,6 +25,59 @@ import (
 
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
+
+func TestChequebookBalanceChainDisabled(t *testing.T) {
+	t.Parallel()
+
+	// The handler checks Balance for ErrChainDisabled but historically did not
+	// check AvailableBalance, so a node started with --swap-enable=false could
+	// answer 500 ("this node is broken") where 405 ("this node does not offer
+	// that") is correct. Both orderings are covered because either call can be
+	// the one that reports the chain is disabled.
+	for _, tc := range []struct {
+		name             string
+		balanceFunc      func(context.Context) (*big.Int, error)
+		availableBalance func(context.Context) (*big.Int, error)
+	}{
+		{
+			name: "balance reports chain disabled",
+			balanceFunc: func(context.Context) (*big.Int, error) {
+				return nil, postagecontract.ErrChainDisabled
+			},
+			availableBalance: func(context.Context) (*big.Int, error) {
+				return big.NewInt(1000), nil
+			},
+		},
+		{
+			name: "available balance reports chain disabled",
+			balanceFunc: func(context.Context) (*big.Int, error) {
+				return big.NewInt(9000), nil
+			},
+			availableBalance: func(context.Context) (*big.Int, error) {
+				return nil, postagecontract.ErrChainDisabled
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			testServer, _, _, _ := newTestServer(t, testServerOptions{
+				ChequebookOpts: []mock.Option{
+					mock.WithChequebookBalanceFunc(tc.balanceFunc),
+					mock.WithChequebookAvailableBalanceFunc(tc.availableBalance),
+				},
+			})
+
+			jsonhttptest.Request(t, testServer, http.MethodGet, "/chequebook/balance",
+				http.StatusMethodNotAllowed,
+				jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+					Message: postagecontract.ErrChainDisabled.Error(),
+					Code:    http.StatusMethodNotAllowed,
+				}),
+			)
+		})
+	}
+}
 
 func TestChequebookBalance(t *testing.T) {
 	t.Parallel()

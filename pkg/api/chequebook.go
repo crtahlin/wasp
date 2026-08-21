@@ -76,6 +76,12 @@ func (s *Service) chequebookBalanceHandler(w http.ResponseWriter, r *http.Reques
 	}
 
 	availableBalance, err := s.chequebook.AvailableBalance(r.Context())
+	if errors.Is(err, postagecontract.ErrChainDisabled) {
+		logger.Debug("get available balance failed", "error", err)
+		logger.Error(nil, "get available balance failed")
+		jsonhttp.MethodNotAllowed(w, err)
+		return
+	}
 	if err != nil {
 		jsonhttp.InternalServerError(w, errChequebookBalance)
 		logger.Debug("get available balance failed", "error", err)
