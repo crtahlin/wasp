@@ -13,6 +13,11 @@ on:
       - '**'
     tags:
       - 'v*.*.*'
+  # Dispatchable because a tag pushed with GITHUB_TOKEN does not trigger the
+  # push event above — GitHub suppresses that to prevent workflow recursion.
+  # tag-release.yml therefore dispatches this explicitly, with --ref set to the
+  # tag it just pushed.
+  workflow_dispatch:
 
 permissions:
   contents: write
