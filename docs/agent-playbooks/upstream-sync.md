@@ -60,7 +60,19 @@ Three things, in order:
    `Makefile`, `version.go`, `.golangci.yml`, `.github/workflows/`. Conflicts
    here are expected and small; take care that resolving them does not silently
    revert a fork change.
-3. **CI green**, then merge with a merge commit.
+
+3. **Workflows upstream ADDED.** This one is easy to miss because it does not
+   conflict — a new file merges cleanly and then fails on every subsequent run.
+   Upstream keeps adding workflows that need Ethersphere organisation secrets
+   or push into Ethersphere repositories. A real example: the `v2.8.1` →
+   `v2.8.2-rc1` sync introduces `swarm-cli-bee-version.yaml`, which dispatches
+   into `ethersphere/swarm-cli` on release. Delete anything of that kind in the
+   sync pull request and record it in the body.
+
+   ```bash
+   git diff --name-status main...HEAD -- .github/workflows/ | grep '^A'
+   ```
+4. **CI green**, then merge with a merge commit.
 
 ## Resolving conflicts locally
 

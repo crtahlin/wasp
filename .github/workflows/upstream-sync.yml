@@ -1,0 +1,187 @@
+name: Upstream sync
+
+# Absorb new ethersphere/bee releases into this fork. Nothing ever goes the
+# other way — the upstream remote configured here has no push URL at all.
+#
+# Tracks FINAL release tags only, never master HEAD and never -rc. Bee is a live
+# network participant: a mid-refactor master can carry a bumped protocol version
+# that no deployed peer speaks, which would partition our nodes while every
+# local test still passed. Tagged releases are also the only upstream commits
+# that have been through their beekeeper integration suite.
+#
+# See docs/agent-playbooks/upstream-sync.md.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'          # Mondays, 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream tag to sync (default: newest final release)'
+        required: false
+        type: string
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          # Fetch-only, and into a separate tag namespace. Both matter: the
+          # first because nothing here may ever push upstream, the second
+          # because upstream tags become reachable from main after a merge and
+          # would otherwise be picked up as this fork's own release tags by
+          # git describe and by goreleaser.
+          git remote add upstream https://github.com/ethersphere/bee.git
+          git remote set-url --push upstream DO_NOT_PUSH
+          git fetch --no-tags upstream '+refs/heads/*:refs/remotes/upstream/*'
+          git fetch --no-tags upstream '+refs/tags/*:refs/tags/upstream/*'
+
+      - name: Resolve target tag
+        id: target
+        run: |
+          set -euo pipefail
+          CURRENT="$(cat .upstream-base)"
+          if [ -n "${{ inputs.ref }}" ]; then
+            TARGET="${{ inputs.ref }}"
+          else
+            TARGET="$(git tag -l 'upstream/v*' \
+              | sed 's|^upstream/||' \
+              | grep -Ev -- '-(rc|beta|alpha)' \
+              | sort -V | tail -1)"
+          fi
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET"   >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT" = "$TARGET" ]; then
+            echo "Already at $CURRENT; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Syncing $CURRENT -> $TARGET"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream
+        if: steps.target.outputs.skip == 'false'
+        id: merge
+        run: |
+          set -uo pipefail
+          T='${{ steps.target.outputs.target }}'
+          BRANCH="sync/upstream/$T"
+          git config user.name  'upstream-sync[bot]'
+          git config user.email 'upstream-sync@users.noreply.github.com'
+          git switch -c "$BRANCH"
+
+          # A REAL two-parent merge. Never squash: squashing leaves the merge
+          # base where it was, so the next sync three-way-merges from the
+          # original fork point and re-resolves every conflict again. That is
+          # what made syncing painful in the previous fork.
+          if git merge --no-ff --no-commit "upstream/$T"; then
+            CONFLICTS=""
+          else
+            CONFLICTS="$(git diff --name-only --diff-filter=U)"
+          fi
+
+          echo "$T" > .upstream-base
+          if [ -z "$CONFLICTS" ]; then
+            scripts/protocol-freeze.sh > .github/protocol-freeze.lock
+          fi
+          git add -A
+          if [ -n "$CONFLICTS" ]; then
+            git commit -m "chore(upstream): sync ethersphere/bee $T [CONFLICTS]"
+          else
+            git commit -m "chore(upstream): sync ethersphere/bee $T"
+          fi
+          git push -u origin "$BRANCH" --force-with-lease
+
+          {
+            echo 'conflicts<<CONFLICT_EOF'
+            echo "$CONFLICTS"
+            echo 'CONFLICT_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        if: steps.target.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          T: ${{ steps.target.outputs.target }}
+          CURRENT: ${{ steps.target.outputs.current }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+        run: |
+          set -euo pipefail
+          BODY_FILE="$(mktemp)"
+          {
+            echo "Moves the upstream base from \`$CURRENT\` to \`$T\`."
+            echo
+            if [ -n "$CONFLICTS" ]; then
+              echo "## Conflicts — do not merge as-is"
+              echo
+              echo "The merge produced conflicts. The branch was pushed anyway, with the"
+              echo "conflict markers in place, so it can be resolved locally:"
+              echo
+              echo '```'
+              echo "$CONFLICTS"
+              echo '```'
+              echo
+              echo "\`\`\`"
+              echo "git fetch origin && git switch $BRANCH"
+              echo "git reset --hard HEAD~1 && git merge --no-ff upstream/$T"
+              echo "# resolve, then:"
+              echo "echo $T > .upstream-base"
+              echo "scripts/protocol-freeze.sh > .github/protocol-freeze.lock"
+              echo "git add -A && git commit -m 'chore(upstream): sync ethersphere/bee $T'"
+              echo "git push --force-with-lease"
+              echo "\`\`\`"
+              echo
+            else
+              echo "Clean merge. The protocol-freeze lock was regenerated in the same commit."
+              echo
+            fi
+            echo "## Review this first"
+            echo
+            echo "The lock diff **is** the protocol review for this pull request:"
+            echo
+            echo '```'
+            echo "git diff main...$BRANCH -- .github/protocol-freeze.lock"
+            echo '```'
+            echo
+            echo "If upstream moved a protocol minor, peers still on the previous release"
+            echo "will no longer be able to dial us for that protocol until they upgrade."
+            echo "That is normal, but it is worth knowing before it happens rather than"
+            echo "after. See \`docs/agent-playbooks/protocol-compatibility.md\`."
+            echo
+            echo "Then check the files that carry fork changes and therefore conflict:"
+            echo "\`AGENTS.md\`, \`README.md\`, \`.goreleaser.yml\`, \`Makefile\`, \`version.go\`,"
+            echo "\`.golangci.yml\`, \`.github/workflows/\`. Take care that resolving them did"
+            echo "not silently revert a fork change."
+            echo
+            echo "**Merge with a merge commit. Never squash** — squashing leaves the merge"
+            echo "base behind and makes every future sync harder."
+          } > "$BODY_FILE"
+
+          if [ -n "$CONFLICTS" ]; then
+            TITLE="chore(upstream): sync bee $T [CONFLICTS]"
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" \
+              --body-file "$BODY_FILE" --label upstream-sync --label chore
+          else
+            TITLE="chore(upstream): sync bee $T"
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" \
+              --body-file "$BODY_FILE" --label upstream-sync --label chore
+          fi
