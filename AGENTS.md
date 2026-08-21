@@ -90,6 +90,7 @@ specs, or results. Bench machines are referenced by role name (`bench-1`,
 | Cutting a release | `docs/agent-playbooks/release-process.md` |
 | Touching anything protocol-adjacent | `docs/agent-playbooks/protocol-compatibility.md` |
 | Running or measuring on real nodes | `docs/agent-playbooks/test-bench.md` |
+| Provisioning a bench machine | `docs/agent-playbooks/bench-vm-spec.md` |
 | Looking for what has been tried | `docs/experiments/INDEX.md` |
 | Looking for what is planned | `docs/ROADMAP.md` |
 
