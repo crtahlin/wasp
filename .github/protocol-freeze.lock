@@ -1,0 +1,57 @@
+cfe294a41369288166dafc88f04eeee1d05c25b4fd7b829d5993e955d24a7c82
+go.mod github.com/ethersphere/go-storage-incentives-abi v0.9.4
+pkg/config/chain.go ChainID: abi.MainnetChainID,
+pkg/config/chain.go ChainID: abi.TestnetChainID,
+pkg/config/chain.go NetworkID: abi.MainnetNetworkID,
+pkg/config/chain.go NetworkID: abi.TestnetNetworkID,
+pkg/config/chain.go mustHash("81d3de06cadb0970fc653f24cef4689243f9a3d702236370ecf4613673048145"),
+pkg/config/chain.go mustHash("ba50aa67c6e6f135a8ca57947c015c24192531d47e47a9ec212c0090e0486d46"),
+pkg/hive/hive.go protocolName = "hive"
+pkg/hive/hive.go protocolVersion = "2.0.0"
+pkg/p2p/libp2p/internal/handshake/handshake.go ProtocolVersion = "15.0.0"
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto Ack Ack = 2;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto BzzAddress Address = 1;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto Syn Syn = 1;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto bool FullNode = 3;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto bytes ChequebookAddress = 6;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto bytes Nonce = 4;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto bytes ObservedUnderlay = 1;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto bytes Overlay = 3;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto bytes Signature = 2;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto bytes Underlay = 1;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto int64 Timestamp = 5;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto string WelcomeMessage = 99;
+pkg/p2p/libp2p/internal/handshake/pb/handshake.proto uint64 NetworkID = 2;
+pkg/p2p/p2p.go return "/swarm/" + protocol + "/" + version + "/" + stream
+pkg/pingpong/pingpong.go protocolName = "pingpong"
+pkg/pingpong/pingpong.go protocolVersion = "1.0.0"
+pkg/pricing/pricing.go protocolName = "pricing"
+pkg/pricing/pricing.go protocolVersion = "1.0.0"
+pkg/pullsync/pullsync.go protocolName = "pullsync"
+pkg/pullsync/pullsync.go protocolVersion = "1.4.0"
+pkg/pushsync/pushsync.go protocolName = "pushsync"
+pkg/pushsync/pushsync.go protocolVersion = "1.3.1"
+pkg/retrieval/retrieval.go protocolName = "retrieval"
+pkg/retrieval/retrieval.go protocolVersion = "1.4.0"
+pkg/settlement/pseudosettle/pseudosettle.go protocolName = "pseudosettle"
+pkg/settlement/pseudosettle/pseudosettle.go protocolVersion = "1.0.0"
+pkg/settlement/swap/swapprotocol/swapprotocol.go protocolName = "swap"
+pkg/settlement/swap/swapprotocol/swapprotocol.go protocolVersion = "1.0.0"
+pkg/status/status.go protocolName = "status"
+pkg/status/status.go protocolVersion = "1.1.3"
+pkg/swarm/swarm.go BmtBranches = 128
+pkg/swarm/swarm.go Branches = 128
+pkg/swarm/swarm.go ChunkSize = SectionSize * Branches
+pkg/swarm/swarm.go ChunkWithSpanSize = ChunkSize + SpanSize
+pkg/swarm/swarm.go EncryptedBranches = Branches / 2
+pkg/swarm/swarm.go ExtendedPO uint8 = MaxPO + 5
+pkg/swarm/swarm.go HashSize = 32
+pkg/swarm/swarm.go MaxBins = MaxPO + 1
+pkg/swarm/swarm.go MaxPO uint8 = 31
+pkg/swarm/swarm.go SectionSize = 32
+pkg/swarm/swarm.go SocMaxChunkSize = SocMinChunkSize + ChunkSize
+pkg/swarm/swarm.go SocMinChunkSize = HashSize + SocSignatureSize + SpanSize
+pkg/swarm/swarm.go SocSignatureSize = 65
+pkg/swarm/swarm.go SpanSize = 8
+pkg/swarm/swarm.go StampIndexSize = 8
+pkg/swarm/swarm.go StampTimestampSize = 8

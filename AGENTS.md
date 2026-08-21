@@ -91,7 +91,8 @@ specs, or results. Bench machines are referenced by role name (`bench-1`,
   authorship for new work. Files inherited from upstream keep their existing
   headers untouched.
 - `make vet` does not exist despite the upstream checklist below mentioning it.
-  The real sequence is `make format`, `make build`, `make test`, `make lint`.
+  The real sequence is `make format`, `make build`, `make test`, `make lint`,
+  plus `make protocol-freeze` whenever the change is anywhere near the wire.
 
 ---
 

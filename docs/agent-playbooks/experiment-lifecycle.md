@@ -68,8 +68,12 @@ request. Not "tests to follow".
 Before every push:
 
 ```bash
-make format && make build && make test && make lint
+make format && make build && make test && make lint && make protocol-freeze
 ```
+
+`make protocol-freeze` is the same check CI runs. Running it locally means a
+wire-surface change is something you decided to make, rather than something a
+red check tells you about after the fact.
 
 Upstream's conventions apply in full — `package foo_test` tests, `t.Parallel()`
 only where safe, errors wrapped with `%w`, no casual `go.mod` changes. See the
