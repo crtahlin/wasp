@@ -38,7 +38,7 @@ body = """
 {% for commit in commits %}\
 - {{ commit.message | split(pat="\n") | first | trim }}
 {% endfor %}\
-{% endfor %}\n
+{% endfor %}
 """
 footer = ""
 trim = true
