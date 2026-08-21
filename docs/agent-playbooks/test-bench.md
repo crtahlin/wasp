@@ -5,9 +5,13 @@ behaviour. A claim about peer discovery or hashing throughput is worth nothing
 until it has been measured on a real node against the real network. The bench is
 where that happens.
 
-> **Status: not yet provisioned.** The machines exist but are offline. This
-> playbook is written ahead of them so the measurement method is fixed before
-> there is any temptation to reverse-engineer it around a result.
+> **Status: not yet provisioned.** This playbook is written ahead of the
+> machines so the measurement method is fixed before there is any temptation to
+> reverse-engineer it around a result.
+>
+> For what to provision and why, see
+> [`bench-vm-spec.md`](bench-vm-spec.md). Machines for this project are
+> provisioned fresh; no existing node estate is reused.
 
 ## Roles
 
