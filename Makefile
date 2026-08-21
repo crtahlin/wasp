@@ -16,12 +16,19 @@ PLATFORM ?= linux/amd64
 
 BEE_API_VERSION ?= "$(shell grep '^  version:' openapi/Swarm.yaml | awk '{print $$2}')"
 
-VERSION ?= "$(shell git describe --tags --abbrev=0 | cut -c2-)"
+# --match 'v[0-9]*' so that exp/<slug> experiment marker tags can never be
+# mistaken for a release tag. See docs/agent-playbooks/experiment-lifecycle.md.
+VERSION ?= "$(shell git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | cut -c2- || true)"
+# Before the first release tag exists, git describe finds nothing. Fall back so
+# builds still carry a coherent version string instead of an empty one.
+VERSION := $(if $(patsubst "",,$(VERSION)),$(VERSION),"0.0.0-untagged")
+UPSTREAM_BASE ?= "$(shell cat .upstream-base 2>/dev/null || echo unknown)"
 COMMIT_HASH ?= "$(shell git describe --long --dirty --always --match "" || true)"
 CLEAN_COMMIT ?= "$(shell git describe --long --always --match "" || true)"
 LDFLAGS ?= -s -w \
 -X github.com/ethersphere/bee/v2.version="$(VERSION)" \
 -X github.com/ethersphere/bee/v2.commitHash="$(COMMIT_HASH)" \
+-X github.com/ethersphere/bee/v2.upstreamBase="$(UPSTREAM_BASE)" \
 -X github.com/ethersphere/bee/v2/pkg/api.Version="$(BEE_API_VERSION)" \
 -X github.com/ethersphere/bee/v2/pkg/p2p/libp2p.reachabilityOverridePublic="$(REACHABILITY_OVERRIDE_PUBLIC)" \
 -X github.com/ethersphere/bee/v2/pkg/postage/listener.batchFactorOverridePublic="$(BATCHFACTOR_OVERRIDE_PUBLIC)"

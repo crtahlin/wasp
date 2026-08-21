@@ -1,0 +1,79 @@
+name: Experiment / optimization
+description: Propose a change to try in this fork
+labels: ["needs-spec"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is spec-first. This issue is the proposal; the spec at
+        `docs/experiments/<slug>/spec.md` gets written and merged before any
+        implementation code. See `docs/agent-playbooks/experiment-lifecycle.md`.
+
+        Leave this issue **unassigned** — assign it when work actually starts.
+        Add one type label and one priority label before you close this form.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or suboptimal today? Include evidence — logs, measurements, an upstream issue, something seen while operating a node.
+    validations:
+      required: true
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: What do you believe is causing it, and why would the proposed change address it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Roughly what would change, and in which packages.
+    validations:
+      required: true
+  - type: textarea
+    id: measurement
+    attributes:
+      label: Expected effect and how it will be measured
+      description: |
+        Be concrete. "Faster" is not measurable; "chunk upload throughput on bench-1
+        with a depth-20 batch, three runs, compared against stock v0.1.0" is.
+        Also state what a negative result would look like.
+        An idea with no stated measurement stays labelled `needs-spec` and out of the milestone.
+    validations:
+      required: true
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol impact (initial assessment)
+      description: See `docs/agent-playbooks/protocol-compatibility.md`. This is confirmed properly in the spec.
+      options:
+        - "None — does not touch the frozen wire surface"
+        - "Unsure — needs investigation"
+        - "Yes — changes protocol versions, chunk geometry, handshake, or network ID"
+    validations:
+      required: true
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Rough effort
+      options:
+        - "Small — a day or less"
+        - "Medium — a few days"
+        - "Large — a week or more"
+        - "Unknown"
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Where did this come from?
+      description: Branch, document, upstream issue, operator report, paper. Recorded so the provenance is known if this is ever offered upstream.
+    validations:
+      required: true
+  - type: textarea
+    id: upstream
+    attributes:
+      label: Why not upstream?
+      description: Has Ethersphere considered and declined this, is it too speculative for their trunk, or has it simply not been proposed? Optional, but useful context.

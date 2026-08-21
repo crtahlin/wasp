@@ -1,5 +1,103 @@
 # AGENTS.md
 
+> **This repository is `crtahlin/bee-experimental` — an experimental downstream
+> distribution of [`ethersphere/bee`](https://github.com/ethersphere/bee).**
+> It is not the upstream project and is not affiliated with or endorsed by the
+> Swarm Foundation. Upstream's own instructions follow below and still apply;
+> where the two disagree, **this section wins**.
+
+## Fork rules (non-negotiable)
+
+**1. Nothing goes back to Ethersphere.**
+The `upstream` remote is fetch-only — its push URL is deliberately set to
+`DO_NOT_PUSH`. Never push to it, never open a pull request against
+`ethersphere/bee`, never comment on an upstream issue or pull request on the
+maintainer's behalf. Always pass `--repo crtahlin/bee-experimental` to
+`gh pr create` and `gh issue create`. This repository is deliberately **not** a
+GitHub fork, so nothing about the platform will suggest upstream as a target;
+keep it that way.
+
+**2. No code before an issue and a merged spec.**
+The order is: issue → spec merged → branch → implement with tests and docs →
+pull request → merge → ledger row → marker tag. See
+`docs/agent-playbooks/experiment-lifecycle.md`. A change that arrives as code
+first gets sent back, however good it is.
+
+**3. Merge commits are the changelog.**
+Every change lands on `main` as a `--no-ff` merge commit whose **subject is the
+conventional-commit line**, for example
+`feat(pushsync): parallel chunk dispatch (#12)` — not GitHub's default
+`Merge pull request #12 from …`.
+
+```bash
+gh pr merge <n> --merge --subject "feat(scope): what changed (#<n>)"
+```
+
+This one rule carries three separate loads: it is what `git-cliff` filters on to
+build the changelog, what makes each experiment permanently inspectable
+(`git diff M^1 M`), and what keeps the upstream merge base advancing so each
+sync stays cheap. Breaking it breaks all three at once.
+
+**4. Never squash-merge. Never delete a branch. Never force-push `main`.**
+Squash and rebase merging are disabled at the repository level and automatic
+branch deletion is off — do not re-enable them. Experiment branches are the
+historical record.
+
+**5. The wire surface is frozen.**
+This client must stay protocol-compatible with stock Bee nodes.
+`.github/protocol-freeze.lock` fingerprints every constant that determines
+whether a stock peer will talk to us. Changing it requires an explicit
+**Protocol impact** section in the spec and the `protocol-change` label. Read
+`docs/agent-playbooks/protocol-compatibility.md` before touching anything under
+`pkg/p2p/`, `pkg/swarm/`, or `pkg/config/`.
+
+**6. Claims are measured, not asserted.**
+An optimization is not accepted because the code looks faster. It is accepted
+because a before-and-after run on the test bench says so, with the numbers
+recorded in the experiment's `measurement.md`. An HTTP 200 from an API endpoint
+is never proof that a node is healthy.
+
+**7. No AI attribution.**
+No `Co-Authored-By` trailers, no "generated with" lines, no mention of AI tools
+in commit messages, pull requests, issues, or code comments.
+
+**8. Nothing sensitive in the repository.**
+This repository is public. No node addresses, hostnames, SSH configuration,
+private keys, wallet addresses, or postage batch identifiers — in code, issues,
+specs, or results. Bench machines are referenced by role name (`bench-1`,
+`mainnet-canary`) only.
+
+## Where the detail lives
+
+| If you are… | Read |
+|---|---|
+| Starting or shipping an experiment | `docs/agent-playbooks/experiment-lifecycle.md` |
+| Absorbing a new upstream release | `docs/agent-playbooks/upstream-sync.md` |
+| Cutting a release | `docs/agent-playbooks/release-process.md` |
+| Touching anything protocol-adjacent | `docs/agent-playbooks/protocol-compatibility.md` |
+| Running or measuring on real nodes | `docs/agent-playbooks/test-bench.md` |
+| Looking for what has been tried | `docs/experiments/INDEX.md` |
+| Looking for what is planned | `docs/ROADMAP.md` |
+
+## Fork-specific facts
+
+- `main` tracks upstream **release tags**, never `master` HEAD. The current base
+  is recorded in `.upstream-base` and is the single source of truth for it.
+- The Go module path stays `github.com/ethersphere/bee/v2`. Do not rewrite it.
+- Version numbers are this fork's own line (`v0.1.0` onward) and do not mirror
+  upstream's. `bee version` reports both.
+- New fork-authored `.go` files carry
+  `Copyright <year> The bee-experimental Authors.` — do not claim Swarm
+  authorship for new work. Files inherited from upstream keep their existing
+  headers untouched.
+- `make vet` does not exist despite the upstream checklist below mentioning it.
+  The real sequence is `make format`, `make build`, `make test`, `make lint`.
+
+---
+
+*Everything below this line is upstream's `AGENTS.md`, carried unmodified so it
+stays mergeable. It describes the Bee codebase itself and remains accurate.*
+
 Project instructions for **AI coding assistants and agents** (OpenAI Codex, Cursor, GitHub Copilot, Claude Code, and similar tools). This file is the canonical source of shared project instructions; `CLAUDE.md` imports this file for Claude Code.
 
 ## Project overview
