@@ -1,0 +1,48 @@
+name: Bug in this fork
+description: Something in bee-experimental is broken
+labels: ["fix"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For bugs in **upstream Bee** that also affect stock nodes, consider reporting
+        them at [ethersphere/bee](https://github.com/ethersphere/bee/issues) as well —
+        but file here too if we intend to carry a fork-local fix.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `bee version` — include the upstream base it reports.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "Redact addresses, keys, and batch IDs — this repository is public."
+      render: text
+  - type: dropdown
+    id: stock
+    attributes:
+      label: Does stock Bee at the same upstream base also do this?
+      options: ["No — fork-only", "Yes — upstream too", "Not tested"]
+    validations:
+      required: true
