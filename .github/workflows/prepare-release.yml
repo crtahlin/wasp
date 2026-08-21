@@ -91,6 +91,10 @@ jobs:
         run: |
           set -euo pipefail
           NEXT='${{ steps.v.outputs.next }}'
+          # --prepend requires the file to exist, and on the first release it
+          # does not. git-cliff does not re-emit the header when prepending to a
+          # file that already has one, so this is safe on every later release too.
+          touch CHANGELOG.md
           git-cliff --tag "$NEXT" --prepend CHANGELOG.md --unreleased
           git config user.name 'release[bot]'
           git config user.email 'release@users.noreply.github.com'
