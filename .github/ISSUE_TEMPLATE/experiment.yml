@@ -77,3 +77,9 @@ body:
     attributes:
       label: Why not upstream?
       description: Has Ethersphere considered and declined this, is it too speculative for their trunk, or has it simply not been proposed? Optional, but useful context.
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        *If this issue was written with AI assistance, end it with
+        `Generated with help of AI.` — see `AGENTS.md`.*

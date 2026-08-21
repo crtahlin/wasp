@@ -48,7 +48,12 @@ default differently? This is what makes the work reusable by someone else.
 
 ---
 
+Generated with help of AI.
+
 <!--
+Remove the line above if this pull request was written without AI assistance.
+See AGENTS.md.
+
 Before merging:
   gh pr merge <n> --merge --subject "type(scope): what changed (#<n>)"
 The subject IS the changelog entry. Squash and rebase merging are disabled.

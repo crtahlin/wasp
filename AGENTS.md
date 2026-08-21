@@ -57,9 +57,23 @@ because a before-and-after run on the test bench says so, with the numbers
 recorded in the experiment's `measurement.md`. An HTTP 200 from an API endpoint
 is never proof that a node is healthy.
 
-**7. No AI attribution.**
-No `Co-Authored-By` trailers, no "generated with" lines, no mention of AI tools
-in commit messages, pull requests, issues, or code comments.
+**7. Disclose AI assistance — in prose, not in commits.**
+Issues, pull request descriptions, and comments in this repository end with:
+
+```
+Generated with help of AI.
+```
+
+That is deliberate for this repository and reverses the usual convention. The
+work here is largely analytical — performance claims, protocol-compatibility
+arguments, assessments of whether an upstream behaviour is a bug. A reader
+weighing such an argument is entitled to know how it was produced.
+
+Commit messages stay clean: **no `Co-Authored-By` trailers and no tool names.**
+The commit log is a permanent technical record, and branches here are never
+deleted, so anything landed there is effectively immovable. Note that
+`git cherry-pick` preserves trailers by default — when re-landing work from
+elsewhere, write the message explicitly rather than using `cherry-pick -x`.
 
 **8. Nothing sensitive in the repository.**
 This repository is public. No node addresses, hostnames, SSH configuration,
