@@ -1,0 +1,48 @@
+name: Protocol freeze
+
+# This fork exists to change Bee's behaviour while remaining a normal
+# participant on the real Swarm network. This job guards the values that decide
+# whether a stock Bee node will talk to us at all.
+#
+# See docs/agent-playbooks/protocol-compatibility.md.
+
+on:
+  pull_request:
+    branches:
+      - '**'
+  push:
+    branches:
+      - 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  freeze:
+    name: Protocol freeze
+    runs-on: ubuntu-latest
+    # Upstream legitimately moves these values when it releases, and the sync
+    # workflow regenerates the lock in the same commit — on a sync PR the lock
+    # diff IS the protocol review. Both the bot-controlled head ref AND the
+    # bot-applied label are required, so a hand-pushed branch cannot claim the
+    # exemption with a label alone.
+    if: >-
+      !(startsWith(github.head_ref, 'sync/upstream/') &&
+        contains(github.event.pull_request.labels.*.name, 'upstream-sync'))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check frozen wire surface
+        # A deliberate fork-side protocol change is permitted by applying the
+        # 'protocol-change' label. The label gates this step rather than merely
+        # warning after it fails, because a failed step fails the job no matter
+        # what is printed afterwards.
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'protocol-change') }}
+        run: scripts/protocol-freeze.sh --check
+
+      - name: Protocol change acknowledged
+        if: ${{ contains(github.event.pull_request.labels.*.name, 'protocol-change') }}
+        run: |
+          echo "::warning title=Wire surface changed::The 'protocol-change' label is applied, so the freeze check is advisory for this pull request. Confirm the spec's Protocol impact section says which peers stop interoperating."
+          scripts/protocol-freeze.sh --check || true
