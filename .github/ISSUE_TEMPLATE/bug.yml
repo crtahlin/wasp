@@ -46,3 +46,9 @@ body:
       options: ["No — fork-only", "Yes — upstream too", "Not tested"]
     validations:
       required: true
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        *If this issue was written with AI assistance, end it with
+        `Generated with help of AI.` — see `AGENTS.md`.*
