@@ -14,6 +14,10 @@ on:
         description: 'Preview the version and changelog without committing or tagging'
         type: boolean
         default: true
+      version:
+        description: 'Explicit tag to cut, e.g. v0.1.0-test.1. Leave empty to let git-cliff compute it. A semver prerelease suffix (-test, -rc) makes goreleaser mark the GitHub release as a pre-release and suppresses the rolling latest / major / minor Docker tags.'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -49,9 +53,18 @@ jobs:
         id: v
         run: |
           set -euo pipefail
-          NEXT="$(git-cliff --bumped-version)"
+          if [ -n "${{ inputs.version }}" ]; then
+            NEXT="${{ inputs.version }}"
+            case "$NEXT" in
+              v[0-9]*) ;;
+              *) echo "::error::version must start with v followed by a digit (got '$NEXT')"; exit 1 ;;
+            esac
+            echo "Using explicit version: $NEXT"
+          else
+            NEXT="$(git-cliff --bumped-version)"
+            echo "Computed next version: $NEXT"
+          fi
           echo "next=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "Next version: $NEXT"
 
       - name: Preview changelog
         run: |

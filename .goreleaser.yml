@@ -359,6 +359,8 @@ docker_manifests:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
+  # latest must never point at a prerelease (e.g. a -test build).
+  skip_push: auto
 - name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}-slim
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
@@ -381,3 +383,5 @@ docker_manifests:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim
+  # latest must never point at a prerelease (e.g. a -test build).
+  skip_push: auto
