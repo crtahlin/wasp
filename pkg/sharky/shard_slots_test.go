@@ -83,10 +83,13 @@ func readFromLocation(t *testing.T, shard *shard, loc Location) []byte {
 	t.Helper()
 	buf := make([]byte, loc.Length)
 
-	// Reads no longer go through the shard's channel protocol; Store.Read calls
-	// shard.read directly because file.ReadAt is pread and safe concurrently.
-	if err := shard.read(read{ctx: context.Background(), buf: buf[:loc.Length], slot: loc.Slot}); err != nil {
-		t.Fatal("read", err)
+	select {
+	case shard.reads <- read{ctx: context.Background(), buf: buf[:loc.Length], slot: loc.Slot}:
+		if err := <-shard.errc; err != nil {
+			t.Fatal("read", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout reading")
 	}
 
 	return buf
@@ -134,6 +137,8 @@ func newShard(t *testing.T) *shard {
 
 	quit := make(chan struct{})
 	shard := &shard{
+		reads:       make(chan read),
+		errc:        make(chan error),
 		writes:      make(chan write),
 		index:       uint8(index),
 		maxDataSize: 1,
