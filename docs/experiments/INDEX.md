@@ -20,6 +20,7 @@ abandoned, because it stops the next person repeating it.
 
 | Issue | Slug | Type | Branch | Merge | Upstream base at merge | Status | Result |
 |---|---|---|---|---|---|---|---|
+| [#8](https://github.com/crtahlin/wasp/issues/8) | [sharky-concurrent-reads](sharky-concurrent-reads/spec.md) | optimization | `exp/8-sharky-concurrent-reads` | [`a583a345`](https://github.com/crtahlin/wasp/commit/a583a345) | v2.8.1 | merged | Reads bypass the per-shard actor. Harness: 87-100% of raw pread, up from 9%; 8-20x under write load. No node-level effect until #9 lands — the sampler offers only NumCPU concurrent reads. Also retires upstream deadlock #2932. |
 | [#33](https://github.com/crtahlin/wasp/issues/33) | [chequebook-chain-disabled](chequebook-chain-disabled/spec.md) | fix | `fix/33-chequebook-chain-disabled` | [`bac497c5`](https://github.com/crtahlin/wasp/commit/bac497c5) | v2.8.1 | merged | 405 rather than 500 when the chain is disabled on the available-balance path. Not a performance change, so nothing to measure; the test fails against the unfixed handler. Offer upstream. |
 
 Status values: `merged` (in `main`, not yet validated on a node), `validated`
