@@ -12,7 +12,7 @@ starting at `v0.1.0`, and reports the upstream base separately:
 $ bee version
 0.2.0-a1b2c3d4
 $ bee version --verbose        # or the startup log line
-bee-experimental 0.2.0-a1b2c3d4 (upstream bee v2.8.1)
+wasp 0.2.0-a1b2c3d4 (upstream bee v2.8.1)
 ```
 
 The reasoning: a tag like `v2.8.1-exp.1` would sort *below* `v2.8.1` in semver,
@@ -76,7 +76,7 @@ load-bearing — git-cliff takes the first match.
 Five build targets (linux amd64/386/arm64/armv7, a upx-compressed linux-slim,
 windows, darwin amd64 and arm64), plus:
 
-- Docker images to `ghcr.io/crtahlin/bee-experimental`, authenticated with the
+- Docker images to `ghcr.io/crtahlin/wasp`, authenticated with the
   workflow's own `GITHUB_TOKEN` so no long-lived registry credential exists
 - `.deb` and `.rpm` packages
 

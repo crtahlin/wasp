@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> **This repository is `crtahlin/bee-experimental` — an experimental downstream
+> **This repository is `crtahlin/wasp` — an experimental downstream
 > distribution of [`ethersphere/bee`](https://github.com/ethersphere/bee).**
 > It is not the upstream project and is not affiliated with or endorsed by the
 > Swarm Foundation. Upstream's own instructions follow below and still apply;
@@ -12,7 +12,7 @@
 The `upstream` remote is fetch-only — its push URL is deliberately set to
 `DO_NOT_PUSH`. Never push to it, never open a pull request against
 `ethersphere/bee`, never comment on an upstream issue or pull request on the
-maintainer's behalf. Always pass `--repo crtahlin/bee-experimental` to
+maintainer's behalf. Always pass `--repo crtahlin/wasp` to
 `gh pr create` and `gh issue create`. This repository is deliberately **not** a
 GitHub fork, so nothing about the platform will suggest upstream as a target;
 keep it that way.
@@ -38,12 +38,20 @@ build the changelog, what makes each experiment permanently inspectable
 (`git diff M^1 M`), and what keeps the upstream merge base advancing so each
 sync stays cheap. Breaking it breaks all three at once.
 
-**4. Never squash-merge. Never delete a branch. Never force-push `main`.**
+**4. Review before merging, then merge.**
+Run `/review-pr` on a pull request before merging it, and act on what the review
+finds rather than filing it away. Merging after a clean review is the normal
+path and needs no further sign-off — waiting for approval on every change is
+not the process. Pause for the operator only on something genuinely risky:
+a protocol change, a migration, or anything that could affect a running node's
+stake or data. There should rarely be such a change.
+
+**5. Never squash-merge. Never delete a branch. Never force-push `main`.**
 Squash and rebase merging are disabled at the repository level and automatic
 branch deletion is off — do not re-enable them. Experiment branches are the
 historical record.
 
-**5. The wire surface is frozen.**
+**6. The wire surface is frozen.**
 This client must stay protocol-compatible with stock Bee nodes.
 `.github/protocol-freeze.lock` fingerprints every constant that determines
 whether a stock peer will talk to us. Changing it requires an explicit
@@ -51,13 +59,13 @@ whether a stock peer will talk to us. Changing it requires an explicit
 `docs/agent-playbooks/protocol-compatibility.md` before touching anything under
 `pkg/p2p/`, `pkg/swarm/`, or `pkg/config/`.
 
-**6. Claims are measured, not asserted.**
+**7. Claims are measured, not asserted.**
 An optimization is not accepted because the code looks faster. It is accepted
 because a before-and-after run on the test bench says so, with the numbers
 recorded in the experiment's `measurement.md`. An HTTP 200 from an API endpoint
 is never proof that a node is healthy.
 
-**7. Disclose AI assistance — in prose, not in commits.**
+**8. Disclose AI assistance — in prose, not in commits.**
 Issues, pull request descriptions, and comments in this repository end with:
 
 ```
@@ -75,7 +83,7 @@ deleted, so anything landed there is effectively immovable. Note that
 `git cherry-pick` preserves trailers by default — when re-landing work from
 elsewhere, write the message explicitly rather than using `cherry-pick -x`.
 
-**8. Nothing sensitive in the repository.**
+**9. Nothing sensitive in the repository.**
 This repository is public. No node addresses, hostnames, SSH configuration,
 private keys, wallet addresses, or postage batch identifiers — in code, issues,
 specs, or results. Bench machines are referenced by role name (`bench-1`,
@@ -102,7 +110,7 @@ specs, or results. Bench machines are referenced by role name (`bench-1`,
 - Version numbers are this fork's own line (`v0.1.0` onward) and do not mirror
   upstream's. `bee version` reports both.
 - New fork-authored `.go` files carry
-  `Copyright <year> The bee-experimental Authors.` — do not claim Swarm
+  `Copyright <year> The Wasp Authors.` — do not claim Swarm
   authorship for new work. Files inherited from upstream keep their existing
   headers untouched.
 - **Wrap commit message bodies at 72 characters.** `commitlint.config.js` sets

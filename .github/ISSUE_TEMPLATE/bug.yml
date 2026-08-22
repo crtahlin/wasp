@@ -1,5 +1,5 @@
 name: Bug in this fork
-description: Something in bee-experimental is broken
+description: Something in wasp is broken
 labels: ["fix"]
 body:
   - type: markdown

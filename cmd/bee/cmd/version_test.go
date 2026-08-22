@@ -23,10 +23,11 @@ func TestVersionCmd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// This fork reports its own version line alongside the upstream release it
-	// derives from, so that an operator can always tell which upstream code base
-	// is actually running. See docs/agent-playbooks/release-process.md.
-	want := bee.Version + " (upstream bee " + bee.UpstreamBase + ")\n"
+	// Wasp reports its own name and version line alongside the upstream Bee
+	// release it derives from, so an operator can always tell both what they are
+	// running and which upstream code base it carries. See
+	// docs/agent-playbooks/release-process.md.
+	want := "wasp " + bee.Version + " (upstream bee " + bee.UpstreamBase + ")\n"
 	got := outputBuf.String()
 	if got != want {
 		t.Errorf("got output %q, want %q", got, want)

@@ -1,4 +1,4 @@
-project_name: bee-experimental
+project_name: wasp
 
 version: 2
 
@@ -17,7 +17,7 @@ git:
   # in snapshot mode. With an exp/chequebook-chain-disabled tag present and this
   # setting in place, goreleaser still derived the version from it and the build
   # failed on the slash becoming a path separator:
-  #   open dist/bee-experimental-exp/chequebook-chain-disabled-snapshot.x86_64.rpm
+  #   open dist/wasp-exp/chequebook-chain-disabled-snapshot.x86_64.rpm
   # The real fix is that experiment tags no longer contain a slash — see
   # docs/agent-playbooks/experiment-lifecycle.md. Naming, not configuration, is
   # what makes this safe.
@@ -169,11 +169,11 @@ nfpms:
 
     id: packages
 
-    package_name: bee-experimental
+    package_name: wasp
 
     vendor: crtahlin
 
-    homepage: https://github.com/crtahlin/bee-experimental
+    homepage: https://github.com/crtahlin/wasp
 
     maintainer: Crt Ahlin <crt.ahlin@gmail.com>
 
@@ -269,7 +269,7 @@ nfpms:
 # Re-adding them to this list without one restores the 26 minutes.
 dockers:
 - image_templates:
-  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64"
+  - "ghcr.io/crtahlin/wasp:{{ .Version }}-amd64"
   use: buildx
   ids:
     - linux
@@ -283,7 +283,7 @@ dockers:
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}"
 - image_templates:
-  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim"
+  - "ghcr.io/crtahlin/wasp:{{ .Version }}-amd64-slim"
   use: buildx
   ids:
     - linux-slim
@@ -297,35 +297,35 @@ dockers:
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}-slim"
 docker_manifests:
-- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}
+- name_template: ghcr.io/crtahlin/wasp:{{ .Major }}
   image_templates:
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
+  - ghcr.io/crtahlin/wasp:{{ .Version }}-amd64
   skip_push: auto
-- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}
+- name_template: ghcr.io/crtahlin/wasp:{{ .Major }}.{{ .Minor }}
   image_templates:
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
+  - ghcr.io/crtahlin/wasp:{{ .Version }}-amd64
   skip_push: auto
-- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}
+- name_template: ghcr.io/crtahlin/wasp:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}
   image_templates:
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
-- name_template: ghcr.io/crtahlin/bee-experimental:latest
+  - ghcr.io/crtahlin/wasp:{{ .Version }}-amd64
+- name_template: ghcr.io/crtahlin/wasp:latest
   image_templates:
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
+  - ghcr.io/crtahlin/wasp:{{ .Version }}-amd64
   # latest must never point at a prerelease (e.g. a -test build).
   skip_push: auto
-- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}-slim
+- name_template: ghcr.io/crtahlin/wasp:{{ .Major }}-slim
   image_templates:
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
+  - ghcr.io/crtahlin/wasp:{{ .Version }}-amd64-slim
   skip_push: auto
-- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}-slim
+- name_template: ghcr.io/crtahlin/wasp:{{ .Major }}.{{ .Minor }}-slim
   image_templates:
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
+  - ghcr.io/crtahlin/wasp:{{ .Version }}-amd64-slim
   skip_push: auto
-- name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}-slim
+- name_template: ghcr.io/crtahlin/wasp:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}-slim
   image_templates:
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
-- name_template: ghcr.io/crtahlin/bee-experimental:latest-slim
+  - ghcr.io/crtahlin/wasp:{{ .Version }}-amd64-slim
+- name_template: ghcr.io/crtahlin/wasp:latest-slim
   image_templates:
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
+  - ghcr.io/crtahlin/wasp:{{ .Version }}-amd64-slim
   # latest must never point at a prerelease (e.g. a -test build).
   skip_push: auto

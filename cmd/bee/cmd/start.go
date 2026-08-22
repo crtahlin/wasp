@@ -64,8 +64,8 @@ func (c *command) initStartCmd() (err error) {
 			// This is not upstream Bee. Say so at boot: an operator reading logs
 			// months from now must be able to tell what they are running, and
 			// which upstream release it derives from.
-			logger.Warning("this is bee-experimental, an unofficial experimental build of Bee; it is not affiliated with or supported by the Swarm Foundation, and carries changes not reviewed by the Bee maintainers")
-			logger.Info("bee-experimental version", "version", bee.Version, "upstream_base", bee.UpstreamBase)
+			logger.Warning("this is wasp, an unofficial experimental build of Bee; it is not affiliated with or supported by the Swarm Foundation, and carries changes not reviewed by the Bee maintainers")
+			logger.Info("wasp version", "version", bee.Version, "upstream_base", bee.UpstreamBase)
 
 			// ctx is global context of bee node; which is canceled after interrupt signal is received.
 			ctx, cancel := context.WithCancel(context.Background())

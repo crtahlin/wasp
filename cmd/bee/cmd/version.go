@@ -15,7 +15,7 @@ func (c *command) initVersionCmd() {
 		Use:   "version",
 		Short: "Print version number",
 		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Printf("%s (upstream bee %s)\n", bee.Version, bee.UpstreamBase)
+			cmd.Printf("wasp %s (upstream bee %s)\n", bee.Version, bee.UpstreamBase)
 		},
 	}
 	v.SetOut(c.root.OutOrStdout())
