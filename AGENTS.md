@@ -72,7 +72,28 @@ and normalise per unit of work. See `docs/agent-playbooks/test-bench.md`.
 
 An HTTP 200 from an API endpoint is never proof that a node is healthy.
 
-**8. Disclose AI assistance — in prose, not in commits.**
+**8. Tuning constants become configuration, not edits.**
+A hard-coded constant that measurably matters is exposed as a **config option
+with the current value as its default** — not changed in place. A node with 8
+cores and a slow disk wants different numbers from one with 32 cores and NVMe,
+and no single compiled-in value serves both.
+
+Order matters: **measure first, expose second.** A config option is permanent
+surface area — documented, kept working across every upstream sync, and an
+invitation to set it badly. Shipping a dial that turns out not to matter is
+worse than not shipping it. Each such setting gets its own issue, gated on the
+measurement that justifies it, with `db-block-cache-capacity` as the reference
+shape.
+
+Two things the option's documentation must state, not just its existence:
+what raising it costs, and what lowering it costs. For anything that consumes
+other nodes' resources — peer counts, connection limits, sync rates — say what
+it costs *them*, because that operator is not the one who pays.
+
+Not everything can be a runtime option. Anything determining on-disk layout is
+write-once at initialisation or needs a migration; say which in the issue.
+
+**9. Disclose AI assistance — in prose, not in commits.**
 Issues, pull request descriptions, and comments in this repository end with:
 
 ```
@@ -90,7 +111,7 @@ deleted, so anything landed there is effectively immovable. Note that
 `git cherry-pick` preserves trailers by default — when re-landing work from
 elsewhere, write the message explicitly rather than using `cherry-pick -x`.
 
-**9. Nothing sensitive in the repository.**
+**10. Nothing sensitive in the repository.**
 This repository is public. No node addresses, hostnames, SSH configuration,
 private keys, wallet addresses, or postage batch identifiers — in code, issues,
 specs, or results. Bench machines are referenced by role name (`bench-1`,
