@@ -255,6 +255,18 @@ nfpms:
 
     bindir: /usr/bin
 
+# Container images are amd64 only. The ARM images were built under QEMU
+# emulation on an x86 runner and dominated release time: in v0.1.0-test.1 the
+# four ARM image builds took 14m52s, 18m29s, 20m4s and 22m57s, against seconds
+# for amd64, making the whole release 26 minutes.
+#
+# ARM BINARIES AND PACKAGES ARE STILL BUILT AND PUBLISHED — see builds: above
+# and the deb/rpm in nfpms:. Those cross-compile in seconds because Go needs no
+# emulation, and they are what an ARM operator actually installs; light nodes on
+# ARM single-board machines are a real case. Only the container images change.
+#
+# If ARM images are wanted later, the fix is a native ARM runner, not QEMU.
+# Re-adding them to this list without one restores the 26 minutes.
 dockers:
 - image_templates:
   - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64"
@@ -265,35 +277,6 @@ dockers:
   dockerfile: Dockerfile.goreleaser
   build_flag_templates:
   - "--platform=linux/amd64"
-  - "--pull"
-  - "--label=org.opencontainers.image.created={{.Date}}"
-  - "--label=org.opencontainers.image.title={{.ProjectName}}"
-  - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-  - "--label=org.opencontainers.image.version={{.Version}}"
-- image_templates:
-  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7"
-  use: buildx
-  ids:
-    - linux
-  goarch: arm
-  goarm: 7
-  dockerfile: Dockerfile.goreleaser
-  build_flag_templates:
-  - "--platform=linux/arm/v7"
-  - "--pull"
-  - "--label=org.opencontainers.image.created={{.Date}}"
-  - "--label=org.opencontainers.image.title={{.ProjectName}}"
-  - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-  - "--label=org.opencontainers.image.version={{.Version}}"
-- image_templates:
-  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8"
-  use: buildx
-  ids:
-    - linux
-  goarch: arm64
-  dockerfile: Dockerfile.goreleaser
-  build_flag_templates:
-  - "--platform=linux/arm64/v8"
   - "--pull"
   - "--label=org.opencontainers.image.created={{.Date}}"
   - "--label=org.opencontainers.image.title={{.ProjectName}}"
@@ -313,81 +296,36 @@ dockers:
   - "--label=org.opencontainers.image.title={{.ProjectName}}"
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}-slim"
-- image_templates:
-  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim"
-  use: buildx
-  ids:
-    - linux-slim
-  goarch: arm
-  goarm: 7
-  dockerfile: Dockerfile.scratch
-  build_flag_templates:
-  - "--platform=linux/arm/v7"
-  - "--pull"
-  - "--label=org.opencontainers.image.created={{.Date}}"
-  - "--label=org.opencontainers.image.title={{.ProjectName}}"
-  - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-  - "--label=org.opencontainers.image.version={{.Version}}-slim"
-- image_templates:
-  - "ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim"
-  use: buildx
-  ids:
-    - linux-slim
-  goarch: arm64
-  dockerfile: Dockerfile.scratch
-  build_flag_templates:
-  - "--platform=linux/arm64/v8"
-  - "--pull"
-  - "--label=org.opencontainers.image.created={{.Date}}"
-  - "--label=org.opencontainers.image.title={{.ProjectName}}"
-  - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-  - "--label=org.opencontainers.image.version={{.Version}}-slim"
 docker_manifests:
 - name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
   skip_push: auto
 - name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
   skip_push: auto
 - name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
 - name_template: ghcr.io/crtahlin/bee-experimental:latest
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
   # latest must never point at a prerelease (e.g. a -test build).
   skip_push: auto
 - name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}-slim
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim
   skip_push: auto
 - name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}-slim
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim
   skip_push: auto
 - name_template: ghcr.io/crtahlin/bee-experimental:{{ .Major }}.{{ .Minor }}.{{ .Patch }}{{ with .Prerelease }}-{{ . }}{{ end }}-slim
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8
 - name_template: ghcr.io/crtahlin/bee-experimental:latest-slim
   image_templates:
   - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-amd64-slim
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-armv7-slim
-  - ghcr.io/crtahlin/bee-experimental:{{ .Version }}-arm64v8-slim
   # latest must never point at a prerelease (e.g. a -test build).
   skip_push: auto
