@@ -46,6 +46,7 @@ built yet.
 | Measurement | How the effect will be demonstrated; what a negative result would look like |
 | Rollout and rollback | How an operator turns it on, and how they get back to stock behaviour |
 | Upstream portability | What Ethersphere would need in order to adopt this. This is what makes the work reusable |
+| Configuration | If the change tunes a constant: the flag name, its default (the current value), and what raising **and lowering** it costs — including what it costs *other nodes*, where that applies. See rule 8 in `AGENTS.md` |
 
 `measurement.md` and `results.md` join it later — `measurement.md` when the
 method is fixed, `results.md` once the change has run on a real node.
