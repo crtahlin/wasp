@@ -16,7 +16,7 @@ PLATFORM ?= linux/amd64
 
 BEE_API_VERSION ?= "$(shell grep '^  version:' openapi/Swarm.yaml | awk '{print $$2}')"
 
-# --match 'v[0-9]*' so that exp/<slug> experiment marker tags can never be
+# --match 'v[0-9]*' so that exp-<slug> experiment marker tags can never be
 # mistaken for a release tag. See docs/agent-playbooks/experiment-lifecycle.md.
 VERSION ?= "$(shell git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | cut -c2- || true)"
 # Before the first release tag exists, git describe finds nothing. Fall back so

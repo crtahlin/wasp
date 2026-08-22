@@ -13,10 +13,16 @@ release:
 
 git:
   prerelease_suffix: "-"
-  # Experiment marker tags (docs/experiments/INDEX.md) name merge commits and
-  # must never be mistaken for a release tag. The Makefile guards this too, via
-  # git describe --match 'v[0-9]*'.
+  # Kept as defence in depth, but DO NOT RELY ON IT: ignore_tags did not filter
+  # in snapshot mode. With an exp/chequebook-chain-disabled tag present and this
+  # setting in place, goreleaser still derived the version from it and the build
+  # failed on the slash becoming a path separator:
+  #   open dist/bee-experimental-exp/chequebook-chain-disabled-snapshot.x86_64.rpm
+  # The real fix is that experiment tags no longer contain a slash — see
+  # docs/agent-playbooks/experiment-lifecycle.md. Naming, not configuration, is
+  # what makes this safe.
   ignore_tags:
+    - 'exp-*'
     - 'exp/*'
     # Upstream release tags live in a separate namespace (refs/tags/upstream/*,
     # see scripts/setup-upstream.sh). goreleaser reads git tags directly rather
