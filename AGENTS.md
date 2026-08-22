@@ -105,6 +105,11 @@ specs, or results. Bench machines are referenced by role name (`bench-1`,
   `Copyright <year> The bee-experimental Authors.` — do not claim Swarm
   authorship for new work. Files inherited from upstream keep their existing
   headers untouched.
+- **Wrap commit message bodies at 72 characters.** `commitlint.config.js` sets
+  `footer-max-line-length: 72`, and commitlint treats a trailing paragraph
+  containing an issue reference as a *footer* — so a normal-looking paragraph
+  that mentions `#123` fails CI at 73 characters while the same paragraph
+  without the reference passes. Wrapping everything at 72 avoids the trap.
 - `make vet` does not exist despite the upstream checklist below mentioning it.
   The real sequence is `make format`, `make build`, `make test`, `make lint`,
   plus `make protocol-freeze` whenever the change is anywhere near the wire.

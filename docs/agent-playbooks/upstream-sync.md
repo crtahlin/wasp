@@ -106,7 +106,7 @@ commit and re-apply the idea on top rather than hand-merging; a hand-merged
 interface change is how subtle behavioural drift enters.
 
 **Merged `exp/*` branches are frozen.** Their content is already in `main`. The
-branch pointer and the `exp/*` tag exist only to name the patch series. Do not
+branch pointer and the `exp-*` tag exist only to name the patch series. Do not
 keep rebasing them.
 
 ## Verifying a sync actually merged properly
