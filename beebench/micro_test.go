@@ -3,9 +3,11 @@ package beebench
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"runtime"
 	"testing"
 
 	"github.com/ethersphere/bee/v2/pkg/bmt"
+	"github.com/ethersphere/bee/v2/pkg/keccak"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
@@ -101,6 +103,47 @@ func BenchmarkItem_Unmarshal(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = dst.Unmarshal(buf)
+	}
+}
+
+// BenchmarkTransformedAddressCAC_SIMD measures the same work with bee's SIMD
+// BMT path opted in.
+//
+// This is the comparison issue #10 turns on. SIMD dispatch is compiled in only
+// for linux/amd64 (pkg/bmt/dispatch_simd.go), requires AVX2 or AVX-512, AND is
+// off by default behind the --use-simd-hashing flag. So a measurement taken on
+// macOS, or on a VM with a masked CPU, describes a code path many production
+// nodes may not run — and optimising it would be aimed at nothing.
+func BenchmarkTransformedAddressCAC_SIMD(b *testing.B) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		b.Skipf("SIMD BMT is linux/amd64 only; this is %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	if !keccak.HasSIMD() {
+		b.Skip("CPU exposes neither AVX2 nor AVX-512")
+	}
+	// Save and restore rather than forcing false, matching the pattern in
+	// pkg/bmt/bmt_test.go. SIMDOptIn is global mutable state, so hardcoding the
+	// restore value would clobber a caller that had legitimately enabled it.
+	prev := bmt.SIMDOptIn()
+	bmt.SetSIMDOptIn(true)
+	b.Cleanup(func() { bmt.SetSIMDOptIn(prev) })
+	b.Logf("SIMD enabled: batch width %d, avx512 %v", keccak.BatchWidth(), keccak.HasAVX512())
+
+	anchor := make([]byte, 32)
+	rand.Read(anchor)
+	data := make([]byte, chunkLen)
+	rand.Read(data)
+
+	hasher := bmt.NewPrefixHasher(anchor)
+	b.ReportAllocs()
+	b.SetBytes(int64(chunkLen))
+	for b.Loop() {
+		hasher.Reset()
+		hasher.SetHeader(data[:bmt.SpanSize])
+		if _, err := hasher.Write(data[bmt.SpanSize:]); err != nil {
+			b.Fatal(err)
+		}
+		_ = hasher.Sum(nil)
 	}
 }
 
