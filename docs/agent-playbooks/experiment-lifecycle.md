@@ -113,14 +113,14 @@ Then, on `main`:
 
 ```bash
 git switch main && git pull
-git tag -a "exp/<slug>" -m "<one line: what this experiment does>"
-git push origin "exp/<slug>"
+git tag -a "exp-<slug>" -m "<one line: what this experiment does>"
+git push origin "exp-<slug>"
 ```
 
-The `exp/*` tag is the durability backstop — it survives even if the branch
+The `exp-*` tag is the durability backstop — it survives even if the branch
 pointer is ever lost, and `scripts/export-patch.sh` resolves experiments through
 it. It can never be mistaken for a release tag: the Makefile matches `v[0-9]*`
-and `.goreleaser.yml` ignores `exp/*`.
+and experiment tags contain no slash.
 
 Finally, add the row to `docs/experiments/INDEX.md`.
 

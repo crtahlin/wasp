@@ -57,5 +57,5 @@ See AGENTS.md.
 Before merging:
   gh pr merge <n> --merge --subject "type(scope): what changed (#<n>)"
 The subject IS the changelog entry. Squash and rebase merging are disabled.
-Do not delete the branch. Tag the merge commit exp/<slug> and add the ledger row.
+Do not delete the branch. Tag the merge commit exp-<slug> and add the ledger row.
 -->
