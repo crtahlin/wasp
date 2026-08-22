@@ -59,6 +59,75 @@ bee version                    # fork line
 curl -s localhost:1633/health | jq -r .version
 ```
 
+## Triggering a reserve sample without stake
+
+An **unstaked node never samples.** The redistribution agent fails every round
+with `IsPlaying: ... execution reverted`, so the sampling phase never runs and
+`SampleStats` never appears. Staking is not a workaround: participation is a
+lottery, so you cannot choose when a sample happens, which makes it useless for
+measurement.
+
+`GET /rchash/{depth}/{anchor1}/{anchor2}` runs the sampler directly. Its own
+source comment says it exists for testing the sampler.
+
+**The anchor cannot be arbitrary, and this is the part that wastes an afternoon.**
+Phase 1 of the sampler filters:
+
+```go
+if swarm.Proximity(ch.Address.Bytes(), anchor) < committedDepth {
+    return false, nil   // skip
+}
+```
+
+Only chunks within `committedDepth` of the anchor are sampled. A random anchor
+addresses a neighbourhood this node does not store, so every chunk is skipped,
+`TotalIterated` comes back 0, and the request fails with
+
+```
+make proofs: reserve sample items should have 16 elements
+```
+
+which reads like a bug and is not one. **anchor1 must be the node's own overlay**
+(or something inside its neighbourhood); anchor2 can be random:
+
+```bash
+OVERLAY=$(curl -s localhost:1633/addresses | jq -r .overlay)
+DEPTH=$(curl -s localhost:1633/status  | jq -r .storageRadius)
+curl -s "localhost:1633/rchash/$DEPTH/$OVERLAY/$(openssl rand -hex 32)"
+```
+
+Takes 80-170 seconds on a full reserve. Read the result from the log, not the
+HTTP body:
+
+```bash
+journalctl -u bee --since '-30 min' | grep 'reserve sampler finished' | tail -1
+```
+
+One trap when reading the response: `jq '{hash, durationSeconds}'` prints `null`
+for **missing** keys, so an HTTP 500 error body looks identical to a successful
+but empty result. Always check the status code, or print the raw body.
+
+## Three runs minimum, or do not report a ratio
+
+**A single run of anything I/O-adjacent on a live node measures the node's mood.**
+
+Two sampling runs on this bench with **identical code and identical peer count**
+differed by **1.82x** on disk time per chunk — 225.83 µs against 123.94 µs. That
+noise floor swamps most effects worth measuring, and it has already produced one
+wrong published figure and one prematurely closed issue.
+
+Rules:
+
+- **At least three runs per condition.** Report the spread, never a lone number.
+- **Match node state across the comparison**: comparable peer count, a fixed
+  interval after restart, the same storage radius. Radius drifts as the reserve
+  fills and silently changes what is being compared.
+- **Normalise per chunk iterated.** `TotalIterated` varies between runs, so raw
+  `TaddrDuration` and `ChunkLoadDuration` totals are not comparable; the
+  per-chunk figures are.
+- A restarted node is not a settled node. Peer count recovering from 2 to 79
+  changed disk time per chunk by 2.6x on its own.
+
 ## Measuring an experiment
 
 The method, fixed in advance in the experiment's `measurement.md`:

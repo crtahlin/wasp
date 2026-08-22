@@ -59,11 +59,18 @@ whether a stock peer will talk to us. Changing it requires an explicit
 `docs/agent-playbooks/protocol-compatibility.md` before touching anything under
 `pkg/p2p/`, `pkg/swarm/`, or `pkg/config/`.
 
-**7. Claims are measured, not asserted.**
+**7. Claims are measured, not asserted — and once is not measured.**
 An optimization is not accepted because the code looks faster. It is accepted
 because a before-and-after run on the test bench says so, with the numbers
-recorded in the experiment's `measurement.md`. An HTTP 200 from an API endpoint
-is never proof that a node is healthy.
+recorded in the experiment's `measurement.md`.
+
+**At least three runs per condition, reported with the spread.** Two runs on
+this bench with identical code and identical peer count differed by 1.82x on
+disk time per chunk. A single run measures the node's mood, and has already
+produced one wrong published figure here. Match node state across a comparison
+and normalise per unit of work. See `docs/agent-playbooks/test-bench.md`.
+
+An HTTP 200 from an API endpoint is never proof that a node is healthy.
 
 **8. Disclose AI assistance — in prose, not in commits.**
 Issues, pull request descriptions, and comments in this repository end with:
