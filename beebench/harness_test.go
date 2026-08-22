@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/sharky"
-	"golang.org/x/sys/unix"
 )
 
 // Mirrors sharky's own test helper.
@@ -95,8 +94,8 @@ func openShards(tb testing.TB, dir string, nocache bool) []*os.File {
 			tb.Fatal(err)
 		}
 		if nocache {
-			if _, err := unix.FcntlInt(f.Fd(), unix.F_NOCACHE, 1); err != nil {
-				tb.Fatalf("F_NOCACHE: %v", err)
+			if err := dropCache(f); err != nil {
+				tb.Fatalf("drop cache: %v", err)
 			}
 		}
 		fs[s] = f
