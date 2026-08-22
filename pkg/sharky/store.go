@@ -90,12 +90,10 @@ func (s *Store) create(index uint8, maxDataSize int, basedir fs.FS) (*shard, err
 		return nil, err
 	}
 	sh := &shard{
-		reads:       make(chan read),
-		errc:        make(chan error),
 		writes:      s.writes,
 		index:       index,
 		maxDataSize: maxDataSize,
-		file:        file.(sharkyFile),
+		file:        safeForConcurrentReads(file.(sharkyFile)),
 		slots:       sl,
 		quit:        s.quit,
 	}
@@ -112,32 +110,41 @@ func (s *Store) create(index uint8, maxDataSize int, basedir fs.FS) (*shard, err
 
 // Read reads the content of the blob found at location into the byte buffer given
 // The location is assumed to be obtained by an earlier Write call storing the blob
+//
+// The read is performed directly on the calling goroutine rather than handed to
+// the shard's actor. shard.read only calls file.ReadAt, which compiles to pread:
+// it neither uses nor mutates the descriptor's shared offset, so it is safe for
+// concurrent use. The per-shard actor exists to serialise free-slot allocation
+// for WRITES, which still go through it.
+//
+// This removes the one-outstanding-operation-per-shard ceiling, and with it the
+// case where a read queues behind a write on the same shard.
+//
+// It also retires the deadlock hazard described in upstream issue #2932. That
+// deadlock arose because a read's result HAD to be drained from the shared errc
+// channel or the shard stalled, which forced the result select to ignore context
+// cancellation. With reads off the channel protocol entirely there is no result
+// to drain and nothing to stall, so the context is now respected throughout.
 func (s *Store) Read(ctx context.Context, loc Location, buf []byte) (err error) {
 	sh := s.shards[loc.Shard]
+
+	// Honour shutdown and cancellation before touching the file. s.wg is not
+	// held for reads: the file handles are closed only after the shard's actor
+	// has returned, and Close waits on that, so a read in flight cannot outlive
+	// its file.
 	select {
-	case sh.reads <- read{ctx: ctx, buf: buf[:loc.Length], slot: loc.Slot}:
-		s.metrics.TotalReadCalls.Inc()
-	case <-ctx.Done():
-		return ctx.Err()
 	case <-sh.quit:
 		return ErrQuitting
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
-	// it is important that this select would NEVER respect the context
-	// cancellation. this would result in a deadlock on the shard, since
-	// the result of the operation must be drained from errc, allowing the
-	// shard to be able to handle new operations (#2932).
-	select {
-	case err = <-sh.errc:
-		if err != nil {
-			s.metrics.TotalReadCallsErr.Inc()
-		}
-		return err
-	case <-s.quit:
-		// we need to make sure that the forever loop in shard.go can
-		// always return due to shutdown in case this goroutine goes away.
-		return ErrQuitting
+	s.metrics.TotalReadCalls.Inc()
+	if err = sh.read(read{ctx: ctx, buf: buf[:loc.Length], slot: loc.Slot}); err != nil {
+		s.metrics.TotalReadCallsErr.Inc()
 	}
+	return err
 }
 
 // Write stores a new blob and returns its location to be used as a reference
