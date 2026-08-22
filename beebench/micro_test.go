@@ -1,14 +1,13 @@
 package beebench
 
 import (
-	"runtime"
-
 	"crypto/rand"
 	"encoding/binary"
-	"github.com/ethersphere/bee/v2/pkg/keccak"
+	"runtime"
 	"testing"
 
 	"github.com/ethersphere/bee/v2/pkg/bmt"
+	"github.com/ethersphere/bee/v2/pkg/keccak"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
@@ -122,8 +121,12 @@ func BenchmarkTransformedAddressCAC_SIMD(b *testing.B) {
 	if !keccak.HasSIMD() {
 		b.Skip("CPU exposes neither AVX2 nor AVX-512")
 	}
+	// Save and restore rather than forcing false, matching the pattern in
+	// pkg/bmt/bmt_test.go. SIMDOptIn is global mutable state, so hardcoding the
+	// restore value would clobber a caller that had legitimately enabled it.
+	prev := bmt.SIMDOptIn()
 	bmt.SetSIMDOptIn(true)
-	b.Cleanup(func() { bmt.SetSIMDOptIn(false) })
+	b.Cleanup(func() { bmt.SetSIMDOptIn(prev) })
 	b.Logf("SIMD enabled: batch width %d, avx512 %v", keccak.BatchWidth(), keccak.HasAVX512())
 
 	anchor := make([]byte, 32)

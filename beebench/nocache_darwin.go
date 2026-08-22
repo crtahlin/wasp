@@ -14,6 +14,9 @@ import (
 
 // dropCache asks the kernel not to cache this file's pages.
 //
+// Nothing calls this today — every openShards call site passes nocache=false.
+// See nocache_linux.go for how the two platforms diverge if it is enabled.
+//
 // F_NOCACHE is darwin's nearest equivalent to O_DIRECT. Note that it is NOT
 // reliable for the unaligned reads this harness performs — the shard slot size
 // of 4201 bytes is not a multiple of the 4096-byte page size, so every chunk
