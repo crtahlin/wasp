@@ -1,4 +1,4 @@
-# bee-experimental
+# wasp
 
 An experimental downstream distribution of [Ethereum Swarm
 Bee](https://github.com/ethersphere/bee).
@@ -56,16 +56,16 @@ with upstream's package, so installing one replaces the other.
 
 ```bash
 # Debian / Ubuntu
-dpkg -i bee-experimental_<version>_amd64.deb
+dpkg -i wasp_<version>_amd64.deb
 
 # Docker
-docker run ghcr.io/crtahlin/bee-experimental:<version>
+docker run ghcr.io/crtahlin/wasp:<version>
 ```
 
 Existing upstream configuration and data directories are used unchanged, so
 rolling back means reinstalling upstream's package.
 
-Releases: <https://github.com/crtahlin/bee-experimental/releases>
+Releases: <https://github.com/crtahlin/wasp/releases>
 
 ## What is in it
 

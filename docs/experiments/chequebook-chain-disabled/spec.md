@@ -1,6 +1,6 @@
 # Consistent status codes when the chain is disabled
 
-Issue: [#33](https://github.com/crtahlin/bee-experimental/issues/33)
+Issue: [#33](https://github.com/crtahlin/wasp/issues/33)
 
 ## Problem
 

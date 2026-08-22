@@ -15,7 +15,7 @@ authoritative text.
 
 ## Not the reference client
 
-`bee-experimental` is a personal fork of
+`wasp` is a personal fork of
 [`ethersphere/bee`](https://github.com/ethersphere/bee). It is **not**
 affiliated with, endorsed by, supported by, or reviewed by the Swarm Foundation,
 the Ethersphere organisation, or any Bee contributor.

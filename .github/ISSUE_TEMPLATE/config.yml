@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/ethersphere/bee/issues
     about: For the reference Bee client itself. This fork does not send changes upstream automatically.
   - name: How this repository works
-    url: https://github.com/crtahlin/bee-experimental/blob/main/AGENTS.md
+    url: https://github.com/crtahlin/wasp/blob/main/AGENTS.md
     about: Fork rules, the experiment lifecycle, and the protocol-compatibility freeze.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configure the upstream remote for a fresh clone of bee-experimental.
+# Configure the upstream remote for a fresh clone of wasp.
 #
 # Two things matter here and neither is obvious:
 #

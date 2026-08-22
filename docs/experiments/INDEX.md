@@ -16,11 +16,11 @@ node — including when the answer is "no measurable effect" or "made it worse".
 A negative result that is recorded is worth more than one that is quietly
 abandoned, because it stops the next person repeating it.
 
-**Table — Experiments merged into bee-experimental `main`, with outcome**
+**Table — Experiments merged into wasp `main`, with outcome**
 
 | Issue | Slug | Type | Branch | Merge | Upstream base at merge | Status | Result |
 |---|---|---|---|---|---|---|---|
-| [#33](https://github.com/crtahlin/bee-experimental/issues/33) | [chequebook-chain-disabled](chequebook-chain-disabled/spec.md) | fix | `fix/33-chequebook-chain-disabled` | [`bac497c5`](https://github.com/crtahlin/bee-experimental/commit/bac497c5) | v2.8.1 | merged | 405 rather than 500 when the chain is disabled on the available-balance path. Not a performance change, so nothing to measure; the test fails against the unfixed handler. Offer upstream. |
+| [#33](https://github.com/crtahlin/wasp/issues/33) | [chequebook-chain-disabled](chequebook-chain-disabled/spec.md) | fix | `fix/33-chequebook-chain-disabled` | [`bac497c5`](https://github.com/crtahlin/wasp/commit/bac497c5) | v2.8.1 | merged | 405 rather than 500 when the chain is disabled on the available-balance path. Not a performance change, so nothing to measure; the test fails against the unfixed handler. Offer upstream. |
 
 Status values: `merged` (in `main`, not yet validated on a node), `validated`
 (measured on the bench, effect confirmed), `neutral` (no measurable effect,

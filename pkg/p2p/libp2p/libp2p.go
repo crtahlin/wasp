@@ -1555,8 +1555,19 @@ func appendSpace(s string) string {
 }
 
 // userAgent returns a User Agent string passed to the libp2p host to identify peer node.
+//
+// Wasp advertises the upstream Bee release FIRST so that peers, crawlers and
+// network dashboards parsing "bee/<semver>" keep working unchanged, then its own
+// identity so this node is unambiguously distinguishable from stock Bee. Anyone
+// reading a log or a peer list can tell at a glance that this is not upstream.
+//
+// This string is informational only: the handshake gates on ProtocolVersion and
+// NetworkID, never on the user agent, so extending it cannot affect
+// interoperability.
 func userAgent() string {
-	return fmt.Sprintf("bee/%s %s %s/%s", bee.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("bee/%s wasp/%s %s %s/%s",
+		strings.TrimPrefix(bee.UpstreamBase, "v"), bee.Version,
+		runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func newConnMetricNotify(m metrics) *connectionNotifier {

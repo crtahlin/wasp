@@ -11,7 +11,7 @@ fresh for this project.
 
 Two machines cover the whole backlog. One is enough to start.
 
-**Table — Bench machines for bee-experimental, minimum viable through full coverage**
+**Table — Bench machines for wasp, minimum viable through full coverage**
 
 | Role | vCPU | RAM | Disk | Network | Purpose |
 |---|---|---|---|---|---|

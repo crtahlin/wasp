@@ -51,14 +51,14 @@ linters:
       - linters:
           - goheader
         text: go-ethereum Authors
-      # Files authored for this fork carry "The bee-experimental Authors" rather
+      # Files authored for this fork carry "The Wasp Authors" rather
       # than "The Swarm Authors" — new work must not claim Swarm authorship.
       # Excluded the same way upstream excludes the inherited go-ethereum files,
       # which keeps the goheader template itself byte-identical to upstream and
       # therefore free of merge conflicts on every sync. See NOTICE-FORK.md.
       - linters:
           - goheader
-        text: bee-experimental Authors
+        text: Wasp Authors
       - linters:
           - goconst
         path: _test\.go

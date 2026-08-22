@@ -1,6 +1,6 @@
 # Fork notice
 
-`bee-experimental` is a derivative work of
+`wasp` is a derivative work of
 [`ethersphere/bee`](https://github.com/ethersphere/bee), the reference Go
 implementation of an Ethereum Swarm node.
 
@@ -21,7 +21,7 @@ that way.
 
 Files inherited from upstream retain their original
 `Copyright <year> The Swarm Authors` headers unchanged. Files authored for this
-fork carry `Copyright <year> The bee-experimental Authors`. Both are accepted by
+fork carry `Copyright <year> The Wasp Authors`. Both are accepted by
 the `goheader` linter, configured in [`.golangci.yml`](.golangci.yml).
 
 ## What has been changed
@@ -55,5 +55,5 @@ when the fork was created:
 Bee is developed by the Swarm community at
 <https://github.com/ethersphere/bee>. Problems with **that** software belong
 there. Problems with **this** software belong at
-<https://github.com/crtahlin/bee-experimental/issues> and must not be reported
+<https://github.com/crtahlin/wasp/issues> and must not be reported
 to upstream as Bee bugs.

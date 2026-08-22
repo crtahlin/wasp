@@ -1,4 +1,4 @@
-# Changelog configuration for bee-experimental.
+# Changelog configuration for wasp.
 #
 # WHY NOT release-please: it fetches history through GitHub's GraphQL
 # Commit.history, which has no first-parent option, and stops only at the
@@ -27,7 +27,7 @@ single `chore(upstream)` entries — see `.upstream-base` for the release this
 build derives from, and upstream's release notes for what it contains.\n
 """
 body = """
-{% set repo = "https://github.com/crtahlin/bee-experimental" -%}
+{% set repo = "https://github.com/crtahlin/wasp" -%}
 {% if version -%}
 ## [{{ version | trim_start_matches(pat="v") }}]({{ repo }}/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
 {% else -%}
@@ -57,7 +57,7 @@ tag_pattern = "^v[0-9]"
 # NOTE: `replace` is a plain regex replacement — Tera variables from the
 # [changelog] section do not interpolate here, so the URL is spelled out.
 commit_preprocessors = [
-  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/crtahlin/bee-experimental/pull/${1}))" },
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/crtahlin/wasp/pull/${1}))" },
 ]
 
 # ORDER IS LOAD-BEARING: git-cliff applies the first matching parser.

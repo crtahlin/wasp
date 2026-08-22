@@ -16,7 +16,7 @@ where they apply. Verify they actually stuck — `--label` on `gh issue create`
 silently drops labels that do not exist yet:
 
 ```bash
-gh issue view <n> --repo crtahlin/bee-experimental --json labels
+gh issue view <n> --repo crtahlin/wasp --json labels
 ```
 
 The body must let a reader decide without redoing the investigation: the
@@ -82,7 +82,7 @@ upstream half of `AGENTS.md`, plus `CODING.md` and `CODINGSTYLE.md`.
 New fork-authored files take the fork copyright header:
 
 ```go
-// Copyright 2026 The bee-experimental Authors. All rights reserved.
+// Copyright 2026 The Wasp Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 ```
@@ -92,7 +92,7 @@ Files inherited from upstream keep their existing headers. Do not relabel them.
 ## 5. Pull request
 
 ```bash
-gh pr create --repo crtahlin/bee-experimental --base main \
+gh pr create --repo crtahlin/wasp --base main \
   --title "feat(scope): what changed" --body-file <file>
 ```
 
