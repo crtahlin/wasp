@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
+	"sync"
 )
 
 // LocationSize is the size of the byte representation of Location
@@ -87,10 +89,61 @@ type read struct {
 	slot uint32 // slot to read from
 }
 
+// serialisedFile wraps a sharkyFile whose ReadAt is NOT safe to call
+// concurrently, restoring one-at-a-time access.
+//
+// Store.Read calls shard.read directly from the caller's goroutine, which
+// assumes ReadAt has pread semantics: no shared offset, safe concurrently.
+// *os.File satisfies that. afero's in-memory file does NOT — its ReadAt is
+// implemented on top of a stateful Read and mutates a shared offset with
+// atomic.StoreInt64, so concurrent reads race. That implementation reaches
+// sharky through memFS in pkg/storer, which is a real mode and not test-only.
+//
+// Wrapping it here keeps the requirement in one place instead of pushing it
+// onto every sharkyFile implementation, and leaves the disk-backed hot path
+// completely unwrapped.
+type serialisedFile struct {
+	mu sync.Mutex
+	sharkyFile
+}
+
+func (f *serialisedFile) ReadAt(p []byte, off int64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sharkyFile.ReadAt(p, off)
+}
+
+func (f *serialisedFile) WriteAt(p []byte, off int64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sharkyFile.WriteAt(p, off)
+}
+
+// safeForConcurrentReads reports whether f's ReadAt may be called concurrently.
+// Only *os.File is assumed safe; anything else is wrapped. Conservative on
+// purpose — a wrong answer here corrupts chunk data silently.
+func safeForConcurrentReads(f sharkyFile) sharkyFile {
+	if _, ok := f.(*os.File); ok {
+		return f
+	}
+	return &serialisedFile{sharkyFile: f}
+}
+
 // shard models a shard writing to a file with periodic offsets due to fixed maxDataSize
 type shard struct {
-	reads       chan read     // channel for reads
-	errc        chan error    // result for reads
+	// rw orders reads against writes for THIS shard.
+	//
+	// pread is safe for concurrent readers, but that was never the only thing
+	// the shard actor provided: by handling reads and writes in one select loop
+	// it also guaranteed a read never observed a slot mid-write. Bypassing the
+	// actor for reads without replacing that guarantee let readers see torn
+	// data, which surfaced as "recovery: invalid chunk hash, marking corrupted"
+	// on a real node.
+	//
+	// RWMutex keeps the win — readers do not exclude each other — while
+	// restoring the ordering. Writes are already serialised by the actor, so the
+	// exclusive lock is uncontended between writers.
+	rw          sync.RWMutex
 	writes      chan write    // channel for writes
 	index       uint8         // index of the shard
 	maxDataSize int           // max size of blobs
@@ -113,28 +166,16 @@ func (sh *shard) process() {
 	}()
 	free := sh.slots.out
 
+	// Reads are NOT handled here. Store.Read calls sh.read directly from the
+	// calling goroutine, because file.ReadAt is pread and safe for concurrent
+	// use. This loop exists solely to serialise free-slot allocation for writes.
+	//
+	// Removing reads from the channel protocol is what retires the deadlock in
+	// upstream issue #2932: there is no longer a per-shard result that must be
+	// drained before the shard can accept new work.
 	for {
 		select {
-		case op := <-sh.reads:
-			select {
-			case sh.errc <- sh.read(op):
-			case <-op.ctx.Done():
-				// since the goroutine in the Read method can quit
-				// on shutdown, we need to make sure that we can actually
-				// write to the channel, since a shutdown is possible in
-				// theory between after the point that the context is cancelled
-				select {
-				case sh.errc <- op.ctx.Err():
-				case <-sh.quit:
-					// since the Read method respects the quit channel
-					// we can safely quit here without writing to the channel
-					return
-				}
-			case <-sh.quit:
-				return
-			}
-
-			// only enabled if there is a free slot previously popped
+		// only enabled if there is a free slot previously popped
 		case op := <-writes:
 			op.res <- sh.write(op.buf, slot)
 			free = sh.slots.out // re-enable popping a free slot next time we can write
@@ -174,6 +215,9 @@ func (sh *shard) offset(slot uint32) int64 {
 
 // read reads loc.Length bytes to the buffer from the blob slot loc.Slot
 func (sh *shard) read(r read) error {
+	sh.rw.RLock()
+	defer sh.rw.RUnlock()
+
 	n, err := sh.file.ReadAt(r.buf, sh.offset(r.slot))
 	if err != nil {
 		return fmt.Errorf("read %d: %w", n, err)
@@ -183,6 +227,9 @@ func (sh *shard) read(r read) error {
 
 // write writes loc.Length bytes to the buffer from the blob slot loc.Slot
 func (sh *shard) write(buf []byte, slot uint32) entry {
+	sh.rw.Lock()
+	defer sh.rw.Unlock()
+
 	n, err := sh.file.WriteAt(buf, sh.offset(slot))
 	return entry{
 		loc: Location{
