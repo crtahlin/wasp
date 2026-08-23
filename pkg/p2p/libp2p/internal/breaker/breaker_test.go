@@ -202,3 +202,48 @@ func TestBackoffResetsAfterSuccess(t *testing.T) {
 			got, want, got.Sub(tripAt))
 	}
 }
+
+// TestExecuteForceRunsWhenClosed checks that ExecuteForce ignores the closed
+// state and that its outcome still updates the breaker.
+//
+// This is the escape hatch that stops the breaker isolating a node
+// permanently: kademlia's zero-peer recovery dials the bootnodes through the
+// same breaker, so if a trip could refuse those calls, nothing could ever
+// succeed and nothing would reset the breaker. See issue #74.
+func TestExecuteForceRunsWhenClosed(t *testing.T) {
+	t.Parallel()
+
+	const startBackoff = 1 * time.Minute
+
+	now := time.Now()
+	b := breaker.NewBreakerWithCurrentTimeFn(breaker.Options{
+		Limit:        1,
+		StartBackoff: startBackoff,
+		MaxBackoff:   time.Hour,
+		FailInterval: time.Hour,
+	}, func() time.Time { return now })
+
+	errFail := errors.New("failed")
+
+	// Trip it, then confirm a normal call is refused.
+	if err := b.Execute(func() error { return errFail }); !errors.Is(err, errFail) {
+		t.Fatalf("trip: got %v, want %v", err, errFail)
+	}
+	if err := b.Execute(func() error { t.Error("f must not run while closed"); return nil }); !errors.Is(err, breaker.ErrClosed) {
+		t.Fatalf("while closed: got %v, want %v", err, breaker.ErrClosed)
+	}
+
+	// A forced call runs anyway.
+	ran := false
+	if err := b.ExecuteForce(func() error { ran = true; return nil }); err != nil {
+		t.Fatalf("forced call: got %v, want nil", err)
+	}
+	if !ran {
+		t.Fatal("forced call did not run f")
+	}
+
+	// And because it succeeded, the breaker is open again for normal calls.
+	if err := b.Execute(func() error { return nil }); err != nil {
+		t.Fatalf("after a successful forced call the breaker should be open, got %v", err)
+	}
+}
