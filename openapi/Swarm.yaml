@@ -1,9 +1,9 @@
 openapi: 3.0.3
 
 info:
-  version: 8.1.0
-  title: Bee API
-  description: "API endpoints for interacting with the Swarm network, supporting file operations, messaging, and node management"
+  version: 8.2.0
+  title: Wasp API
+  description: "API endpoints for interacting with the Swarm network, supporting file operations, messaging, and node management. Wasp is an unofficial experimental distribution of Bee; it is wire-compatible with stock Bee but its HTTP API may diverge where a defect is fixed. Divergences are listed under each affected endpoint."
 
 externalDocs:
   description: Browse the documentation at the Swarm Docs
@@ -1203,6 +1203,21 @@ paths:
   "/readiness":
     get:
       summary: Check if the node is ready to accept traffic
+      description: >-
+        A node is ready when startup and warmup have completed **and** it has at
+        least one connected peer.
+
+
+        Wasp divergence from stock Bee: stock reports `ready` based on the
+        startup probe alone, which is never lowered when connectivity is lost
+        afterwards. A node that loses all its peers therefore keeps reporting
+        `ready` while it can neither serve nor retrieve anything. Wasp requires
+        a connected peer, so an isolated node is visible to any operator or
+        orchestrator polling this endpoint.
+
+
+        Callers that want liveness rather than readiness should use `/health`,
+        which is unchanged and reports whether the process is running.
       tags:
         - Status
       responses:
@@ -1210,7 +1225,7 @@ paths:
           description: Indicates that node is ready
           $ref: "SwarmCommon.yaml#/components/responses/200"
         "400":
-          description: Indicates that node is not ready
+          description: Indicates that node is not ready, including when it has no connected peers
           $ref: "SwarmCommon.yaml#/components/responses/400"
         default:
           description: Default response
