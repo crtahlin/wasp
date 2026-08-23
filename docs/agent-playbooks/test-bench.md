@@ -273,11 +273,15 @@ A harness that cannot produce a failure is not measuring anything. Before trusti
 one, ask what it would print if the node died right now — and if the honest answer is
 "the same thing it prints now", fix it before starting the run.
 
-## Do not enable SIMD hashing on a bench node
+## SIMD hashing is refused, and why
 
-`use-simd-hashing` is currently suspected of corrupting memory under sustained load.
-See issue #77. Upstream ships the flag defaulted off, wasp keeps that default, and the
-node now logs a warning if it is overridden.
+`use-simd-hashing` no longer starts the node. It returns an error. See issues #77 and
+#92.
+
+This is not caution. An A/B/A on the bench node measured a crash in ~12 minutes with it
+enabled, 117 minutes clean with it disabled, and the crash returning ~12 minutes after
+re-enabling. The cause is the hand-written assembly stub in `pkg/keccak`, which runs
+foreign machine code on a goroutine stack and passes Go pointers into it.
 
 The reason this needs saying explicitly, rather than being left to the issue, is that
 the failure does not look like a hashing bug. The process dies in the allocator, in

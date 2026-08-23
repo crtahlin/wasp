@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -24,11 +23,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethersphere/bee/v2"
 	"github.com/ethersphere/bee/v2/pkg/accesscontrol"
-	"github.com/ethersphere/bee/v2/pkg/bmt"
-	"github.com/ethersphere/bee/v2/pkg/bmtpool"
 	chaincfg "github.com/ethersphere/bee/v2/pkg/config"
 	"github.com/ethersphere/bee/v2/pkg/crypto"
-	"github.com/ethersphere/bee/v2/pkg/keccak"
 	"github.com/ethersphere/bee/v2/pkg/keystore"
 	filekeystore "github.com/ethersphere/bee/v2/pkg/keystore/file"
 	memkeystore "github.com/ethersphere/bee/v2/pkg/keystore/mem"
@@ -48,6 +44,40 @@ const (
 //go:embed bee-welcome-message.txt
 var beeWelcomeMessage string
 
+// errSIMDRefused is returned when use-simd-hashing is set.
+//
+// The SIMD hashing binding corrupts memory. Established by an A/B/A on a
+// mainnet bench node: crash in ~12 minutes with it enabled, 117 minutes clean
+// with it disabled, and the crash returning ~12 minutes after re-enabling. The
+// cause is the hand-written assembly stub in pkg/keccak, which executes foreign
+// machine code on a goroutine stack and passes Go pointers into it. See #92.
+//
+// The damage lands on whatever occupies the stack, so the node dies somewhere
+// unrelated — in the allocator, in LevelDB's cache, in a channel's type flags,
+// in a mutex-guarded map. Nine distinct runtime assertions across seven
+// subsystems were observed. An operator has essentially no chance of tracing
+// any of them back to this flag.
+//
+// A warning is not proportionate to a defect that reliably destroys the process
+// and can corrupt data on the way down, so the node refuses to start instead.
+// Refused on every platform, not only where the SIMD path compiles, so the
+// answer does not depend on where you happen to be running.
+//
+// Remove this when the binding is fixed and re-soaked. A cgo binding measured
+// clean for 64 minutes under the same load, so the path forward is known.
+var errSIMDRefused = errors.New(
+	"use-simd-hashing is refused: this build's SIMD hashing binding corrupts memory and " +
+		"crashes the node within minutes under load (see issue #92). It is disabled " +
+		"deliberately, not by oversight. Remove use-simd-hashing from your configuration " +
+		"to start the node.")
+
+func (c *command) checkSIMDRefused() error {
+	if c.config.GetBool(optionUseSIMD) {
+		return errSIMDRefused
+	}
+	return nil
+}
+
 func (c *command) initStartCmd() (err error) {
 	cmd := &cobra.Command{
 		Use:               "start",
@@ -56,6 +86,12 @@ func (c *command) initStartCmd() (err error) {
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			if len(args) > 0 {
 				return cmd.Help()
+			}
+
+			// Checked before anything else: an operator who set this flag should
+			// be told immediately, not after a banner and a partial startup.
+			if err := c.checkSIMDRefused(); err != nil {
+				return err
 			}
 
 			logger := c.logger
@@ -273,29 +309,6 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 	var neighborhoodSuggester string
 	if networkID == chaincfg.Mainnet.NetworkID {
 		neighborhoodSuggester = c.config.GetString(optionNameNeighborhoodSuggester)
-	}
-
-	useSIMD := c.config.GetBool(optionUseSIMD)
-	if useSIMD {
-		if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-			return nil, fmt.Errorf("SIMD hashing requires linux/amd64 (this build is %s/%s)", runtime.GOOS, runtime.GOARCH)
-		}
-		if !keccak.HasSIMD() {
-			return nil, errors.New("SIMD hashing requires a CPU with AVX2 or AVX-512; this CPU has neither")
-		}
-		bmt.SetSIMDOptIn(true)
-		// Rebuild the global bmtpool instance so the new SIMDOptIn value
-		// is reflected in the pool created for hot-path BMT hashing.
-		bmtpool.Rebuild()
-		// Warning rather than Info, and deliberately loud: the SIMD hasher has
-		// appeared in segfault stacks on a wasp bench node under sustained load
-		// (see issue #77), and the resulting memory corruption surfaces far from
-		// the hasher itself — in the allocator, in LevelDB, in unrelated maps —
-		// so an operator hitting it has very little chance of tracing it back
-		// here. Upstream ships this flag defaulted off; wasp keeps that default
-		// and warns anyone who overrides it.
-		logger.Warning("SIMD hashing enabled: this is EXPERIMENTAL and is currently suspected of causing memory corruption under sustained load; do not enable it on a node you care about",
-			"batch_width", keccak.BatchWidth(), "avx512", keccak.HasAVX512())
 	}
 
 	var bzzTokenAddress common.Address
