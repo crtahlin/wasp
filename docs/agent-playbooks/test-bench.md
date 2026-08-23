@@ -272,3 +272,18 @@ ticks, abort the run with a distinct status rather than continuing to report tic
 A harness that cannot produce a failure is not measuring anything. Before trusting
 one, ask what it would print if the node died right now — and if the honest answer is
 "the same thing it prints now", fix it before starting the run.
+
+## Do not enable SIMD hashing on a bench node
+
+`use-simd-hashing` is currently suspected of corrupting memory under sustained load.
+See issue #77. Upstream ships the flag defaulted off, wasp keeps that default, and the
+node now logs a warning if it is overridden.
+
+The reason this needs saying explicitly, rather than being left to the issue, is that
+the failure does not look like a hashing bug. The process dies in the allocator, in
+LevelDB's block cache, in an unrelated mutex-guarded map — a different victim each
+time, none of them near the hasher. Anyone debugging one of those crashes in isolation
+will spend a long time in the wrong subsystem, which is precisely what happened here.
+
+If you enable it deliberately to measure it, treat every other result from that node as
+suspect for the duration, and say in the write-up that SIMD was on.

@@ -287,7 +287,15 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		// Rebuild the global bmtpool instance so the new SIMDOptIn value
 		// is reflected in the pool created for hot-path BMT hashing.
 		bmtpool.Rebuild()
-		logger.Info("SIMD hashing enabled", "batch_width", keccak.BatchWidth(), "avx512", keccak.HasAVX512())
+		// Warning rather than Info, and deliberately loud: the SIMD hasher has
+		// appeared in segfault stacks on a wasp bench node under sustained load
+		// (see issue #77), and the resulting memory corruption surfaces far from
+		// the hasher itself — in the allocator, in LevelDB, in unrelated maps —
+		// so an operator hitting it has very little chance of tracing it back
+		// here. Upstream ships this flag defaulted off; wasp keeps that default
+		// and warns anyone who overrides it.
+		logger.Warning("SIMD hashing enabled: this is EXPERIMENTAL and is currently suspected of causing memory corruption under sustained load; do not enable it on a node you care about",
+			"batch_width", keccak.BatchWidth(), "avx512", keccak.HasAVX512())
 	}
 
 	var bzzTokenAddress common.Address
