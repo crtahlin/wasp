@@ -67,10 +67,8 @@ func TestPssWebsocketSingleHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p.TryUnwrap(tc)
-
 	go expectMessage(t, cl, respC, payload)
-	if err := <-respC; err != nil {
+	if err := publishUntilReceived(t, func() { p.TryUnwrap(tc) }, respC); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -309,6 +307,38 @@ func TestPssPingPong(t *testing.T) {
 	if err := <-respC; err == nil || !strings.Contains(err.Error(), "i/o timeout") {
 		// note: error has *websocket.netError type so we need to check error by checking message
 		t.Fatal("want timeout error")
+	}
+}
+
+// publishUntilReceived repeatedly invokes publish until the reader goroutine
+// reports on respC, or the deadline expires.
+//
+// The websocket subscription is registered asynchronously by the server's
+// handler, after the client's dial has already returned. Both gsoc and pss drop
+// a message published before that registration completes and report nothing —
+// see gsoc listener.Handle, which returns early with "no handler". A single
+// publish racing the dial is therefore lost silently, the reader blocks until
+// its connection read deadline, and the test fails with a bare "i/o timeout"
+// that looks like a network problem rather than a lost message.
+//
+// Republishing is safe here: the reader returns on the first message it sees,
+// and any later duplicate is discarded with the connection at test end.
+func publishUntilReceived(t *testing.T, publish func(), respC chan error) error {
+	t.Helper()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(longTimeout)
+
+	for {
+		publish()
+		select {
+		case err := <-respC:
+			return err
+		case <-ticker.C:
+		case <-deadline:
+			return errors.New("timed out waiting for the message to be delivered")
+		}
 	}
 }
 
