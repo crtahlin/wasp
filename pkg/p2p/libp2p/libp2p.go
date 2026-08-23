@@ -1074,7 +1074,25 @@ func (s *Service) Connect(ctx context.Context, addrs []ma.Multiaddr) (address *b
 		}
 
 		connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		err = s.connectionBreaker.Execute(func() error { return s.host.Connect(connectCtx, *info) })
+		dial := func() error { return s.host.Connect(connectCtx, *info) }
+		if s.peers.count() == 0 {
+			// The breaker exists to stop us hammering a network that is not
+			// answering. But a node with no connections at all is already
+			// useless, and kademlia's recovery path — falling back to the
+			// bootnodes when it sees zero peers — dials through here too. So
+			// letting the breaker refuse these calls disables the only
+			// mechanism that could restore connectivity, and because nothing
+			// can then succeed, nothing resets the breaker either. The node
+			// stays isolated until it is restarted.
+			//
+			// Force the dial instead. The outcome is still recorded, so a
+			// success clears the failure counters and the escalated backoff.
+			// There is no dial-storm risk here: with no peers there is nothing
+			// else competing, and the bootnode list is short. See issue #74.
+			err = s.connectionBreaker.ExecuteForce(dial)
+		} else {
+			err = s.connectionBreaker.Execute(dial)
+		}
 		cancel()
 
 		if err != nil {

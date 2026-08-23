@@ -114,6 +114,14 @@ func (r *peerRegistry) removeStream(peerID libp2ppeer.ID, stream network.Stream)
 	delete(r.streams[peerID], stream)
 }
 
+// count returns the number of connected peers. Cheap by design: peers()
+// allocates and sorts, which is too heavy for the dial hot path.
+func (r *peerRegistry) count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.overlays)
+}
+
 func (r *peerRegistry) peers() []p2p.Peer {
 	r.mu.RLock()
 	peers := make([]p2p.Peer, 0, len(r.overlays))

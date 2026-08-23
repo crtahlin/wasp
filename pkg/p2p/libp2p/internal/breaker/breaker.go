@@ -31,6 +31,15 @@ type Interface interface {
 	// Returns `ErrClosed` if the limit is reached or f() result otherwise.
 	Execute(f func() error) error
 
+	// ExecuteForce runs f() unconditionally, ignoring the closed state, and
+	// records the outcome exactly as Execute does.
+	//
+	// It exists for callers where refusing to act is worse than acting too
+	// often. Recording the outcome matters: a forced call that succeeds clears
+	// the failure counters and the escalated backoff, so the breaker recovers
+	// instead of staying tripped on stale evidence.
+	ExecuteForce(f func() error) error
+
 	// ClosedUntil returns the timestamp when the breaker will become open again.
 	ClosedUntil() time.Time
 }
@@ -89,6 +98,12 @@ func newBreakerWithCurrentTimeFn(o Options, currentTimeFn currentTimeFn) Interfa
 	}
 
 	return breaker
+}
+
+func (b *breaker) ExecuteForce(f func() error) error {
+	// deliberately skips beforef: the caller has decided that not calling is
+	// worse than calling. afterf still runs, so state tracks reality.
+	return b.afterf(f())
 }
 
 func (b *breaker) Execute(f func() error) error {
