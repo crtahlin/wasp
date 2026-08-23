@@ -1,4 +1,19 @@
 GO ?= go
+
+# Green Tea is the Go 1.26 default garbage collector. It crashes this workload.
+#
+# Under high allocation rate a node built with it dies inside the runtime, in
+# several shapes: "s.allocCount != s.nelems" from the allocator, and index-out-of
+# -range inside runtime/mgcmark_greenteagc.go from the mark worker. Measured on a
+# mainnet node: with Green Tea, repeated crashes within 60s of start; with it
+# disabled, the identical binary ran full reserve samples cleanly.
+#
+# bee itself contains no unsafe memory management, so application code cannot
+# corrupt allocator span accounting. See issue #67.
+#
+# Remove this when a Go release fixes it, and re-measure before believing it.
+GOEXPERIMENT ?= nogreenteagc
+export GOEXPERIMENT
 GOBIN ?= $$($(GO) env GOPATH)/bin
 GOLANGCI_LINT ?= $(GOBIN)/golangci-lint
 GOLANGCI_LINT_VERSION ?= v2.11.3

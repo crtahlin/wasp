@@ -59,6 +59,12 @@ jobs:
         # The linux-slim build has a post hook that runs upx. Upstream never
         # installs it; assuming it is on the runner is how that build breaks.
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
+      - name: Disable the Green Tea GC
+        # Go 1.26's default GC crashes this workload under high allocation rate.
+        # goreleaser invokes the Go toolchain directly rather than through the
+        # Makefile, so the setting has to be exported here too. See issue #67.
+        run: echo "GOEXPERIMENT=nogreenteagc" >> $GITHUB_ENV
+
       - name: Set build-time versions
         run: |
           echo "BEE_API_VERSION=$(grep '^  version:' openapi/Swarm.yaml | awk '{print $2}')" >> $GITHUB_ENV
