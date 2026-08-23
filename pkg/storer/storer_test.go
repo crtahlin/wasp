@@ -195,6 +195,13 @@ func dbTestOps(baseAddr swarm.Address, reserveCapacity int, bs postage.Storer, r
 	opts.Batchstore = bs
 	opts.ReserveWakeUpDuration = reserveWakeUpTime
 	opts.StartupStabilizer = stabilmock.NewSubscriber(true)
+	// The production default of 3s is a fine budget for a real node but is too
+	// tight for a contended CI runner doing real on-disk work — it made
+	// TestDebugInfo/disk fail intermittently on Windows with "storer closed
+	// with bg goroutines running", which reads like a leak but was only
+	// slowness. A generous budget still surfaces a genuine leak; it just does
+	// not manufacture one out of a slow machine.
+	opts.ShutdownTimeout = 60 * time.Second
 
 	return opts
 }

@@ -242,6 +242,11 @@ const loggerName = "storer"
 
 // Default options for levelDB.
 const (
+	// defaultShutdownTimeout bounds how long Close waits for background
+	// workers. Three seconds is the historical value; see Options.ShutdownTimeout
+	// for why it is now overridable.
+	defaultShutdownTimeout = 3 * time.Second
+
 	defaultOpenFilesLimit         = uint64(256)
 	defaultBlockCacheCapacity     = uint64(32 * 1024 * 1024)
 	defaultWriteBufferSize        = uint64(32 * 1024 * 1024)
@@ -397,6 +402,16 @@ type Options struct {
 	CacheMinEvictCount uint64
 
 	MinimumStorageRadius uint
+
+	// ShutdownTimeout bounds how long Close waits for background cache and
+	// reserve workers to finish before giving up and reporting an error.
+	// Zero means defaultShutdownTimeout.
+	//
+	// It is configurable because the right value depends on how much work is
+	// in flight: a node with a large reserve, or one on slow storage, can
+	// legitimately need longer than a small one, and reporting a shutdown
+	// error in that case is a false alarm rather than a leak.
+	ShutdownTimeout time.Duration
 }
 
 func defaultOptions() *Options {
@@ -409,6 +424,7 @@ func defaultOptions() *Options {
 		Logger:                    log.Noop,
 		ReserveCapacity:           DefaultReserveCapacity,
 		ReserveWakeUpDuration:     time.Minute * 30,
+		ShutdownTimeout:           defaultShutdownTimeout,
 	}
 }
 
@@ -448,6 +464,7 @@ type DB struct {
 	setSyncerOnce    sync.Once
 	syncer           Syncer
 	reserveOptions   reserveOpts
+	shutdownTimeout  time.Duration
 
 	pinIntegrity *PinIntegrity
 }
@@ -526,11 +543,17 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 
 	clCtx, clCancel := context.WithCancel(ctx)
 	db := &DB{
-		metrics:    metrics,
-		storage:    st,
-		logger:     logger,
-		tracer:     opts.Tracer,
-		baseAddr:   opts.Address,
+		metrics:  metrics,
+		storage:  st,
+		logger:   logger,
+		tracer:   opts.Tracer,
+		baseAddr: opts.Address,
+		shutdownTimeout: func() time.Duration {
+			if opts.ShutdownTimeout > 0 {
+				return opts.ShutdownTimeout
+			}
+			return defaultShutdownTimeout
+		}(),
 		multex:     lock,
 		cacheObj:   cacheObj,
 		retrieval:  noopRetrieval{},
@@ -665,10 +688,15 @@ func (db *DB) Close() error {
 		<-bgReserveWorkersClosed
 	}()
 
+	shutdownTimeout := db.shutdownTimeout
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = defaultShutdownTimeout
+	}
+
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
-		return errors.New("storer closed with bg goroutines running")
+	case <-time.After(shutdownTimeout):
+		return fmt.Errorf("storer closed with bg goroutines running after %s", shutdownTimeout)
 	}
 
 	return err
