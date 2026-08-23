@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1347,10 +1348,9 @@ func TestOutofDepthPrune(t *testing.T) {
 	}
 
 	// wait for kademlia connectors and pruning to finish
-	time.Sleep(time.Millisecond * 500)
+	bins := waitBinsSettled(t, kad)
 
 	// check that no pruning has happened
-	bins := binSizes(kad)
 	for i := range 6 {
 		if bins[i] <= overSaturationPeers {
 			t.Fatalf("bin %d, got %d, want more than %d", i, bins[i], overSaturationPeers)
@@ -1372,10 +1372,9 @@ func TestOutofDepthPrune(t *testing.T) {
 	addOne(t, signer, kad, ab, addr)
 
 	// wait for kademlia connectors and pruning to finish
-	time.Sleep(time.Millisecond * 500)
+	bins = waitBinsSettled(t, kad)
 
 	// check bins have been pruned
-	bins = binSizes(kad)
 	for i := range uint8(5) {
 		if bins[i] != overSaturationPeers {
 			t.Fatalf("bin %d, got %d, want %d", i, bins[i], overSaturationPeers)
@@ -1456,10 +1455,9 @@ func TestPruneExcludeOps(t *testing.T) {
 	}
 
 	// wait for kademlia connectors and pruning to finish
-	time.Sleep(time.Millisecond * 500)
+	bins := waitBinsSettled(t, kad)
 
 	// check that no pruning has happened
-	bins := binSizes(kad)
 	for i := range 6 {
 		if bins[i] <= overSaturationPeers {
 			t.Fatalf("bin %d, got %d, want more than %d", i, bins[i], overSaturationPeers)
@@ -1481,10 +1479,9 @@ func TestPruneExcludeOps(t *testing.T) {
 	addOne(t, signer, kad, ab, addr)
 
 	// wait for kademlia connectors and pruning to finish
-	time.Sleep(time.Millisecond * 500)
+	bins = waitBinsSettled(t, kad)
 
 	// check bins have NOT been pruned because the peer count func excluded unreachable peers
-	bins = binSizes(kad)
 	for i := range uint8(5) {
 		if bins[i] != perBin {
 			t.Fatalf("bin %d, got %d, want %d", i, bins[i], perBin)
@@ -2047,6 +2044,35 @@ func setBits(data []byte, startBit, bitCount int, b int) {
 			index++
 		}
 	}
+}
+
+// waitBinsSettled waits until the connected-peer bin sizes stop changing, then
+// returns them.
+//
+// These tests previously slept a flat 500ms before asserting on bin contents.
+// That is not enough on a contended CI runner: TestOutofDepthPrune failed with
+// "bin 5, got 15, want more than 16" because the connectors had simply not
+// finished. See issue #79.
+//
+// Waits for stability rather than for the assertion to hold. Polling until the
+// expected condition is true would pass on a transient state and hide a change
+// that happens immediately afterwards, which is exactly what these pruning
+// tests exist to catch.
+func waitBinsSettled(t *testing.T, kad *kademlia.Kad) []int {
+	t.Helper()
+
+	bins := binSizes(kad)
+	if err := spinlock.Wait(30*time.Second, func() bool {
+		time.Sleep(200 * time.Millisecond)
+		next := binSizes(kad)
+		settled := slices.Equal(bins, next)
+		bins = next
+		return settled
+	}); err != nil {
+		t.Fatal("bin sizes never settled:", err)
+	}
+
+	return bins
 }
 
 func binSizes(kad *kademlia.Kad) []int {
