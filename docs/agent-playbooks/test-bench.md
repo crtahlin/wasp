@@ -219,3 +219,56 @@ Do not try to confirm this by looking for GC symbols with `go tool nm` — relea
 binaries are linked with `-s -w` and carry no symbol table, so the check returns
 zero for both a correct and an incorrect build. The build info is the only
 trustworthy signal. CI enforces it on every push; see `.github/workflows/go.yml`.
+
+## A soak must assert the node is under load
+
+A crash-free soak proves nothing unless the node was doing work. This is not a
+theoretical caution: a 65-minute clean run was recorded here on a node that had
+**zero peers** and a load average of 0.04. It was not stable, it was asleep. The
+faults under investigation only appear under read load, so an idle node cannot
+produce them and its silence means nothing.
+
+Worse, the node reported `{"status":"ready"}` from `/readiness` throughout, so every
+health signal an operator would normally trust said the run was valid (#74).
+
+Every soak and benchmark must therefore treat "is the node working" as a measured
+precondition, not an assumption:
+
+- **Peer count above zero**, read from `/peers` or `/topology`'s `connected`. Treat
+  zero as a distinct *invalid run* outcome, not as a pass and not as a failure.
+- **Load average above idle**, from `/proc/loadavg`.
+- For read-path work, **drive load explicitly**. A node whose reserve is already full
+  does very little on its own. `/rchash/{depth}/{anchor1}/{anchor2}` in a loop
+  produces sustained heavy reads — roughly 137 s per run at depth 9 on a 4M-chunk
+  reserve, taking load average to about 6. `anchor1` must be the node's own overlay
+  from `/addresses`.
+
+Report the load evidence alongside the result. "Ran 90 minutes without crashing" is
+not a result; "ran 90 minutes at 87 peers and load 5.7, driven by continuous rchash
+sampling, without crashing" is.
+
+## Write soak harnesses so they can actually fail
+
+Two harness bugs in one session produced confident, false "SOAK PASSED" reports. Both
+are worth guarding against by construction.
+
+**Shell word-splitting.** A harness written for `bash` and run under `zsh` silently
+changes meaning: zsh does not word-split unquoted parameter expansions, so
+`set -- $OUT` yields one argument instead of several. Every field after the first was
+empty, `${3:-0}` defaulted to `0`, and the failure check could never fire. It printed
+`soak ok: 75m clean (state= restarts= crashes=)` and then `SOAK PASSED: 0 crashes` for
+a window containing two crashes and two restarts.
+
+Do the parsing on the remote host inside an explicit `bash -s`, emit one
+`key=value` line, and parse that. Then **validate the harness against a live tick
+before trusting it** — print the raw line and the parsed fields, and confirm they
+match.
+
+**Silent skips.** An SSH failure that is logged and skipped will hide the very outcome
+you are watching for, because a node that takes the whole machine down also stops
+answering SSH. Retry, then escalate: after a small number of consecutive unreachable
+ticks, abort the run with a distinct status rather than continuing to report ticks.
+
+A harness that cannot produce a failure is not measuring anything. Before trusting
+one, ask what it would print if the node died right now — and if the honest answer is
+"the same thing it prints now", fix it before starting the run.
