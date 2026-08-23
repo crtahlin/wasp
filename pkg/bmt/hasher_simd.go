@@ -8,6 +8,7 @@ package bmt
 
 import (
 	"encoding/binary"
+	"os"
 
 	"github.com/ethersphere/bee/v2/pkg/keccak"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -124,17 +125,64 @@ func (h *simdHasher) Reset() {
 // It processes the tree level by level from leaves to root, using batched
 // SIMD calls instead of goroutine-per-section. A single thread handles all
 // levels since SIMD already provides intra-call parallelism (4-way or 8-way).
+// simdBisect selects which SIMD call sites are active, for isolating the
+// corruption in issue #77. Empty means normal operation (both use SIMD).
+//
+//	WASP_SIMD_BISECT=leaves  only the leaf level uses SIMD; internal nodes are hashed scalar
+//	WASP_SIMD_BISECT=nodes   only internal nodes use SIMD; the leaf level is hashed scalar
+//	WASP_SIMD_BISECT=none    neither uses SIMD (control; should behave like SIMD disabled)
+//
+// Diagnostic scaffolding. Not for release.
+var simdBisect = os.Getenv("WASP_SIMD_BISECT")
+
+// hashLeavesScalar is the scalar equivalent of hashLeavesBatch. The tree's
+// shared hasher is prefix-aware when a prefix is configured, so the prefix does
+// not need staging here the way the stateless SIMD primitives require.
+func (h *simdHasher) hashLeavesScalar(secsize int) {
+	buf := h.bmt.buffer
+	for i, leaf := range h.bmt.levels[0] {
+		off := i * secsize
+		out, _ := doHash(h.bmt.hasher, buf[off:off+secsize])
+		if leaf.isLeft {
+			copy(leaf.parent.left, out)
+		} else {
+			copy(leaf.parent.right, out)
+		}
+	}
+}
+
+// hashNodesScalar is the scalar equivalent of hashNodesBatch, using the same
+// left||right combine the root level already uses.
+func (h *simdHasher) hashNodesScalar(nodes []*simdNode) {
+	for _, n := range nodes {
+		out, _ := doHash(h.bmt.hasher, n.left, n.right)
+		if n.isLeft {
+			copy(n.parent.left, out)
+		} else {
+			copy(n.parent.right, out)
+		}
+	}
+}
+
 func (h *simdHasher) hashSIMD() ([]byte, error) {
 	secsize := 2 * h.segmentSize
 	bw := h.batchWidth
 	prefixLen := len(h.prefix)
 
 	// Leaf level: hash each section and write results to parent nodes.
-	h.hashLeavesBatch(0, len(h.bmt.levels[0]), bw, secsize, prefixLen)
+	if simdBisect == "nodes" || simdBisect == "none" {
+		h.hashLeavesScalar(secsize)
+	} else {
+		h.hashLeavesBatch(0, len(h.bmt.levels[0]), bw, secsize, prefixLen)
+	}
 
 	// Internal levels: process each level single-threaded (diminishing work).
 	for lvl := 1; lvl < len(h.bmt.levels)-1; lvl++ {
-		h.hashNodesBatch(h.bmt.levels[lvl], bw, prefixLen)
+		if simdBisect == "leaves" || simdBisect == "none" {
+			h.hashNodesScalar(h.bmt.levels[lvl])
+		} else {
+			h.hashNodesBatch(h.bmt.levels[lvl], bw, prefixLen)
+		}
 	}
 
 	// Root level: hash using the tree's shared scalar hasher.
