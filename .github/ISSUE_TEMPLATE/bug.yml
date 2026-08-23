@@ -43,6 +43,13 @@ body:
     id: stock
     attributes:
       label: Does stock Bee at the same upstream base also do this?
+      description: >-
+        Answer "Yes" only if you checked the code at upstream/v2.8.1 or
+        upstream/master and found the defect present and unmodified there, or
+        reproduced it on a stock build. A "Yes" earns the affects-upstream label,
+        which is a marker for a later decision by the repository owner — it never
+        authorises contacting ethersphere. See rule 11 in AGENTS.md. If you have
+        not checked, answer "Not tested"; a guess here is worse than a blank.
       options: ["No — fork-only", "Yes — upstream too", "Not tested"]
     validations:
       required: true
