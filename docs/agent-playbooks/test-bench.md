@@ -161,3 +161,53 @@ real value if the node misbehaves during a redistribution round. Canary and
 bench nodes should be unstaked, or staked only with an amount that is acceptable
 to lose. This is not a theoretical caution — it is the main way an experiment
 here could cost money.
+
+## When the node crashes, read the crashing goroutine first
+
+Go dumps every goroutine on a fatal error, so a naive grep over the dump finds
+whatever the node happened to be doing — pullsync, kademlia, sharky — and invites
+you to blame it. Only one goroutine is crashing. Find the `[running]` one, or the
+`runtime stack:` block that precedes it, and read that.
+
+This matters because the two failure classes look identical in a log summary and
+have nothing to do with each other:
+
+| Sign | Meaning |
+|---|---|
+| `panic:` with a bee frame in the running goroutine | a real bee/wasp bug |
+| `fatal error:` with only `runtime.*` frames, on a GC worker or `runtime stack:` | a Go runtime bug, or genuine memory corruption from `unsafe`/cgo |
+
+The runtime's heap-integrity assertions — `found pointer to free object`,
+`sweep increased allocation count`, `s.allocCount != s.nelems`, `fault`, and
+`index out of range` raised from `runtime.panicBounds` on the system stack — are
+all the second class. With `CGO_ENABLED=0` and no `unsafe` in the change under
+test, a bee-level data race is not a sufficient explanation for them.
+
+Issue #69 is the worked example: several days were spent attributing these crashes
+to a Sharky change, and a correct change was reverted, because the dump was read as
+"sharky appears in the stack" rather than "the crashing goroutine is a GC worker".
+
+## GOEXPERIMENT is a build-time variable
+
+`GOEXPERIMENT` configures the Go toolchain when it compiles. Setting it in a
+systemd unit, a shell profile, or any other runtime environment has **no effect
+whatsoever** — and it fails silently, so an experiment that "disabled" a GC feature
+this way produces confident, entirely meaningless results.
+
+Set it for the build, and then verify it landed in the binary rather than assuming:
+
+```bash
+GOEXPERIMENT=nogreenteagc make binary          # the Makefile now does this by default
+go version -m dist/bee | grep GOEXPERIMENT     # must print: build GOEXPERIMENT=nogreenteagc
+```
+
+Verify the **deployed** binary too, not just the one you built:
+
+```bash
+go version -m /usr/bin/bee | grep GOEXPERIMENT
+```
+
+Do not try to confirm this by looking for GC symbols with `go tool nm` — release
+binaries are linked with `-s -w` and carry no symbol table, so the check returns
+zero for both a correct and an incorrect build. The build info is the only
+trustworthy signal. CI enforces it on every push; see `.github/workflows/go.yml`.

@@ -47,6 +47,8 @@ builds:
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
+      # Green Tea GC (default in Go 1.26) corrupts the heap — see issue #69.
+      - GOEXPERIMENT=nogreenteagc
     goos:
       - linux
     goarch:
@@ -71,6 +73,8 @@ builds:
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
+      # Green Tea GC (default in Go 1.26) corrupts the heap — see issue #69.
+      - GOEXPERIMENT=nogreenteagc
     goos:
       - linux
     goarch:
@@ -97,6 +101,8 @@ builds:
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
+      # Green Tea GC (default in Go 1.26) corrupts the heap — see issue #69.
+      - GOEXPERIMENT=nogreenteagc
     goos:
       - windows
     goarch:
@@ -117,6 +123,8 @@ builds:
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
+      # Green Tea GC (default in Go 1.26) corrupts the heap — see issue #69.
+      - GOEXPERIMENT=nogreenteagc
     goos:
       - darwin
     goarch:
@@ -136,6 +144,8 @@ builds:
       - -X github.com/ethersphere/bee/v2/pkg/api.Version={{ .Env.BEE_API_VERSION }}
     env:
       - CGO_ENABLED=0
+      # Green Tea GC (default in Go 1.26) corrupts the heap — see issue #69.
+      - GOEXPERIMENT=nogreenteagc
     goos:
       - darwin
     goarch:

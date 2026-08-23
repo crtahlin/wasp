@@ -33,6 +33,19 @@ LDFLAGS ?= -s -w \
 -X github.com/ethersphere/bee/v2/pkg/p2p/libp2p.reachabilityOverridePublic="$(REACHABILITY_OVERRIDE_PUBLIC)" \
 -X github.com/ethersphere/bee/v2/pkg/postage/listener.batchFactorOverridePublic="$(BATCHFACTOR_OVERRIDE_PUBLIC)"
 
+# Go 1.26 made the Green Tea garbage collector the default. It has a bounds-check
+# bug in tryDeferToSpanScan (runtime/mgcmark_greenteagc.go) that corrupts the heap
+# under wasp's allocation profile, crashing the node within seconds to minutes on a
+# loaded mainnet node. See issue #69 and https://github.com/golang/go/issues/73646.
+#
+# GOEXPERIMENT is a BUILD-time toolchain variable — setting it in a systemd unit or
+# any other runtime environment does nothing. It must be exported for the build.
+#
+# Revisit when a Go release fixes the bug: Green Tea is a genuine throughput win we
+# want back. Verify any change with `go version -m dist/bee | grep GOEXPERIMENT`.
+GOEXPERIMENT ?= nogreenteagc
+export GOEXPERIMENT
+
 .PHONY: all
 all: build lint test-race binary
 
