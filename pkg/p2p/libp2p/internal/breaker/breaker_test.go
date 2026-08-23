@@ -147,3 +147,58 @@ func (c *currentTimeMock) Time() time.Time {
 	c.curr++
 	return t
 }
+
+// TestBackoffResetsAfterSuccess checks that a successful call restores the
+// backoff to its starting value.
+//
+// Without that, the backoff only ever grows: it doubles on each re-trip and
+// nothing lowers it, so a node that suffers a burst of dial failures ratchets
+// up to maxBackoff — an hour by default — and stays there for the lifetime of
+// the process, long after the network is healthy. That was observed on a bench
+// node as 65 minutes with zero connected peers while every bootnode was
+// reachable from the same host. See issue #74.
+func TestBackoffResetsAfterSuccess(t *testing.T) {
+	t.Parallel()
+
+	const startBackoff = 1 * time.Minute
+
+	now := time.Now()
+	currentTimeFn := func() time.Time { return now }
+
+	b := breaker.NewBreakerWithCurrentTimeFn(breaker.Options{
+		Limit:        1,
+		StartBackoff: startBackoff,
+		MaxBackoff:   time.Hour,
+		FailInterval: time.Hour,
+	}, currentTimeFn)
+
+	errFail := errors.New("failed")
+
+	// Trip the breaker. It should now be closed for exactly startBackoff.
+	if err := b.Execute(func() error { return errFail }); !errors.Is(err, errFail) {
+		t.Fatalf("first call: got %v, want %v", err, errFail)
+	}
+	if got, want := b.ClosedUntil(), now.Add(startBackoff); !got.Equal(want) {
+		t.Fatalf("after first trip: closed until %v, want %v", got, want)
+	}
+
+	// Wait out the backoff and make a successful call. This is the recovery
+	// the breaker exists to detect.
+	now = now.Add(startBackoff + time.Second)
+	if err := b.Execute(func() error { return nil }); err != nil {
+		t.Fatalf("recovery call: got %v, want nil", err)
+	}
+
+	// Trip it again. The backoff must be startBackoff once more, not double it:
+	// the intervening success means this is a fresh problem, not an escalation
+	// of the previous one.
+	now = now.Add(time.Second)
+	tripAt := now
+	if err := b.Execute(func() error { return errFail }); !errors.Is(err, errFail) {
+		t.Fatalf("second trip: got %v, want %v", err, errFail)
+	}
+	if got, want := b.ClosedUntil(), tripAt.Add(startBackoff); !got.Equal(want) {
+		t.Errorf("after a success then a re-trip: closed until %v, want %v (backoff did not reset; it is %v)",
+			got, want, got.Sub(tripAt))
+	}
+}

@@ -42,7 +42,8 @@ type breaker struct {
 	consFailedCalls      int // current number of consecutive fails
 	firstFailedTimestamp time.Time
 	closedTimestamp      time.Time
-	backoff              time.Duration // initial backoff duration
+	startBackoff         time.Duration // backoff to return to once a call succeeds
+	backoff              time.Duration // current backoff duration, doubled on each re-trip
 	maxBackoff           time.Duration
 	failInterval         time.Duration // consecutive failures are counted if they happen within this interval
 	currentTimeFn        currentTimeFn
@@ -63,6 +64,7 @@ func NewBreaker(o Options) Interface {
 func newBreakerWithCurrentTimeFn(o Options, currentTimeFn currentTimeFn) Interface {
 	breaker := &breaker{
 		limit:         o.Limit,
+		startBackoff:  o.StartBackoff,
 		backoff:       o.StartBackoff,
 		maxBackoff:    o.MaxBackoff,
 		failInterval:  o.FailInterval,
@@ -82,6 +84,7 @@ func newBreakerWithCurrentTimeFn(o Options, currentTimeFn currentTimeFn) Interfa
 	}
 
 	if o.StartBackoff == 0 {
+		breaker.startBackoff = backoff
 		breaker.backoff = backoff
 	}
 
@@ -149,6 +152,18 @@ func (b *breaker) afterf(err error) error {
 	}
 
 	b.resetFailed()
+	// A successful call means whatever was failing has recovered, so the
+	// escalated backoff has served its purpose and is restored to its starting
+	// value.
+	//
+	// Without this the backoff only ever grows. It doubles on each re-trip and
+	// nothing ever lowers it, so a node that suffers a burst of dial failures
+	// ratchets up to maxBackoff — an hour by default — and stays there for the
+	// lifetime of the process, long after the network is healthy again. That
+	// was observed on a bench node: 65 minutes with zero connected peers out of
+	// 3198 known, while every mainnet bootnode was reachable by TCP from the
+	// same host. Only a restart cleared it. See issue #74.
+	b.backoff = b.startBackoff
 	return nil
 }
 
