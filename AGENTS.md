@@ -117,6 +117,32 @@ private keys, wallet addresses, or postage batch identifiers — in code, issues
 specs, or results. Bench machines are referenced by role name (`bench-1`,
 `mainnet-canary`) only.
 
+**11. Tag anything that is also wrong upstream.**
+When you find a genuine defect that exists in unmodified upstream code, add the
+`affects-upstream` label to the issue and write a section explaining what the
+problem is, why it is upstream's rather than ours, and what the solution would
+be. Verify the claim against the upstream tree — check the file at
+`upstream/v2.8.1` or `upstream/master` and confirm the defect is present and
+unmodified there — rather than assuming it, and say in the issue what you
+checked.
+
+The label is a **marker for a later human decision, and nothing more.** It does
+not authorise contacting ethersphere, opening an issue there, or sending a
+patch. Rule 1 governs that, without exception, and this label does not soften
+it.
+
+Tag defects, not preferences. An optimization we want for large-reserve nodes is
+not an upstream defect; a function that computes the same quantity two different
+ways is. If the problem is only suspected — reasoned from reading the code, not
+measured or reproduced — leave it untagged and record in the issue what evidence
+would justify the tag later. A set of findings that might one day be shown to
+someone else is worth only as much as its weakest member, and an unverified claim
+in that set is how the misattribution in #8 happened.
+
+Carry corrections with the finding. Where an earlier report of the same problem
+was wrong, say so in the issue and say what is actually true. Reporting a
+plausible but false diagnosis is worse than reporting nothing.
+
 ## Where the detail lives
 
 | If you are… | Read |
