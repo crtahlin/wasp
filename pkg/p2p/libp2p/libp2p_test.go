@@ -137,7 +137,13 @@ func expectPeersEventually(t *testing.T, s *libp2p.Service, addrs ...swarm.Addre
 	t.Helper()
 
 	var peers []p2p.Peer
-	err := spinlock.Wait(5*time.Second, func() bool {
+	// 5s was too tight on a contended CI runner under -race: a disconnect
+	// propagating through libp2p's notifiee chain is asynchronous and there is
+	// nothing deterministic to wait on, so the bound has to cover the slowest
+	// machine rather than a developer laptop. This is a poll, so a longer bound
+	// costs nothing when the event arrives promptly, and a genuine failure
+	// still fails — just later. See issue #79.
+	err := spinlock.Wait(30*time.Second, func() bool {
 		peers = s.Peers()
 		return len(peers) == len(addrs)
 	})
