@@ -197,8 +197,16 @@ this way produces confident, entirely meaningless results.
 Set it for the build, and then verify it landed in the binary rather than assuming:
 
 ```bash
-GOEXPERIMENT=nogreenteagc make binary          # the Makefile now does this by default
+make binary                                    # the Makefile sets the flag itself
 go version -m dist/bee | grep GOEXPERIMENT     # must print: build GOEXPERIMENT=nogreenteagc
+```
+
+The Makefile assigns it with `:=`, so an inherited `GOEXPERIMENT` in your environment
+cannot silently override it. To deliberately build *with* Green Tea — to retest it
+once Go ships a fix — pass it on the command line, which does win:
+
+```bash
+make GOEXPERIMENT=greenteagc binary
 ```
 
 Verify the **deployed** binary too, not just the one you built:

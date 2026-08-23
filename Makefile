@@ -43,7 +43,14 @@ LDFLAGS ?= -s -w \
 #
 # Revisit when a Go release fixes the bug: Green Tea is a genuine throughput win we
 # want back. Verify any change with `go version -m dist/bee | grep GOEXPERIMENT`.
-GOEXPERIMENT ?= nogreenteagc
+#
+# Deliberately ':=' rather than '?='. With '?=' an inherited GOEXPERIMENT from the
+# environment (boringcrypto, say) silently wins and quietly reinstates Green Tea —
+# and this bug's whole danger is that a wrong build looks completely normal until a
+# loaded node corrupts its heap. ':=' holds against the environment while still
+# allowing a deliberate override on the command line, which is how you would test
+# Green Tea again: make GOEXPERIMENT=greenteagc binary
+GOEXPERIMENT := nogreenteagc
 export GOEXPERIMENT
 
 .PHONY: all
