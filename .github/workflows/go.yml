@@ -44,6 +44,20 @@ jobs:
         sudo sysctl -w kern.ipc.maxsockbuf=6291456
     - name: Build
       run: make build
+    - name: Green Tea GC must stay disabled
+      if: matrix.os == 'ubuntu-latest'
+      # Guards issue #69: Go 1.26's default Green Tea GC corrupts the heap under
+      # wasp's allocation profile. This is invisible until a node crashes in
+      # production, so assert the build setting is actually recorded in the binary.
+      shell: bash
+      run: |
+        make binary
+        if ! go version -m dist/bee | grep -q 'GOEXPERIMENT=nogreenteagc'; then
+          echo "::error::dist/bee was built WITHOUT GOEXPERIMENT=nogreenteagc (see issue #69)"
+          go version -m dist/bee | grep -E 'build\s+(GO|CGO)' || true
+          exit 1
+        fi
+        echo "ok: $(go version -m dist/bee | grep GOEXPERIMENT | tr -s ' ')"
     - name: Test with race detector (Ubuntu and MacOS)
       if: matrix.os != 'windows-latest'
       run: make test-ci-race
