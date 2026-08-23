@@ -45,10 +45,8 @@ func TestGsocWebsocketSingleHandler(t *testing.T) {
 	socCh := soc.New(id, ch)
 	ch, _ = socCh.Sign(signer)
 	socCh, _ = soc.FromChunk(ch)
-	g.Handle(socCh)
-
 	go expectMessage(t, cl, respC, payload)
-	if err := <-respC; err != nil {
+	if err := publishUntilReceived(t, func() { g.Handle(socCh) }, respC); err != nil {
 		t.Fatal(err)
 	}
 }
