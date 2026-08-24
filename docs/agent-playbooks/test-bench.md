@@ -275,9 +275,23 @@ one, ask what it would print if the node died right now — and if the honest an
 
 ## SIMD hashing: fixed, and what the fix was
 
-`use-simd-hashing` corrupted memory and killed nodes within ~12 minutes under load. Fixed
-in #92: the assembly stub now runs the XKCP blob on a **scratch stack** rather than the
-goroutine stack.
+`use-simd-hashing` corrupted memory and killed nodes within ~12 minutes under load. Issue
+#92 is the report; the fix is #94: the assembly stub now runs the XKCP blob on a **scratch
+stack** rather than the goroutine stack.
+
+Two panics exist to make a future regression here loud instead of silent, because no test
+of hash output can catch one — the digests are correct either way:
+
+```
+panic: keccak: SIMD blob overflowed its 65536-byte scratch stack ...
+panic: keccak: SIMD blob moved the stack pointer by N bytes and did not put it back ...
+```
+
+The first means a blob outgrew its 64 KiB buffer — expected only after regenerating the
+`.syso` files from a newer XKCP. The second means the blob violated the SysV ABI. Either
+way the node is telling you the truth immediately rather than dying in an unrelated
+subsystem twelve minutes later, which is what the original bug did. Do not work around
+either by enlarging the buffer or removing the check until the cause is understood.
 
 Go's goroutine stacks are small, growable and movable — the runtime relocates them and
 the collector scans them. Foreign machine code executing on one is unsafe, which is why
