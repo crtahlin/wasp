@@ -57,7 +57,7 @@ func (tg *testGetter) Get(ctx context.Context, addr swarm.Address) (ch swarm.Chu
 	defer func() {
 		go func() {
 			select {
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(cancellationTimeout):
 			case <-ctx.Done():
 				close(tg.cancelled)
 			}
@@ -84,6 +84,18 @@ func newTestGetter(ch swarm.Chunk, firstFound int, errf func(int) chan struct{})
 func (tg *testGetter) Close() error {
 	return nil
 }
+
+// cancellationTimeout bounds how long a test waits to observe a cancellation
+// that has already been requested. It is a liveness bound, not a latency
+// assertion: the test still fails if the cancellation never propagates, but it
+// does not fail merely because a loaded machine took a moment to schedule the
+// goroutine that observes it.
+//
+// It was 100ms, which is the same order as the scheduling delay on a busy CI
+// runner. That made TestGetter fail intermittently on macOS runners while
+// passing every time on an unloaded machine. Nothing about the code under test
+// is sensitive to this value.
+const cancellationTimeout = 10 * time.Second
 
 func TestGetter(t *testing.T) {
 	t.Parallel()
@@ -182,7 +194,7 @@ func TestGetter(t *testing.T) {
 				// if j <= c, the original chunk should be retrieved and the context should be cancelled
 				t.Run("retrievals cancelled", func(t *testing.T) {
 					select {
-					case <-time.After(100 * time.Millisecond):
+					case <-time.After(cancellationTimeout):
 						t.Fatal("timed out waiting for context to be cancelled")
 					case <-store.cancelled:
 					}
@@ -211,7 +223,7 @@ func TestGetter(t *testing.T) {
 			latencies := store.latencies[:attempts]
 			t.Run("original address called", func(t *testing.T) {
 				select {
-				case <-time.After(100 * time.Millisecond):
+				case <-time.After(cancellationTimeout):
 					t.Fatal("timed out waiting form original address to be attempted for retrieval")
 				case <-store.origCalled:
 					i := store.origIndex
