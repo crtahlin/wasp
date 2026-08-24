@@ -232,20 +232,6 @@ func TestWritesBlockWhenLevel0OutrunsCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Deliberately NOT closing this store, and the reason is a finding in its own
-	// right: Store.Close deletes the dirty-shutdown marker, that delete is a
-	// write, and it blocks on exactly the pause this test creates. Confirmed from
-	// the goroutine dump — Close sits in leveldb.(*DB).putRec.
-	//
-	// So a node whose writes are paused cannot shut down cleanly either. The
-	// dirty marker stays set and the next start runs recovery. Worth knowing when
-	// reading #24: the stall does not merely stop the node working, it also
-	// denies it a clean exit.
-	//
-	// The writer goroutine below therefore stays blocked for the life of the test
-	// binary. It is bounded and harmless — Go exits regardless of live goroutines
-	// — and the temporary directory is removed by t.TempDir.
-
 	db := st.DB()
 	done := make(chan struct{})
 	go func() {
@@ -256,6 +242,23 @@ func TestWritesBlockWhenLevel0OutrunsCompaction(t *testing.T) {
 			}
 		}
 	}()
+
+	t.Cleanup(func() {
+		// Close the underlying database rather than the Store, and the reason is
+		// a finding in its own right: Store.Close deletes the dirty-shutdown
+		// marker, that delete is a write, and it blocks on exactly the pause this
+		// test creates. Confirmed from a goroutine dump — Close sits in
+		// leveldb.(*DB).putRec. So a node whose writes are paused cannot shut
+		// down cleanly either; the marker survives and the next start runs
+		// recovery. Worth knowing when reading #24.
+		//
+		// leveldb.Close does not write. It closes closeC, which releases the
+		// blocked writer with ErrClosed and frees the file handles. Waiting for
+		// that writer matters on Windows, where TempDir cleanup fails while any
+		// handle is still open.
+		_ = db.Close()
+		<-done
+	})
 
 	select {
 	case <-done:
