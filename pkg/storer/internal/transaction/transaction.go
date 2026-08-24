@@ -142,7 +142,14 @@ func (s *store) Run(ctx context.Context, f func(Store) error) error {
 
 // Metrics returns set of prometheus collectors.
 func (s *store) Metrics() []prometheus.Collector {
-	return m.PrometheusCollectorsFromFields(s.metrics)
+	collectors := m.PrometheusCollectorsFromFields(s.metrics)
+	// The batch store is the LevelDB index store, and it carries the level-0
+	// depth and write-pause metrics. Without this it exposes nothing, which is
+	// why the write stall in issue #24 had to be diagnosed from symptoms.
+	if v, ok := s.bstore.(m.Collector); ok {
+		collectors = append(collectors, v.Metrics()...)
+	}
+	return collectors
 }
 
 // StatusMetrics exposes metrics that are exposed on the status protocol.
