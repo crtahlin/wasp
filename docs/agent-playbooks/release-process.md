@@ -106,18 +106,49 @@ experimental-software warning — people find releases without reading the READM
 
 ## Release pull requests and CI
 
-The release pull request is opened by a workflow and is therefore authored by
-`github-actions[bot]`, whose check runs GitHub holds in `action_required`. The first
-release pull request merged with zero checks and put a lint failure on `main` — a
-`CHANGELOG.md` ending in a blank line, which `make check-whitespace` rejects.
+### Which checks are required on `main`
 
-The workflow now runs `make check-whitespace` and the protocol-freeze check **before**
-opening the pull request, and `main` requires status checks to pass before any merge. See
-#45.
+`Protocol freeze`, `Lint PR Title`, `Lint` and `Test (ubuntu-latest)`.
 
-If the pull request will not merge because its checks are held, approve the run rather
-than bypassing the requirement:
+`Test (macos-latest)` and `Test (windows-latest)` are deliberately **not** required. Both
+run on every pull request and should be read, but neither gates a merge: the macOS runner
+is roughly 25x slower than a local machine on the redundancy tests, which is what made #79
+look like a hang when it was slowness. #97 raises the per-package timeout to fit. Promote
+both to required once a run of syncs and releases has gone through without either flaking.
+
+Requiring a check that a workflow can skip is what caused #45 — see below. Before adding
+any context here, confirm it reports on **every** pull request, including one that touches
+only Markdown.
+
+The first release pull request ([#43](https://github.com/crtahlin/wasp/pull/43)) merged
+with no build or test having run, and put a lint failure on `main` — a `CHANGELOG.md`
+ending in a blank line, which `make check-whitespace` rejects.
+
+The cause was path filtering, not anything to do with the pull request being
+bot-authored. `go.yml` carried `paths-ignore: '**/*.md'` on its `pull_request` trigger,
+and a release pull request changes exactly one file: `CHANGELOG.md`. So `Lint` and `Test`
+were never triggered. Two other workflows did run on that same pull request, on the same
+`pull_request` event, which is how we know bot authorship was not the obstacle —
+`assign-author` even reported a failure, and the merge went through anyway because nothing
+was required at the time.
+
+Do not repeat the diagnosis that GitHub held the checks in `action_required` pending
+approval. It did not happen here, and `gh api .../approve` — previously recommended in
+this playbook — fixes nothing. Check what actually ran before theorising:
 
 ```bash
-gh api -X POST repos/crtahlin/wasp/actions/runs/<run-id>/approve
+SHA=$(gh pr view <n> --repo crtahlin/wasp --json headRefOid -q .headRefOid)
+gh api "repos/crtahlin/wasp/commits/$SHA/check-runs" --jq '.check_runs[] | "\(.name) \(.conclusion)"'
 ```
+
+Three things now prevent a recurrence:
+
+1. **`paths-ignore` is gone from the `pull_request` trigger** in `go.yml`, so `Lint` and
+   `Test` always report. Documentation-only pull requests skip the expensive work through
+   a step-level condition instead, which still reports the context. A required check that
+   never reports blocks a pull request forever, so the two cannot be combined. See #45.
+2. **The workflow verifies before pushing.** `make check-whitespace` and the
+   protocol-freeze check run against the commit that will be proposed — after the
+   changelog is written, not before it. On failure nothing is pushed and no pull request
+   exists.
+3. **`main` requires status checks**, so no pull request merges on zero evidence.

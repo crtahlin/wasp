@@ -87,6 +87,12 @@ jobs:
           git config user.email 'upstream-sync@users.noreply.github.com'
           git switch -c "$BRANCH"
 
+          # Snapshot the wire surface as it stands BEFORE the merge. The
+          # regenerated lock is compared against this to decide whether
+          # upstream moved the protocol. Comparing after regeneration
+          # against the tree it was generated from proves nothing.
+          cp .github/protocol-freeze.lock /tmp/lock.before 2>/dev/null || : > /tmp/lock.before
+
           # A REAL two-parent merge. Never squash: squashing leaves the merge
           # base where it was, so the next sync three-way-merges from the
           # original fork point and re-resolves every conflict again. That is
@@ -98,9 +104,16 @@ jobs:
           fi
 
           echo "$T" > .upstream-base
+          PROTOCOL_CHANGED=false
           if [ -z "$CONFLICTS" ]; then
             scripts/protocol-freeze.sh > .github/protocol-freeze.lock
+            if ! diff -q /tmp/lock.before .github/protocol-freeze.lock >/dev/null 2>&1; then
+              PROTOCOL_CHANGED=true
+              echo "::warning::upstream $T moves the frozen wire surface"
+              diff -u /tmp/lock.before .github/protocol-freeze.lock || true
+            fi
           fi
+          echo "protocol_changed=$PROTOCOL_CHANGED" >> "$GITHUB_OUTPUT"
           git add -A
           if [ -n "$CONFLICTS" ]; then
             git commit -m "chore(upstream): sync ethersphere/bee $T [CONFLICTS]"
@@ -117,33 +130,39 @@ jobs:
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Setup Go
+        if: steps.target.outputs.skip == 'false' && steps.merge.outputs.conflicts == ''
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false
 
       - name: Verify before opening the pull request
-        # A pull request opened by a workflow using GITHUB_TOKEN is authored by
-        # github-actions[bot], and GitHub holds its check runs in
-        # action_required pending manual approval. Such a pull request can be
-        # merged with no checks having run at all — which already happened, on
-        # the first release pull request (#43).
-        #
-        # For a sync that is unacceptable: these carry thousands of lines of
-        # upstream code, and the protocol-freeze check is the one thing that
-        # proves upstream has not moved the wire surface underneath us.
-        #
-        # Run the critical checks here, before the pull request exists, so
-        # verification does not depend on pull request CI firing. Fails the
-        # workflow rather than opening an unverified pull request. See #45.
+        # Only on the clean path. A conflicted merge is committed WITH its
+        # conflict markers on purpose, so the branch can be resolved locally —
+        # that tree cannot compile, and trying to verify it here would fail the
+        # job and prevent the [CONFLICTS] pull request from ever being opened.
+        # Losing the notification is worse than merging an unbuilt branch,
+        # which the title and body already forbid.
+        if: steps.target.outputs.skip == 'false' && steps.merge.outputs.conflicts == ''
         run: |
           set -euo pipefail
-          echo "::group::protocol freeze"
-          ./scripts/protocol-freeze.sh --check
-          echo "::endgroup::"
+          # Does the merged tree actually compile? This is the check worth
+          # having: a sync carries thousands of lines of upstream code, and a
+          # merge can resolve cleanly and still not build.
           echo "::group::build"
           make build
           echo "::endgroup::"
+          # Deliberately NOT `protocol-freeze.sh --check`. The merge step
+          # regenerates the lock from this same tree, so --check compares the
+          # tree against a lock derived from it and passes unconditionally. The
+          # question that matters — did upstream move the wire surface? — is
+          # answered by diffing the lock across the merge, which the merge step
+          # does and reports as protocol_changed.
+          if [ '${{ steps.merge.outputs.protocol_changed }}' = 'true' ]; then
+            echo "::warning::the frozen wire surface changed; the lock diff is the review"
+          else
+            echo "wire surface unchanged by this sync"
+          fi
 
       - name: Open pull request
         if: steps.target.outputs.skip == 'false'
@@ -153,12 +172,22 @@ jobs:
           CURRENT: ${{ steps.target.outputs.current }}
           BRANCH: ${{ steps.merge.outputs.branch }}
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          PROTOCOL_CHANGED: ${{ steps.merge.outputs.protocol_changed }}
         run: |
           set -euo pipefail
           BODY_FILE="$(mktemp)"
           {
             echo "Moves the upstream base from \`$CURRENT\` to \`$T\`."
             echo
+            if [ "$PROTOCOL_CHANGED" = "true" ]; then
+              echo "## The wire surface changed"
+              echo
+              echo "This sync moves a value in \`.github/protocol-freeze.lock\`. Read the"
+              echo "lock diff before anything else: if upstream moved a protocol minor,"
+              echo "peers on the previous release cannot dial us for that protocol until"
+              echo "they upgrade; a major splits the network."
+              echo
+            fi
             if [ -n "$CONFLICTS" ]; then
               echo "## Conflicts — do not merge as-is"
               echo
