@@ -117,3 +117,40 @@ git merge-base main upstream/vX.Y.Z            # must equal the upstream tag com
 ```
 
 If the first shows one parent, the sync was squashed and must be redone.
+
+## Bot-authored pull requests and CI
+
+A pull request opened by this workflow is authored by `github-actions[bot]`. That is not
+by itself a problem: workflows do run on such pull requests here, confirmed on
+[#43](https://github.com/crtahlin/wasp/pull/43), where two of them reported.
+
+What went wrong on #43 was path filtering — `go.yml` ignored `**/*.md` on `pull_request`,
+and that pull request changed only `CHANGELOG.md`, so `Lint` and `Test` were never
+triggered and it merged on zero evidence. An earlier version of this playbook blamed
+GitHub holding checks in `action_required` and told you to run `gh api .../approve`. That
+was wrong, and the remedy does nothing. Read the check runs for the head SHA before
+concluding anything about why a check is missing.
+
+Two things now prevent a recurrence:
+
+1. **`paths-ignore` is gone from the `pull_request` trigger**, so the contexts always
+   report; documentation-only pull requests skip the work at step level instead. See #45.
+2. **The workflow verifies before opening the pull request.** `make build` runs inside the
+   sync job on the clean path, so a merge that resolves but does not compile never becomes
+   a pull request.
+
+The verification is deliberately skipped when the merge conflicts. A conflicted sync is
+committed with its markers intact so it can be resolved locally, and that tree cannot
+build; failing the job there would suppress the `[CONFLICTS]` pull request altogether and
+you would never learn the sync needs attention.
+
+Do not work around it by merging with admin rights. The protocol-freeze check is the one
+thing proving upstream has not moved the wire surface underneath us, and a sync is
+precisely when that matters.
+
+`Test (macos-latest)` and `Test (windows-latest)` are deliberately **not** required. #79
+turned out to be slowness rather than a flake — `TestBzzUploadDownloadWithRedundancy` takes
+6 s normally, 123 s under `-race`, and 9m42s on a macOS runner, against Go's 10-minute
+default — and #97 raises the timeout to fit. Promote both to required once several syncs
+and releases have passed with neither failing. The full list of required contexts and the
+rule for adding to it are in `release-process.md`.

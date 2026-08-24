@@ -118,6 +118,20 @@ jobs:
           git switch -c "$BRANCH"
           git add CHANGELOG.md
           git commit -m "chore(release): $NEXT"
+          # Verify the tree that will actually be proposed — including the
+          # changelog just written. The previous version ran these before the
+          # changelog existed, so it could not see the one file a release pull
+          # request changes. That is precisely how #43 merged with a trailing
+          # blank line at EOF and turned main red.
+          echo "::group::whitespace"
+          make check-whitespace
+          echo "::endgroup::"
+          echo "::group::protocol freeze"
+          ./scripts/protocol-freeze.sh --check
+          echo "::endgroup::"
+
+          # Nothing is pushed until the checks above pass, so a failure leaves
+          # no branch and no pull request behind.
           git push -u origin "$BRANCH" --force-with-lease
 
           BODY_FILE="$(mktemp)"
