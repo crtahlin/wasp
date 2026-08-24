@@ -18,6 +18,21 @@ Two consequences. Each worker spends most of its time blocked on disk with an
 idle CPU. And the sampler offers only `NumCPU` concurrent reads to the layer
 below, which on bench-1 is 8.
 
+## Hypothesis
+
+Sampling is limited by how many concurrent reads it offers the storage layer, not
+by hashing throughput. A single pool that does both blocks a CPU for the duration
+of every disk read, so offered read concurrency is pinned to the core count.
+
+If that is right, decoupling the two and raising reader concurrency alone should
+reduce `ChunkLoadDuration` per chunk iterated, with no change to hashing cost and
+bit-identical sample output.
+
+If it is wrong, the binding constraint is elsewhere — most likely the LevelDB
+`retrievalIdx` lookup inside `ChunkStore().Get()`, which #8 did not touch — and
+raising reader concurrency will move nothing. That is a genuinely likely outcome
+and is treated as an answer, not a failure. See Measurement.
+
 ## Why this is the other half of #8
 
 #8 removed Sharky's per-shard read serialisation. Measured in the harness, Sharky
@@ -31,9 +46,20 @@ reaching 87–100% of raw `pread`:
 | 32 | 383,950 | ~3,940,000 |
 
 **That ceiling is now unreachable from the sampler**, which offers 8 concurrent
-reads. Neither change delivers a node-level improvement alone: #8 raised a
-ceiling nothing reaches, and #9 without #8 would raise offered concurrency into a
-ceiling that was flat from 4 upward.
+reads.
+
+This prediction has since been tested. #8 was merged and benchmarked end to end
+on a node, and produced **no measurable change** — 1.2% faster on one comparison
+and 1.4% slower on another, both inside the noise. That null result is what this
+section predicts, not evidence against it: #8 raised a ceiling nothing reaches,
+so raising it alone should change nothing at the node level, and it did not.
+
+The honest consequence is that the case for #9 rests on the argument above rather
+than on a demonstrated gain from #8, and the harness numbers in the table are
+Sharky in isolation, not sampling. A microbenchmark that improves 10x while the
+node does not move is exactly the pattern that has already misled this project
+once. #9 is therefore worth doing as the test of the argument, not as a change
+expected to pay off.
 
 ## Design
 
@@ -55,13 +81,18 @@ outset rather than hardcoded.
 | | |
 |---|---|
 | flag | `sampler-read-concurrency` |
-| default | `runtime.NumCPU()` — preserves today's offered concurrency |
+| default | `max(4, runtime.NumCPU())` — preserves today's offered concurrency exactly |
 | raising it costs | more concurrent disk operations; on a slow or contended disk this queues rather than helps, and competes with pullsync writes |
 | lowering it costs | the sampler under-drives the storage layer and sampling takes longer, risking missing a redistribution round |
 | costs other nodes | nothing directly — this is local I/O, not peer-facing |
 
-Defaulting to `NumCPU` means **behaviour is unchanged unless an operator sets
-it**, so this change is measurable as a pure A/B on one binary. Given the 2.23x
+The default must be `max(4, runtime.NumCPU())`, not `runtime.NumCPU()`, because
+that is what `pkg/storer/sample.go:77` uses today. On a host with fewer than four
+cores the simpler expression would *lower* concurrency, so the change would not
+be behaviour-preserving and the A/B would be comparing two different things.
+
+With the default matched, **behaviour is unchanged unless an operator sets it**,
+so this change is measurable as a pure A/B on one binary. Given the 2.23x
 disk-time variance recorded in #13, being able to flip a setting rather than
 rebuild is what makes the experiment tractable at all.
 
@@ -83,8 +114,16 @@ no sampler. So this is measured on the node, which means contending with the
 
 Method:
 
-1. Three runs at each of several `sampler-read-concurrency` values (default,
-   4x, 8x), via `/rchash` using the node's own overlay as anchor1.
+1. **At least 30 runs** at each of several `sampler-read-concurrency` values
+   (default, 4x, 8x), via `/rchash` using the node's own overlay as anchor1.
+
+   Not three. `/rchash` timings on this node are **bimodal**, not noisy around a
+   mean: a 243-run baseline separated into a fast cluster and a slow cluster with
+   no meaningful density between them. Three runs cannot tell which cluster they
+   landed in, so any difference they show is a sampling artefact. Report the
+   **fast-cluster median** and the fraction of runs in each cluster, and treat a
+   change in that fraction as a result in its own right — it may be the only
+   thing that moves.
 2. Compare `ChunkLoadDuration` per chunk iterated, not totals — `TotalIterated`
    varies between runs.
 3. Matched conditions: same peer count, same storage radius, same interval after
