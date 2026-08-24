@@ -33,3 +33,8 @@ _testmain.go
 
 AGENTS.md
 CLAUDE.md
+
+# `go build ./cmd/bee/` (no -o) writes the binary here. `make binary` uses
+# dist/, which is already ignored, but a bare go build is easy to run by
+# accident and a ~70MB blob is easy to sweep in with `git add -A`.
+/bee
