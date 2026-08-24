@@ -116,6 +116,35 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify before opening the pull request
+        # A pull request opened by a workflow using GITHUB_TOKEN is authored by
+        # github-actions[bot], and GitHub holds its check runs in
+        # action_required pending manual approval. Such a pull request can be
+        # merged with no checks having run at all — which already happened, on
+        # the first release pull request (#43).
+        #
+        # For a sync that is unacceptable: these carry thousands of lines of
+        # upstream code, and the protocol-freeze check is the one thing that
+        # proves upstream has not moved the wire surface underneath us.
+        #
+        # Run the critical checks here, before the pull request exists, so
+        # verification does not depend on pull request CI firing. Fails the
+        # workflow rather than opening an unverified pull request. See #45.
+        run: |
+          set -euo pipefail
+          echo "::group::protocol freeze"
+          ./scripts/protocol-freeze.sh --check
+          echo "::endgroup::"
+          echo "::group::build"
+          make build
+          echo "::endgroup::"
+
       - name: Open pull request
         if: steps.target.outputs.skip == 'false'
         env:

@@ -117,3 +117,33 @@ git merge-base main upstream/vX.Y.Z            # must equal the upstream tag com
 ```
 
 If the first shows one parent, the sync was squashed and must be redone.
+
+## Bot-authored pull requests and CI
+
+A pull request opened by this workflow is authored by `github-actions[bot]`, and GitHub
+holds its check runs in `action_required` pending manual approval. Historically that meant
+such a pull request could be merged with **no checks having run at all** — which happened
+on the first release pull request, putting a lint failure on `main`.
+
+Two things now prevent it:
+
+1. **The workflow verifies before opening the pull request.** The protocol-freeze check
+   and a build run inside the sync job. If either fails, the job fails and no pull request
+   is created. Verification does not depend on pull request CI firing.
+2. **`main` requires status checks.** `Protocol freeze`, `Lint`, `Lint PR Title` and
+   `Test (ubuntu-latest)` must pass before any pull request can merge. A held check is not
+   a passing check, so a bot pull request whose runs are unapproved is blocked rather than
+   mergeable.
+
+If a sync pull request will not merge because its checks are held, approve them:
+
+```bash
+gh api -X POST repos/crtahlin/wasp/actions/runs/<run-id>/approve
+```
+
+Do not work around it by merging with admin rights. The protocol-freeze check is the one
+thing proving upstream has not moved the wire surface underneath us, and a sync is
+precisely when that matters.
+
+`Test (macos-latest)` and `Test (windows-latest)` are deliberately **not** required while
+the remaining flake in #79 is open. Add them once it is fixed.

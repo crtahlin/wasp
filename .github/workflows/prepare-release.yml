@@ -94,6 +94,25 @@ jobs:
             exit 1
           fi
 
+      - name: Verify before opening the pull request
+        # A pull request opened by a workflow using GITHUB_TOKEN is authored by
+        # github-actions[bot], and GitHub holds its check runs in
+        # action_required pending manual approval, so it can be merged with no
+        # checks having run at all.
+        #
+        # That is not hypothetical here: the first release pull request (#43)
+        # merged with zero checks and put a lint failure on main. Run the
+        # cheap, high-value checks before the pull request exists so
+        # verification does not depend on pull request CI firing. See #45.
+        run: |
+          set -euo pipefail
+          echo "::group::whitespace"
+          make check-whitespace
+          echo "::endgroup::"
+          echo "::group::protocol freeze"
+          ./scripts/protocol-freeze.sh --check
+          echo "::endgroup::"
+
       - name: Open release pull request
         if: ${{ inputs.dry_run == false }}
         env:

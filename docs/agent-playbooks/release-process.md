@@ -103,3 +103,21 @@ look like a downgrade.
 Announce what an operator needs to know: which upstream base it carries, which
 experiments are in it, and what the rollback is. Every release note repeats the
 experimental-software warning — people find releases without reading the README.
+
+## Release pull requests and CI
+
+The release pull request is opened by a workflow and is therefore authored by
+`github-actions[bot]`, whose check runs GitHub holds in `action_required`. The first
+release pull request merged with zero checks and put a lint failure on `main` — a
+`CHANGELOG.md` ending in a blank line, which `make check-whitespace` rejects.
+
+The workflow now runs `make check-whitespace` and the protocol-freeze check **before**
+opening the pull request, and `main` requires status checks to pass before any merge. See
+#45.
+
+If the pull request will not merge because its checks are held, approve the run rather
+than bypassing the requirement:
+
+```bash
+gh api -X POST repos/crtahlin/wasp/actions/runs/<run-id>/approve
+```
