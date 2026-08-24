@@ -260,22 +260,39 @@ func TestWritesBlockWhenLevel0OutrunsCompaction(t *testing.T) {
 		<-done
 	})
 
-	select {
-	case <-done:
-		t.Fatal("writes completed with compaction disabled; the pause trigger did not engage, " +
-			"so this test is no longer reproducing what it claims to")
-	case <-time.After(3 * time.Second):
-		// Still blocked, which is the point.
+	// Wait for the pause to be observable rather than assuming it happens within
+	// some interval. An earlier version inferred "blocked" from "the writer has
+	// not finished in three seconds", which held on a fast machine and failed on
+	// a Windows runner that had only reached depth 5 by then. That is a latency
+	// assertion wearing a liveness assertion's clothes — the same mistake as
+	// issue #99.
+	var (
+		got    map[string]map[string]float64
+		paused float64
+		depth  float64
+	)
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-done:
+			t.Fatal("writes completed with compaction disabled; the pause trigger never " +
+				"engaged, so this test is no longer reproducing what it claims to")
+		default:
+		}
+
+		got = gather(t, st)
+		paused = got["bee_leveldb_write_paused"][""]
+		depth = got["bee_leveldb_level_tables"]["0"]
+		if paused == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	got := gather(t, st)
-	paused, ok := got["bee_leveldb_write_paused"]
-	if !ok {
-		t.Fatal("bee_leveldb_write_paused was not exposed")
-	}
-	if paused[""] != 1 {
-		t.Errorf("writes are blocked but write_paused reads %v; the metric does not "+
-			"detect the state it exists for", paused[""])
+	if paused != 1 {
+		t.Fatalf("writes never paused within the deadline (level 0 depth reached %v, "+
+			"pause trigger is 12); either compaction ran despite being disabled, or "+
+			"write_paused does not report the state it exists for", depth)
 	}
 
 	if depth := got["bee_leveldb_level_tables"]["0"]; depth < 12 {
