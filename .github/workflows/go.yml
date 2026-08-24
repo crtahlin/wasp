@@ -71,6 +71,54 @@ jobs:
     - name: Build
       if: steps.changed.outputs.code == 'true'
       run: make build
+    - name: SIMD stub must run on a scratch stack
+      if: matrix.os == 'ubuntu-latest'
+      # Guards #92. The stub must switch SP to a caller-supplied scratch stack
+      # before calling the XKCP blob. Running that foreign code on the goroutine
+      # stack corrupts memory and kills the node in ~12 minutes under load.
+      #
+      # The hasher's own tests cannot catch a regression here: they check that
+      # digests are correct, and they are correct either way. The symptom only
+      # appears on a loaded node, minutes later, in an unrelated subsystem. So
+      # assert the property in CI instead.
+      shell: bash
+      run: |
+        # Strip comments first: these strings must be real instructions, not
+        # prose about them. The original guard grepped raw text and would have
+        # been satisfied by a comment.
+        fail=0
+        for f in pkg/keccak/keccak_times4_linux_amd64.s pkg/keccak/keccak_times8_linux_amd64.s; do
+          code=$(sed 's://.*::' "$f")
+          need() {
+            if ! grep -qF "$1" <<<"$code"; then
+              echo "::error file=$f::missing '$1' — $2 (see issue #92)"
+              fail=1
+            fi
+          }
+          need 'MOVQ SP, BX'    'the goroutine stack pointer is no longer saved in a register'
+          need 'MOVQ BX, (AX)'  'the goroutine stack pointer is no longer saved on the scratch stack'
+          need 'MOVQ AX, SP'    'the blob no longer runs on a scratch stack, which is the bug itself'
+          need 'MOVQ BX, SP'    'the goroutine stack pointer is never restored, which is worse than the bug'
+          need 'SUBQ BX, CX'    'the two saved stack pointers are no longer compared'
+          need 'NOSPLIT'        'a stack-growth prologue may be emitted while SP is not the one Go expects'
+          need 'NO_LOCAL_POINTERS' 'the frame may be scanned as if it held live pointers'
+          # No FP reference may appear while SP is not the goroutine stack
+          # pointer. FP is SP-relative, so every such reference is garbage.
+          # Reading the arguments before the switch and writing the return
+          # value after the restore is what makes this stub correct; the write
+          # after the restore is legitimate and must not trip the check.
+          sw=$(grep -n 'MOVQ AX, SP' <<<"$code" | head -1 | cut -d: -f1)
+          rs=$(grep -n 'MOVQ BX, SP' <<<"$code" | head -1 | cut -d: -f1)
+          if [ -z "$sw" ] || [ -z "$rs" ] || [ "$sw" -ge "$rs" ]; then
+            echo "::error file=$f::cannot locate the stack switch and restore in order (see issue #92)"
+            fail=1
+          elif sed -n "$((sw+1)),$((rs-1))p" <<<"$code" | grep -q '(FP)'; then
+            echo "::error file=$f::an FP reference occurs while SP points at the scratch stack (see issue #92)"
+            fail=1
+          fi
+        done
+        [ "$fail" -eq 0 ] || exit 1
+        echo "ok: both SIMD stubs switch to a scratch stack, restore it, cross-check it, and read their arguments first"
     - name: Green Tea GC must stay disabled
       if: matrix.os == 'ubuntu-latest' && steps.changed.outputs.code == 'true'
       # Guards issue #69: Go 1.26's default Green Tea GC corrupts the heap under
