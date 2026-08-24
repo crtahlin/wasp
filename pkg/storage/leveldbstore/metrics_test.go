@@ -6,6 +6,7 @@ package leveldbstore_test
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -224,6 +225,23 @@ func TestCollectAfterCloseIsQuiet(t *testing.T) {
 func TestWritesBlockWhenLevel0OutrunsCompaction(t *testing.T) {
 	t.Parallel()
 
+	if raceDetectorEnabled {
+		// Ending this test means releasing a writer that is blocked with no
+		// timeout, and every way out is unsound or unavailable:
+		//
+		//   Store.Close      writes the dirty-shutdown marker delete, so it
+		//                    blocks on the same pause          — issue #115
+		//   CompactRange     takes the writer lock first, which the paused
+		//                    writer holds, so it blocks too
+		//   db.Close         works, but races inside goleveldb — issue #114
+		//
+		// The last is the only one that returns, so it is what the cleanup uses,
+		// and it is why this cannot run under the race detector. The skip is the
+		// honest option: the alternative is a test that reports a real upstream
+		// race as its own failure on every CI run.
+		t.Skip("closing a paused database races inside goleveldb; see issue #114")
+	}
+
 	st, _, err := leveldbstore.New(t.TempDir(), &opt.Options{
 		CompactionL0Trigger: 1 << 20, // never compact
 		WriteBuffer:         1 << 10, // rotate often, so files pile up fast
@@ -233,29 +251,23 @@ func TestWritesBlockWhenLevel0OutrunsCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	db := st.DB()
+	var stop atomic.Bool
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 5000; i++ {
+		for i := 0; i < 5000 && !stop.Load(); i++ {
 			if err := db.Put([]byte(fmt.Sprintf("k%06d", i)), make([]byte, 512), nil); err != nil {
-				return // closed underneath us at cleanup; expected
+				return
 			}
 		}
 	}()
 
 	t.Cleanup(func() {
-		// Close the underlying database rather than the Store, and the reason is
-		// a finding in its own right: Store.Close deletes the dirty-shutdown
-		// marker, that delete is a write, and it blocks on exactly the pause this
-		// test creates. Confirmed from a goroutine dump — Close sits in
-		// leveldb.(*DB).putRec. So a node whose writes are paused cannot shut
-		// down cleanly either; the marker survives and the next start runs
-		// recovery. Worth knowing when reading #24.
-		//
-		// leveldb.Close does not write. It closes closeC, which releases the
-		// blocked writer with ErrClosed and frees the file handles. Waiting for
-		// that writer matters on Windows, where TempDir cleanup fails while any
-		// handle is still open.
+		stop.Store(true)
+		// db.Close is the only exit that returns; see the skip at the top of this
+		// test for why the other two do not. Waiting for the writer matters on
+		// Windows, where the temporary directory cannot be removed while a handle
+		// is still open.
 		_ = db.Close()
 		<-done
 	})
