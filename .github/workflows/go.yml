@@ -44,6 +44,29 @@ jobs:
         sudo sysctl -w kern.ipc.maxsockbuf=6291456
     - name: Build
       run: make build
+    - name: SIMD stub must run on a scratch stack
+      if: matrix.os == 'ubuntu-latest'
+      # Guards #92. The stub must switch SP to a caller-supplied scratch stack
+      # before calling the XKCP blob. Running that foreign code on the goroutine
+      # stack corrupts memory and kills the node in ~12 minutes under load.
+      #
+      # The hasher's own tests cannot catch a regression here: they check that
+      # digests are correct, and they are correct either way. The symptom only
+      # appears on a loaded node, minutes later, in an unrelated subsystem. So
+      # assert the property in CI instead.
+      shell: bash
+      run: |
+        for f in pkg/keccak/keccak_times4_linux_amd64.s pkg/keccak/keccak_times8_linux_amd64.s; do
+          if ! grep -q 'MOVQ AX, SP' "$f" || ! grep -q 'MOVQ SP, BX' "$f"; then
+            echo "::error::$f no longer switches to a scratch stack (see issue #92)"
+            exit 1
+          fi
+          if ! grep -q 'NOSPLIT' "$f"; then
+            echo "::error::$f must be NOSPLIT: no stack growth check may run while SP is not the goroutine's"
+            exit 1
+          fi
+        done
+        echo "ok: both SIMD stubs switch to a scratch stack and are NOSPLIT"
     - name: Green Tea GC must stay disabled
       if: matrix.os == 'ubuntu-latest'
       # Guards issue #69: Go 1.26's default Green Tea GC corrupts the heap under

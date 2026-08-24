@@ -7,6 +7,7 @@
 package keccak
 
 import (
+	"runtime"
 	"sync"
 	"unsafe"
 )
@@ -42,11 +43,23 @@ func keccak256x4(inputs *[4][]byte, outputs *[4]Hash256) {
 	sp := scratchStacks.Get().(*[]byte)
 	// The stack grows downward, so hand over the top of the buffer.
 	keccak256x4asm(inputs, outputs, unsafe.Pointer(&(*sp)[scratchStackSize-64]))
+	// The assembly is //go:noescape and its frame is NO_LOCAL_POINTERS, so the
+	// collector cannot see the scratch buffer while the blob is writing to it.
+	// Put(sp) below happens to keep sp live, but stating the requirement beats
+	// relying on that: without it, moving or removing the Put would let the
+	// buffer be collected mid-call.
+	runtime.KeepAlive(sp)
 	scratchStacks.Put(sp)
 }
 
 func keccak256x8(inputs *[8][]byte, outputs *[8]Hash256) {
 	sp := scratchStacks.Get().(*[]byte)
 	keccak256x8asm(inputs, outputs, unsafe.Pointer(&(*sp)[scratchStackSize-64]))
+	// The assembly is //go:noescape and its frame is NO_LOCAL_POINTERS, so the
+	// collector cannot see the scratch buffer while the blob is writing to it.
+	// Put(sp) below happens to keep sp live, but stating the requirement beats
+	// relying on that: without it, moving or removing the Put would let the
+	// buffer be collected mid-call.
+	runtime.KeepAlive(sp)
 	scratchStacks.Put(sp)
 }
