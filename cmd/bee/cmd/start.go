@@ -193,6 +193,15 @@ func buildBeeNodeAsync(ctx context.Context, c *command, cmd *cobra.Command, logg
 	return respC
 }
 
+// simdSelectedBy distinguishes an operator's explicit choice from the default,
+// so a log line is enough to tell which happened.
+func simdSelectedBy(explicit bool) string {
+	if explicit {
+		return "configuration"
+	}
+	return "cpu-detection"
+}
+
 func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger log.Logger) (*node.Bee, error) {
 	var err error
 
@@ -275,12 +284,35 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		neighborhoodSuggester = c.config.GetString(optionNameNeighborhoodSuggester)
 	}
 
-	useSIMD := c.config.GetBool(optionUseSIMD)
+	// SIMD hashing is on by default wherever the CPU can run it, and off
+	// everywhere else. It measured 25% off reserve-sample wall clock on bench-1
+	// (92.0s to 69.0s over 243 runs), which is worth having without an operator
+	// needing to know the flag exists. See issue #54.
+	//
+	// It cannot simply default to true: bee refuses to start when the flag is
+	// set on hardware without AVX2, so a blanket default would stop every ARM
+	// and older x86 node from booting.
+	//
+	// An explicit setting is still honoured strictly, including that refusal.
+	// Someone who asked for SIMD and cannot have it should be told, not quietly
+	// given the slow path — the whole point of asking was to be sure.
+	simdSupported := runtime.GOOS == "linux" && runtime.GOARCH == "amd64" && keccak.HasSIMD()
+	// IsSet is false for an option nobody mentioned and true for one set on the
+	// command line, in the config file, or through BEE_USE_SIMD_HASHING —
+	// including when it is set to the same value as the flag default. It does
+	// not count the default itself, because viper looks it up with flagDefault
+	// disabled. TestSimdOptionDetection pins all four cases, since the whole
+	// default rests on that distinction.
+	simdChosen := c.config.IsSet(optionUseSIMD)
+	useSIMD := simdSupported
+	if simdChosen {
+		useSIMD = c.config.GetBool(optionUseSIMD)
+	}
 	if useSIMD {
-		if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		if simdChosen && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64") {
 			return nil, fmt.Errorf("SIMD hashing requires linux/amd64 (this build is %s/%s)", runtime.GOOS, runtime.GOARCH)
 		}
-		if !keccak.HasSIMD() {
+		if simdChosen && !keccak.HasSIMD() {
 			return nil, errors.New("SIMD hashing requires a CPU with AVX2 or AVX-512; this CPU has neither")
 		}
 		bmt.SetSIMDOptIn(true)
@@ -298,7 +330,13 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		// an operator debugging an odd crash should be able to see from the
 		// logs whether it was active.
 		logger.Info("SIMD hashing enabled",
-			"batch_width", keccak.BatchWidth(), "avx512", keccak.HasAVX512())
+			"batch_width", keccak.BatchWidth(), "avx512", keccak.HasAVX512(),
+			"selected_by", simdSelectedBy(simdChosen))
+	} else if !simdChosen && !simdSupported {
+		// Say so once at startup. An operator comparing two machines and
+		// wondering why one samples faster should not have to guess.
+		logger.Debug("SIMD hashing not available on this platform",
+			"os", runtime.GOOS, "arch", runtime.GOARCH, "avx2_or_avx512", keccak.HasSIMD())
 	}
 
 	var bzzTokenAddress common.Address

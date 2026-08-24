@@ -341,7 +341,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().String(optionAutoTLSDomain, p2pforge.DefaultForgeDomain, "autotls domain")
 	cmd.Flags().String(optionAutoTLSRegistrationEndpoint, p2pforge.DefaultForgeEndpoint, "autotls registration endpoint")
 	cmd.Flags().String(optionAutoTLSCAEndpoint, p2pforge.DefaultCAEndpoint, "autotls certificate authority endpoint")
-	cmd.Flags().Bool(optionUseSIMD, false, "use SIMD BMT hasher (available only on linux amd64 platforms)")
+	cmd.Flags().Bool(optionUseSIMD, false, "use SIMD BMT hasher; unset means enable it where the CPU supports it (linux/amd64 with AVX2 or AVX-512). Setting it explicitly is strict: true on unsupported hardware refuses to start")
 }
 
 // preRun must be called from every command's PreRunE, after which c.logger is
