@@ -1,0 +1,8 @@
+# A unified diff represents a blank context line as a single space, which
+# `git diff --check` reports as trailing whitespace — so `make check-whitespace`
+# fails on any patch containing one. Stripping it would corrupt the patch.
+#
+# Exempt patch files from whitespace checking. They are machine-generated and
+# must be byte-exact for `git apply` to accept them.
+*.patch -whitespace
+*.diff  -whitespace

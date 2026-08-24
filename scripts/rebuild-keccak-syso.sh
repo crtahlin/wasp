@@ -43,6 +43,33 @@ git -C "$REPO" checkout --quiet "$COMMIT"
 git -C "$REPO" submodule update --init --recursive --quiet
 echo "    source ready at $(git -C "$REPO" rev-parse --short HEAD)"
 
+# --- 1b. our patches against the upstream source ----------------------------
+# Applied to a clean checkout so the divergence from ethersphere/XKCP is
+# visible and reviewable, rather than living as an edit in somebody's clone.
+# A patch that does not apply is a hard failure: silently building an
+# unpatched blob is exactly the kind of thing that produces a bug nobody can
+# reproduce. See pkg/keccak/patches/README.md.
+PATCHES="$KECCAK/patches"
+if [ -d "$PATCHES" ]; then
+  applied=0
+  for patch in "$PATCHES"/*.patch; do
+    [ -e "$patch" ] || continue
+    if git -C "$REPO" apply --check "$patch" 2>/dev/null; then
+      git -C "$REPO" apply "$patch"
+      echo "    applied $(basename "$patch")"
+      applied=$((applied+1))
+    elif git -C "$REPO" apply --reverse --check "$patch" 2>/dev/null; then
+      echo "    already applied $(basename "$patch")"
+      applied=$((applied+1))
+    else
+      echo "ERROR: $(basename "$patch") does not apply to $COMMIT." >&2
+      echo "       Rebase it against the pinned commit before rebuilding." >&2
+      exit 1
+    fi
+  done
+  echo "    $applied patch(es) in effect"
+fi
+
 # --- 2. the fortification fix ----------------------------------------------
 # Modern gcc turns on -D_FORTIFY_SOURCE=3 at -O2 and above, which rewrites
 # memcpy into __memcpy_chk. The entire point of this build is to link each

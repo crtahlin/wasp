@@ -20,15 +20,22 @@ import (
 // directory; both are checked against the on-disk files by TestSysoChecksums
 // so any accidental rebuild or corrupted check-in is caught on CI.
 //
-// To refresh after a legitimate rebuild (see README.md):
+// These blobs are built by ./scripts/rebuild-keccak-syso.sh from the XKCP
+// commit pinned in REMOTE_COMMIT, with the patches in patches/ applied. The
+// script normalises the build-path symbols that ld embeds, so the same source
+// and toolchain reproduce the same bytes wherever the build ran — which is what
+// lets these constants mean anything beyond "unchanged since someone pinned
+// them". See README.md.
+//
+// To refresh after a legitimate rebuild:
 //
 //	sha256sum keccak_times4_linux_amd64.syso \
 //	         keccak_times8_linux_amd64.syso > CHECKSUM
 //
 // then update the constants below to match.
 var expectedChecksums = map[string]string{
-	"keccak_times4_linux_amd64.syso": "398953aa6d446ef64210a94ddf1f807ad6b9137d913b66adf83bbd6f665d5fbd",
-	"keccak_times8_linux_amd64.syso": "9e53e1b590f657b2c817b816126111dedc167b5b7543e50106dd4435fee48b3c",
+	"keccak_times4_linux_amd64.syso": "50722b8bbb94eddd9de3c72a30a2bdbf6d0fb9740d57baf73d5cfafa6e3ce8a3",
+	"keccak_times8_linux_amd64.syso": "46596e6a0cc486afb3bff65242b48c1456205349efc5d8ecdc3013c1265753ce",
 }
 
 func TestSysoChecksums(t *testing.T) {
