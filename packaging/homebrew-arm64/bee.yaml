@@ -143,5 +143,12 @@ password-file: "/opt/homebrew/var/lib/swarm-bee/password"
 # autotls-registration-endpoint: ""
 ## autotls ca endpoint (default: https://acme-v02.api.letsencrypt.org/directory)
 # autotls-ca-endpoint: ""
-## SIMD BMT hashing opt-in flag (only available on linux amd64)
+# Use the SIMD BMT hasher. Leave this commented out: unset means "enable it
+# where the CPU supports it", which is linux/amd64 with AVX2 or AVX-512, and
+# off everywhere else. Measured on an AVX2 machine: 25% off reserve-sample
+# wall clock.
+#
+# Setting it explicitly is strict. true on hardware without AVX2 refuses to
+# start, rather than quietly falling back, so that asking for it means being
+# sure of it. Set false to keep the pure-Go path on capable hardware.
 # use-simd-hashing: false
