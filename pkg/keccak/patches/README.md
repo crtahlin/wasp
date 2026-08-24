@@ -12,5 +12,6 @@ and nothing is ever pushed to `ethersphere`.
 | Patch | Issue | What it changes |
 |---|---|---|
 | `0001-clamp-negative-tail.patch` | [#91](https://github.com/crtahlin/wasp/issues/91) | Clamps the final-block `tail` index in both wrappers, which goes negative for any lane shorter than the longest — including the nil filler lanes the API documents as permitted — and writes before a stack buffer. |
+| `0002-generated-stub-frame-size.patch` | [#89](https://github.com/crtahlin/wasp/issues/89) | Raises the Go stack frame the generator emits for the 4-lane stub from 8192 to 16384 bytes. The blob needs up to 11484, so the generated glue overflows the goroutine stack by about 3.3 KB — silently, because the digests stay correct. |
 
 Each patch should be offered upstream separately. See the issue for where.
