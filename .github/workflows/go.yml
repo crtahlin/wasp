@@ -43,6 +43,8 @@ jobs:
     - name: Are there code changes?
       id: changed
       shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         # Documentation-only pull requests still report these contexts, but
         # skip the work. Compare against the merge base rather than the tip so
@@ -50,9 +52,21 @@ jobs:
         if [ "${{ github.event_name }}" != "pull_request" ]; then
           echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
         fi
-        git fetch -q --depth=1 origin "${{ github.base_ref }}" || true
-        FILES=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD || echo "")
-        if [ -z "$FILES" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+        # Ask GitHub which files changed rather than diffing locally.
+        # actions/checkout fetches depth 1, so `git diff base...HEAD` has no
+        # merge base and dies with "no merge base" — which is what happened on
+        # the first documentation-only pull request after this was added.
+        # Harmlessly, because the detector fails open, but it meant the skip
+        # never once engaged.
+        FILES=$(gh api --paginate \
+          "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+          --jq '.[].filename' 2>/dev/null || echo "")
+        # Fail open: no evidence means run everything, never skip.
+        if [ -z "$FILES" ]; then
+          echo "could not determine changed files; running everything"
+          echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+        fi
+        echo "changed files:"; echo "$FILES" | sed 's/^/  /'
         if echo "$FILES" | grep -qvE '(\.md$|^packaging/|^openapi/|^\.github/ISSUE_TEMPLATE/)'; then
           echo "code=true" >> "$GITHUB_OUTPUT"
         else
@@ -155,13 +169,27 @@ jobs:
     - name: Are there code changes?
       id: changed
       shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         if [ "${{ github.event_name }}" != "pull_request" ]; then
           echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
         fi
-        git fetch -q --depth=1 origin "${{ github.base_ref }}" || true
-        FILES=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD || echo "")
-        if [ -z "$FILES" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+        # Ask GitHub which files changed rather than diffing locally.
+        # actions/checkout fetches depth 1, so `git diff base...HEAD` has no
+        # merge base and dies with "no merge base" — which is what happened on
+        # the first documentation-only pull request after this was added.
+        # Harmlessly, because the detector fails open, but it meant the skip
+        # never once engaged.
+        FILES=$(gh api --paginate \
+          "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+          --jq '.[].filename' 2>/dev/null || echo "")
+        # Fail open: no evidence means run everything, never skip.
+        if [ -z "$FILES" ]; then
+          echo "could not determine changed files; running everything"
+          echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+        fi
+        echo "changed files:"; echo "$FILES" | sed 's/^/  /'
         if echo "$FILES" | grep -qvE '(\.md$|^packaging/|^openapi/|^\.github/ISSUE_TEMPLATE/)'; then
           echo "code=true" >> "$GITHUB_OUTPUT"
         else
