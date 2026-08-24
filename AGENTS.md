@@ -143,6 +143,20 @@ Carry corrections with the finding. Where an earlier report of the same problem
 was wrong, say so in the issue and say what is actually true. Reporting a
 plausible but false diagnosis is worse than reporting nothing.
 
+**12. Wrap commit message bodies at 72 columns.**
+
+`commitlint.config.js` sets `footer-max-line-length` to 72 and the parser treats the
+first line containing a `#N` issue reference as the start of the footer. So a body
+paragraph that mentions an issue — which most good commit messages do — is linted as
+footer, and any line over 72 characters fails `Lint`. There is no `body-max-line-length`
+rule, which makes the failure look arbitrary if you do not know this.
+
+Wrapping every body line at 72 avoids it. Check before pushing:
+
+```bash
+git log -1 --format=%B | awk 'NR>1 && length($0)>72 {print "too long: " $0}'
+```
+
 ## Where the detail lives
 
 | If you are… | Read |
