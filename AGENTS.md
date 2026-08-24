@@ -154,8 +154,13 @@ rule, which makes the failure look arbitrary if you do not know this.
 Wrapping every body line at 72 avoids it. Check before pushing:
 
 ```bash
-git log -1 --format=%B | awk 'NR>1 && length($0)>72 {print "too long: " $0}'
+git log -1 --format=%B | python3 -c 'import sys
+for i, l in enumerate(sys.stdin.read().split("\n")):
+    if i and len(l) > 72: print("too long:", l)'
 ```
+
+Use character counting, not `awk`'s `length()`, which counts bytes and so
+falsely flags any line containing an em-dash or other non-ASCII character.
 
 ## Where the detail lives
 
