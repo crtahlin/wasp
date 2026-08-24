@@ -60,6 +60,93 @@ func TestSum256x4(t *testing.T) {
 // is partial: some lanes carry real data, the rest are nil. The wrapper
 // produces a (meaningless) digest for the nil lanes and correct digests for
 // the real lanes — only the latter are asserted.
+// These cover the shape that made the C wrapper write out of bounds: a partial
+// batch whose ACTIVE lanes are at least one full 136-byte rate block long.
+//
+// The wrapper computes each lane's final-block length as len - max_full*136,
+// where max_full is the maximum block count across ALL lanes. For a lane
+// shorter than the longest — which every nil filler lane is, at length 0 —
+// that goes negative, and the padding byte is written at a negative index,
+// before a 136-byte stack array. See issue #91.
+//
+// TestSum256x4_PartialBatch below cannot reach it: its lengths are 64, 96 and
+// 128, all under the rate, so max_full is always 0 and the value never goes
+// negative. Nothing covered this shape before.
+//
+// What these tests can and cannot assert is worth being precise about. The
+// out-of-bounds write itself is not observable from Go — the stub runs the blob
+// on a 64 KiB pooled scratch stack, so a write 136 bytes below a buffer deep
+// inside that stack lands harmlessly within it. Catching the write requires
+// AddressSanitizer at the C level; `scripts/rebuild-keccak-syso.sh` documents
+// how, and the fix is carried as a patch in pkg/keccak/patches.
+//
+// Nor can the filler lanes' digests be asserted. A lane that absorbs nothing is
+// still permuted by the shared PermuteAll in the full-block loop, so its output
+// is not the empty-message digest and is not any other well-defined value
+// either. (The wrapper's own comment claims skipping AddBytes leaves a lane's
+// state unchanged; it does not — the permutation runs regardless.) Filler
+// output is undefined whenever an active lane reaches the rate, which is
+// stronger than the API's "must be ignored", and is why Sum256x4 documents it
+// that way.
+//
+// What is asserted is the part that matters: every real lane hashes correctly
+// in a shape that previously invoked undefined behaviour on every call.
+func TestSum256x4_PartialBatchLongLanes(t *testing.T) {
+	if !HasSIMD() {
+		t.Skip("AVX2 not available on this CPU")
+	}
+
+	for _, realLen := range []int{136, 137, 200, 272, 4096} {
+		for realLanes := 1; realLanes < 4; realLanes++ {
+			t.Run(fmt.Sprintf("real_%d_of_4_len_%d", realLanes, realLen), func(t *testing.T) {
+				var inputs [4][]byte
+				var expected [4][]byte
+				for i := range realLanes {
+					buf := make([]byte, realLen)
+					_, _ = rand.Read(buf)
+					inputs[i] = buf
+					expected[i] = referenceHash(buf)
+				}
+
+				got := Sum256x4(inputs)
+				for i := range realLanes {
+					if !bytes.Equal(got[i][:], expected[i]) {
+						t.Errorf("real lane %d mismatch:\n  got  %x\n  want %x", i, got[i], expected[i])
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSum256x8_PartialBatchLongLanes(t *testing.T) {
+	if !HasAVX512() {
+		t.Skip("AVX-512 not available on this CPU")
+	}
+
+	for _, realLen := range []int{136, 200, 4096} {
+		for realLanes := 1; realLanes < 8; realLanes++ {
+			t.Run(fmt.Sprintf("real_%d_of_8_len_%d", realLanes, realLen), func(t *testing.T) {
+				var inputs [8][]byte
+				var expected [8][]byte
+				for i := range realLanes {
+					buf := make([]byte, realLen)
+					_, _ = rand.Read(buf)
+					inputs[i] = buf
+					expected[i] = referenceHash(buf)
+				}
+
+				got := Sum256x8(inputs)
+				for i := range realLanes {
+					if !bytes.Equal(got[i][:], expected[i]) {
+						t.Errorf("real lane %d mismatch:\n  got  %x\n  want %x", i, got[i], expected[i])
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestSum256x4_PartialBatch(t *testing.T) {
 	if !HasSIMD() {
 		t.Skip("AVX2 not available on this CPU")

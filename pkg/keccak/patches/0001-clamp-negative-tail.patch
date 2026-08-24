@@ -1,0 +1,42 @@
+diff --git a/go_wrapper.c b/go_wrapper.c
+index b32d582..18a36e8 100644
+--- a/go_wrapper.c
++++ b/go_wrapper.c
+@@ -58,7 +58,15 @@ void go_keccak256x4(void *inputs_ptr, void *outputs_ptr)
+     unsigned char padded[136];
+     for (int i = 0; i < 4; i++) {
+         int64_t len  = inputs[i].len < 0 ? 0 : inputs[i].len;
+-        int64_t tail = len - max_full * 136; /* 0..135 */
++        /* Lanes shorter than the longest have nothing left to absorb, so
++           their final block is pure padding. That includes nil filler lanes,
++           where len is 0 and the API explicitly permits them. Without this
++           clamp tail goes negative and padded[tail] writes BEFORE the buffer:
++           with one 200-byte lane and three nil lanes, three writes 136 bytes
++           below a 136-byte stack array, per call. */
++        int64_t tail = len - max_full * 136;
++        if (tail < 0)   tail = 0;
++        if (tail > 135) tail = 135;   /* unreachable; the compiler cannot know */
+         memset(padded, 0, 136);
+         if (tail > 0 && inputs[i].ptr) {
+             // Explicit byte loop: the standalone .syso link has no libc, so a
+diff --git a/go_wrapper_avx512.c b/go_wrapper_avx512.c
+index 34bebbe..47f1e46 100644
+--- a/go_wrapper_avx512.c
++++ b/go_wrapper_avx512.c
+@@ -58,7 +58,15 @@ void go_keccak256x8(void *inputs_ptr, void *outputs_ptr)
+     unsigned char padded[136];
+     for (int i = 0; i < 8; i++) {
+         int64_t len  = inputs[i].len < 0 ? 0 : inputs[i].len;
+-        int64_t tail = len - max_full * 136; /* 0..135 */
++        /* Lanes shorter than the longest have nothing left to absorb, so
++           their final block is pure padding. That includes nil filler lanes,
++           where len is 0 and the API explicitly permits them. Without this
++           clamp tail goes negative and padded[tail] writes BEFORE the buffer:
++           with one 200-byte lane and seven nil lanes, seven writes 136 bytes
++           below a 136-byte stack array, per call. */
++        int64_t tail = len - max_full * 136;
++        if (tail < 0)   tail = 0;
++        if (tail > 135) tail = 135;   /* unreachable; the compiler cannot know */
+         memset(padded, 0, 136);
+         if (tail > 0 && inputs[i].ptr) {
+             // Explicit byte loop: the standalone .syso link has no libc, so a
