@@ -104,6 +104,42 @@ Announce what an operator needs to know: which upstream base it carries, which
 experiments are in it, and what the rollback is. Every release note repeats the
 experimental-software warning — people find releases without reading the README.
 
+## A merge is only in the changelog if its subject is a conventional line
+
+The subject line of a merge commit **is** its changelog entry. `cliff.toml`
+skips anything beginning with `Merge `, because that is how upstream merges are
+excluded. So a merge carrying GitHub's default subject is dropped from the
+changelog silently — no warning, no error, no diff.
+
+This is not hypothetical. [#104](https://github.com/crtahlin/wasp/pull/104) was
+merged through the web interface, and while every other pull request appeared in
+the generated changelog, it did not.
+
+Three things now prevent it, in order of how much they should be relied on:
+
+1. **The repository defaults the merge subject to the pull request title**
+   (`merge_commit_title: PR_TITLE`). Pull request titles are already required to
+   be conventional commits by the `Lint PR Title` check, so the correct subject
+   is now the automatic one.
+2. **`scripts/check-changelog-coverage.sh` runs in `prepare-release.yml`.** It
+   compares the merges on `main` against what git-cliff actually rendered and
+   fails the release if any is missing. It checks the outcome, not the format, so
+   a subject shape nobody anticipated is still caught.
+3. **`cliff.toml` recovers the known case.** GitHub's default form puts the pull
+   request title in the body, so a preprocessor lifts it back into the subject.
+
+When merging by hand, still prefer:
+
+```bash
+gh pr merge <n> --merge --subject "<conventional line> (#<n>)" --body ""
+```
+
+Run the check locally before cutting a release:
+
+```bash
+./scripts/check-changelog-coverage.sh
+```
+
 ## Release pull requests and CI
 
 ### Which checks are required on `main`

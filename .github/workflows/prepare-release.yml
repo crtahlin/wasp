@@ -84,6 +84,15 @@ jobs:
           echo 'discipline has been broken and the changelog is wrong. See'
           echo 'docs/agent-playbooks/release-process.md.'
 
+      - name: Every merge must appear in the changelog
+        # The changelog is built from merge-commit subjects, so a merge whose
+        # subject is not a conventional-commit line is skipped silently. #104
+        # was merged through the web interface with GitHub's default subject
+        # and vanished from the changelog while every other pull request
+        # appeared. Shipping a release that quietly omits a change is worse
+        # than failing to build one.
+        run: ./scripts/check-changelog-coverage.sh
+
       - name: Guard against upstream leakage
         # Cheap tripwire for the one failure mode that silently corrupts a
         # release: a squashed merge putting upstream commits on the spine.
