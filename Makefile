@@ -150,17 +150,33 @@ endif
 .PHONY: test-ci
 test-ci:
 ifdef cover
-	$(GO) test -coverprofile=cover.out ./...
+	$(GO) test -timeout $(TEST_TIMEOUT) -coverprofile=cover.out ./...
 else
-	$(GO) test ./...
+	$(GO) test -timeout $(TEST_TIMEOUT) ./...
 endif
+
+# TEST_TIMEOUT bounds a single package's tests.
+#
+# Go's default is 10 minutes, which pkg/api exceeds under the race detector on
+# a contended runner. TestBzzUploadDownloadWithRedundancy alone takes 6s
+# normally, 123s under -race on a fast developer machine, and was observed at
+# 9m42s and still running on a macOS CI runner — erasure coding over hundreds
+# of chunks, with every memory access instrumented.
+#
+# The package then blew the whole budget and the job failed with
+# "panic: test timed out", which reads like a deadlock and was filed as one.
+# It is not: the tests are slow, not stuck. See issue #79.
+#
+# Raise the bound rather than the tests, because a genuine hang still fails —
+# just later — while a slow-but-correct suite stops being reported as broken.
+TEST_TIMEOUT ?= 30m
 
 .PHONY: test-ci-race
 test-ci-race:
 ifdef cover
-	$(GO) test -race -coverprofile=cover.out ./...
+	$(GO) test -race -timeout $(TEST_TIMEOUT) -coverprofile=cover.out ./...
 else
-	$(GO) test -race ./...
+	$(GO) test -race -timeout $(TEST_TIMEOUT) ./...
 endif
 
 .PHONY: build
