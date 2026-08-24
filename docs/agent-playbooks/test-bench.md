@@ -273,17 +273,24 @@ A harness that cannot produce a failure is not measuring anything. Before trusti
 one, ask what it would print if the node died right now — and if the honest answer is
 "the same thing it prints now", fix it before starting the run.
 
-## Do not enable SIMD hashing on a bench node
+## SIMD hashing: fixed, and what the fix was
 
-`use-simd-hashing` is currently suspected of corrupting memory under sustained load.
-See issue #77. Upstream ships the flag defaulted off, wasp keeps that default, and the
-node now logs a warning if it is overridden.
+`use-simd-hashing` corrupted memory and killed nodes within ~12 minutes under load. Fixed
+in #92: the assembly stub now runs the XKCP blob on a **scratch stack** rather than the
+goroutine stack.
 
-The reason this needs saying explicitly, rather than being left to the issue, is that
-the failure does not look like a hashing bug. The process dies in the allocator, in
-LevelDB's block cache, in an unrelated mutex-guarded map — a different victim each
-time, none of them near the hasher. Anyone debugging one of those crashes in isolation
-will spend a long time in the wrong subsystem, which is precisely what happened here.
+Go's goroutine stacks are small, growable and movable — the runtime relocates them and
+the collector scans them. Foreign machine code executing on one is unsafe, which is why
+cgo switches to the system stack before entering C. The stub now does the same, using a
+pooled 64 KiB byte slice: no pointers, never scanned, never moved.
 
-If you enable it deliberately to measure it, treat every other result from that node as
-suspect for the duration, and say in the write-up that SIMD was on.
+Measured, same node and load, SIMD on throughout:
+
+| stub | result |
+|---|---|
+| goroutine stack (original) | crash ~12 min |
+| scratch stack | **7.6 h clean, 113 peers, 305 rchash runs** |
+
+Two cheap corrections were tried first and both failed — `runtime.Pinner` (~4.5 min) and
+`NO_LOCAL_POINTERS` (~3 min). Record them before trying either again: the pointer map and
+pointer pinning were not the problem, the execution context was.

@@ -287,14 +287,17 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		// Rebuild the global bmtpool instance so the new SIMDOptIn value
 		// is reflected in the pool created for hot-path BMT hashing.
 		bmtpool.Rebuild()
-		// Warning rather than Info, and deliberately loud: the SIMD hasher has
-		// appeared in segfault stacks on a wasp bench node under sustained load
-		// (see issue #77), and the resulting memory corruption surfaces far from
-		// the hasher itself — in the allocator, in LevelDB, in unrelated maps —
-		// so an operator hitting it has very little chance of tracing it back
-		// here. Upstream ships this flag defaulted off; wasp keeps that default
-		// and warns anyone who overrides it.
-		logger.Warning("SIMD hashing enabled: this is EXPERIMENTAL and is currently suspected of causing memory corruption under sustained load; do not enable it on a node you care about",
+		// SIMD hashing runs foreign machine code (the XKCP blob) on a scratch
+		// stack, not on the goroutine stack — see pkg/keccak and issue #92.
+		// Running it on a goroutine stack corrupted memory and killed the node
+		// within ~12 minutes under load; with the scratch stack it soaked 7.6
+		// hours clean at 113 peers.
+		//
+		// Still Info-with-detail rather than silent: this is an opt-in path
+		// with hand-written assembly and a pre-compiled binary blob in it, and
+		// an operator debugging an odd crash should be able to see from the
+		// logs whether it was active.
+		logger.Info("SIMD hashing enabled",
 			"batch_width", keccak.BatchWidth(), "avx512", keccak.HasAVX512())
 	}
 
