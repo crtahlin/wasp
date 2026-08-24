@@ -57,6 +57,26 @@ tag_pattern = "^v[0-9]"
 # NOTE: `replace` is a plain regex replacement — Tera variables from the
 # [changelog] section do not interpolate here, so the URL is spelled out.
 commit_preprocessors = [
+  # Recover merges made with GitHub's default subject.
+  #
+  # `gh pr merge --subject` gives the conventional line directly, but a merge
+  # done through the web interface produces
+  #
+  #     Merge pull request #104 from crtahlin/fix/90-rebuildable-keccak-blobs
+  #
+  #     fix(keccak): make the syso blobs rebuildable and reproducible
+  #
+  # which the "^Merge " parser below skips — so the change vanishes from the
+  # changelog with no warning. That happened to #104. The conventional line is
+  # not lost, only demoted to the body, so lift it back into the subject and
+  # append the pull request number.
+  #
+  # The repository setting now defaults the subject to the pull request title,
+  # so this should not recur; it stays because a silent omission from a release
+  # artefact is not something to leave resting on one setting.
+  { pattern = '(?s)^Merge pull request #(\d+) from \S+\s*\n\s*\n\s*(\S[^\n]*)', replace = "${2} (#${1})" },
+
+  # Must run after the rule above, so the number it appends is linked too.
   { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/crtahlin/wasp/pull/${1}))" },
 ]
 
