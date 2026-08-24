@@ -187,6 +187,34 @@ Issue #69 is the worked example: several days were spent attributing these crash
 to a Sharky change, and a correct change was reverted, because the dump was read as
 "sharky appears in the stack" rather than "the crashing goroutine is a GC worker".
 
+## A timeout panic names its culprit in the header, not in the stacks
+
+The same trap as above, in a different costume. `panic: test timed out` dumps **every**
+goroutine in the process. Reading the stacks and picking a plausible-looking one gives
+the wrong answer, because the goroutines that look interesting are usually just present.
+
+Only the header says which test actually overran:
+
+```
+panic: test timed out after 10m0s
+	running tests:
+		TestBzzUploadDownloadWithRedundancy (9m42s)
+		TestBzzUploadDownloadWithRedundancy/level=4/encrypt=true_levels=3_chunks=401 (31s)
+```
+
+That is the culprit. Everything below it is context.
+
+This cost real time. A `pkg/api` timeout was diagnosed from its stacks as a websocket
+deadlock in `gsocListeningWs`, filed as a hang, and hunted with 225 reproduction runs of
+`-run 'TestGsocWebsocket|TestPss'` — a set that does not contain the test that was
+actually slow. The conclusion was "cannot reproduce". It then reproduced on the next
+unrelated pull request, one that changed only `.gitignore`.
+
+Also worth knowing: a slow test and a hung test look identical from the outside. Check
+before assuming. `TestBzzUploadDownloadWithRedundancy` takes 6 s normally and 123 s under
+`-race` — a 20x multiplier that turns a comfortable test into most of a package's budget.
+Time it both ways before calling anything deadlocked.
+
 ## GOEXPERIMENT is a build-time variable
 
 `GOEXPERIMENT` configures the Go toolchain when it compiles. Setting it in a
