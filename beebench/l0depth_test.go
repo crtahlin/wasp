@@ -107,7 +107,11 @@ func sample(tb testing.TB, st *leveldbstore.Store) (depth, paused, delays, delay
 	return
 }
 
-func runArm(t *testing.T, trigger int) l0Result {
+// rate caps aggregate writes per second; 0 means unlimited. Passed rather
+// than read from the flag, so a caller can vary it without mutating shared
+// state — the sweep below would otherwise be correct only for as long as
+// its subtests stay sequential.
+func runArm(t *testing.T, trigger, rate int) l0Result {
 	t.Helper()
 
 	dir := filepath.Join(t.TempDir(), fmt.Sprintf("l0-trigger-%d", trigger))
@@ -188,8 +192,8 @@ func runArm(t *testing.T, trigger int) l0Result {
 			// only "does it appear when the store is driven as hard as the
 			// machine allows".
 			var perBatch time.Duration
-			if *l0Rate > 0 {
-				perBatch = time.Duration(float64(time.Second) * 500 * float64(*l0Writers) / float64(*l0Rate))
+			if rate > 0 {
+				perBatch = time.Duration(float64(time.Second) * 500 * float64(*l0Writers) / float64(rate))
 			}
 			next := time.Now()
 			for n := 0; !stop.Load(); n++ {
@@ -255,9 +259,8 @@ func TestL0PauseThreshold(t *testing.T) {
 	// Chosen to bracket what a node can actually ingest: 1 Gbit/s line rate is
 	// ~30,500 chunks/sec, realistic pullsync is low thousands.
 	for _, rate := range []int{2_000, 10_000, 30_000, 100_000, 300_000} {
-		*l0Rate = rate
 		t.Run(fmt.Sprintf("rate_%d", rate), func(t *testing.T) {
-			r := runArm(t, 8) // the shipped trigger
+			r := runArm(t, 8, rate) // 8 is the shipped trigger
 			points = append(points, point{rate, r.peakDepth, r.pausedSeen, r.writes})
 		})
 	}
@@ -299,7 +302,7 @@ func TestL0DepthUnderSustainedWrites(t *testing.T) {
 
 	for _, trigger := range arms {
 		t.Run(fmt.Sprintf("trigger_%d", trigger), func(t *testing.T) {
-			results = append(results, runArm(t, trigger))
+			results = append(results, runArm(t, trigger, *l0Rate))
 		})
 	}
 
