@@ -44,6 +44,8 @@ var (
 	l0Entries  = flag.Int("l0.entries", 1<<20, "retrievalIdx entries to pre-populate per arm")
 	l0Writers  = flag.Int("l0.writers", 4, "concurrent writers")
 	l0Duration = flag.Duration("l0.duration", 60*time.Second, "how long to write for")
+	l0Rate     = flag.Int("l0.rate", 0, "cap aggregate writes per second (0 = unlimited)")
+	l0Sweep    = flag.Bool("l0.sweep", false, "run the pause-threshold sweep")
 )
 
 type l0Result struct {
@@ -181,7 +183,22 @@ func runArm(t *testing.T, trigger int) l0Result {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
+			// Pace to the requested aggregate rate, so a run can ask "does the
+			// stall appear at a rate a node could actually reach" rather than
+			// only "does it appear when the store is driven as hard as the
+			// machine allows".
+			var perBatch time.Duration
+			if *l0Rate > 0 {
+				perBatch = time.Duration(float64(time.Second) * 500 * float64(*l0Writers) / float64(*l0Rate))
+			}
+			next := time.Now()
 			for n := 0; !stop.Load(); n++ {
+				if perBatch > 0 {
+					next = next.Add(perBatch)
+					if d := time.Until(next); d > 0 {
+						time.Sleep(d)
+					}
+				}
 				bat := st.Batch(t.Context())
 				for k := 0; k < 500; k++ {
 					_ = bat.Put(&retrItem{
@@ -209,6 +226,71 @@ func runArm(t *testing.T, trigger int) l0Result {
 	res.l0Comps = endComp - baseComp
 	res.writes = writes.Load()
 	return res
+}
+
+// TestL0PauseThreshold answers the question that decides whether issue #24 is
+// reachable in the field: at what sustained write rate does level 0 first reach
+// the pause trigger?
+//
+// It matters because the unlimited run drives ~483,000 index writes per second,
+// which is ~1.98 GB/s of chunk-equivalent ingest. A node on a 1 Gbit/s link can
+// receive about 30,500 chunks/sec, so that run is roughly 16x beyond line rate
+// and ~400x beyond realistic pullsync. Reproducing a stall there says little
+// about whether a node ever gets near it.
+//
+// Run with -l0.sweep to enable; it is slow by construction.
+func TestL0PauseThreshold(t *testing.T) {
+	if !*l0Sweep {
+		t.Skip("enable with -l0.sweep")
+	}
+
+	type point struct {
+		rate   int
+		peak   float64
+		paused bool
+		got    uint64
+	}
+	var points []point
+
+	// Chosen to bracket what a node can actually ingest: 1 Gbit/s line rate is
+	// ~30,500 chunks/sec, realistic pullsync is low thousands.
+	for _, rate := range []int{2_000, 10_000, 30_000, 100_000, 300_000} {
+		*l0Rate = rate
+		t.Run(fmt.Sprintf("rate_%d", rate), func(t *testing.T) {
+			r := runArm(t, 8) // the shipped trigger
+			points = append(points, point{rate, r.peakDepth, r.pausedSeen, r.writes})
+		})
+	}
+
+	t.Log("")
+	t.Log("Table — Level-0 depth against sustained write rate, CompactionL0Trigger=8")
+	t.Logf("  %-14s %-14s %-12s %-10s %s", "target w/s", "achieved w/s", "peak depth", "paused", "GB/s equivalent")
+	for _, p := range points {
+		achieved := float64(p.got) / l0Duration.Seconds()
+		t.Logf("  %-14d %-14.0f %-12.0f %-10v %.2f",
+			p.rate, achieved, p.peak, p.paused, achieved*4096/1e9)
+	}
+	t.Log("")
+
+	var lowest *point
+	for i := range points {
+		if points[i].paused {
+			lowest = &points[i]
+			break
+		}
+	}
+	if lowest == nil {
+		t.Logf("RESULT: no tested rate up to %d writes/sec reached the pause trigger. "+
+			"On this hardware the stall needs more than a node can ingest, which argues "+
+			"issue #24 is not reachable in the field and its priority should be revisited.",
+			points[len(points)-1].rate)
+		return
+	}
+	gbs := float64(lowest.rate) * 4096 / 1e9
+	t.Logf("RESULT: the lowest tested rate that paused writes is %d writes/sec, "+
+		"which is %.2f GB/s of chunk-equivalent ingest. Compare against ~30,500 "+
+		"chunks/sec for a saturated 1 Gbit/s link before treating this as reachable.",
+		lowest.rate, gbs)
 }
 
 func TestL0DepthUnderSustainedWrites(t *testing.T) {

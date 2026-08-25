@@ -60,6 +60,54 @@ vanishes.
 Recorded because the mistake is the reusable part: a difference measured outside
 the failure regime does not predict behaviour inside it.
 
+## The stall needs 16x a saturated 1 Gbit/s link
+
+Reproducing it is not the same as it being reachable. The unlimited run drove
+483,587 index writes per second, which is 1.98 GB/s of chunk-equivalent ingest.
+Sweeping the rate downward, with the shipped trigger, 120 s per point:
+
+**Table — Level-0 depth against sustained write rate, `CompactionL0Trigger=8`**
+
+| target writes/s | achieved | peak depth | paused | GB/s equivalent |
+|---|---|---|---|---|
+| 2,000 | 2,000 | 2 | no | 0.01 |
+| 10,000 | 10,000 | 3 | no | 0.04 |
+| 30,000 | 30,000 | **6** | no | 0.12 |
+| 100,000 | 100,000 | 8 | no | 0.41 |
+| 300,000 | 300,000 | 9 | no | 1.23 |
+| unlimited | 483,587 | **12** | **yes** | 1.98 |
+
+A saturated 1 Gbit/s link carries about 30,500 chunks/sec. At that rate level 0
+peaks at 6 — below the compaction trigger of 8, never mind the pause at 12. Even
+at ten times line rate it reaches only 9.
+
+So on this hardware the failure needs more inbound bandwidth than a node can
+have, and no amount of postage funding changes that. The batch itself is cheap
+— about 0.56 BZZ per day at depth 22 — which was never the constraint.
+
+### What that does and does not license
+
+It does **not** license "the stall cannot happen". The binding ratio is write
+rate against *compaction throughput*, and this ran on fast NVMe with the machine
+otherwise idle. Four things a real node does, none of them present here, cut
+compaction throughput:
+
+| factor | effect |
+|---|---|
+| slower disk (SATA SSD, or spinning) | 10-100x less compaction throughput |
+| sharky chunk writes alongside index writes | competes for the same device |
+| reserve sampling reads | seeks steal from compaction — this is #23 |
+| a smaller `WriteBuffer` than the 64 MB used here | more L0 files per unit of data |
+
+On a node whose effective throughput is 20x lower, depth 12 would arrive around
+24,000 writes/sec, which is inside 1 Gbit/s. The honest statement is that the
+threshold is **disk-and-contention dependent**, and that this machine sits far on
+the safe side of it.
+
+That is itself a finding: whatever produced the original field report was
+probably not write rate alone, but write rate on slower storage while sampling
+competed for the same spindle.
+
 ## Where this redirects the work
 
 The spec anticipated this outcome and said how to read it, which is the only
