@@ -125,7 +125,11 @@ func InitChain(
 		// Every endpoint must agree on the network. A mismatch is a
 		// configuration error, not a health problem, and failing over to it
 		// would silently put the node on a different chain.
-		if err := verifySameChain(ctx, endpoints, chainID); err != nil {
+		endpoints, err := verifySameChain(ctx, logger, endpoints, chainID)
+		if err != nil {
+			for _, ep := range endpoints {
+				ep.Backend.Close()
+			}
 			return nil, common.Address{}, 0, nil, nil, err
 		}
 
@@ -172,29 +176,41 @@ func InitChain(
 // A mismatch is a configuration error, not a health problem — almost certainly a
 // mistyped URL — and it must be fatal rather than a reason to fail over. Failing
 // over between chains would corrupt everything downstream of the backend.
-func verifySameChain(ctx context.Context, endpoints []failover.Endpoint, want int64) error {
-	var first int64
-	for i, ep := range endpoints {
+// It returns the endpoints that answered. An endpoint that cannot be asked is
+// dropped rather than fatal, matching how a failed dial is treated: tolerating a
+// dead endpoint at dial time but not one moment later would be an odd place to
+// draw the line. Only a disagreement is fatal.
+func verifySameChain(ctx context.Context, logger log.Logger, endpoints []failover.Endpoint, want int64) ([]failover.Endpoint, error) {
+	var (
+		usable []failover.Endpoint
+		first  int64
+		seen   bool
+	)
+	for _, ep := range endpoints {
 		got, err := ep.Backend.ChainID(ctx)
 		if err != nil {
-			return fmt.Errorf("chain id from %s: %w", ep.Name, err)
+			logger.Warning("blockchain rpc endpoint did not report a chain id, dropping it",
+				"endpoint", ep.Name, "error", err)
+			ep.Backend.Close()
+			continue
 		}
 		id := got.Int64()
 
 		if want != -1 && id != want {
-			return fmt.Errorf("endpoint %s is on chain %d, but this node is configured for %d",
+			return nil, fmt.Errorf("endpoint %s is on chain %d, but this node is configured for %d",
 				ep.Name, id, want)
 		}
-		if i == 0 {
-			first = id
-			continue
+		if seen && id != first {
+			return nil, fmt.Errorf("endpoints disagree on the network: one reports chain %d, %s reports %d",
+				first, ep.Name, id)
 		}
-		if id != first {
-			return fmt.Errorf("endpoints disagree on the network: %s reports chain %d, %s reports %d",
-				endpoints[0].Name, first, ep.Name, id)
-		}
+		first, seen = id, true
+		usable = append(usable, ep)
 	}
-	return nil
+	if len(usable) == 0 {
+		return nil, errors.New("no blockchain rpc endpoint reported a chain id")
+	}
+	return usable, nil
 }
 
 // InitChequebookFactory will initialize the chequebook factory with the given
