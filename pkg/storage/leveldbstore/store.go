@@ -56,6 +56,10 @@ var (
 type Store struct {
 	db   *leveldb.DB
 	path string
+	// readOnly suppresses the dirty-shutdown marker on both open and close.
+	// Writing it fails outright in read-only mode, and a reader has no unclean
+	// shutdown to record.
+	readOnly bool
 }
 
 // New returns a new store the backed by leveldb.
@@ -85,13 +89,24 @@ func New(path string, opts *opt.Options) (*Store, bool, error) {
 		return nil, false, fmt.Errorf("has dirty record: %w", err)
 	}
 
-	if err = db.Put([]byte(dirtyKey), []byte{}, nil); err != nil {
-		return nil, false, fmt.Errorf("put dirty record: %w", err)
+	// A read-only open cannot claim the database, and must not try: the write
+	// fails with "leveldb: read-only mode" and takes the whole open down, so
+	// read-only mode was unusable. It is also meaningless — a reader neither
+	// risks an unclean shutdown nor is entitled to mark the database as in use
+	// by someone else.
+	//
+	// The dirty flag read above is still returned, so a read-only caller can
+	// still see that a previous *writer* exited uncleanly.
+	if !opts.GetReadOnly() {
+		if err = db.Put([]byte(dirtyKey), []byte{}, nil); err != nil {
+			return nil, false, fmt.Errorf("put dirty record: %w", err)
+		}
 	}
 
 	return &Store{
-		db:   db,
-		path: path,
+		db:       db,
+		path:     path,
+		readOnly: opts.GetReadOnly(),
 	}, dirty, nil
 }
 
@@ -102,6 +117,10 @@ func (s *Store) DB() *leveldb.DB {
 
 // Close implements the storage.Store interface.
 func (s *Store) Close() (err error) {
+	if s.readOnly {
+		// Nothing to clear: a read-only open never set the marker.
+		return s.db.Close()
+	}
 	return errors.Join(s.db.Delete([]byte(dirtyKey), nil), s.db.Close())
 }
 
