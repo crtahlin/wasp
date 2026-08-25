@@ -5,6 +5,8 @@
 package storer
 
 import (
+	"context"
+
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/events"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
 )
@@ -34,4 +36,10 @@ func (db *DB) WaitForBgCacheWorkers() (unblock func()) {
 
 func DefaultOptions() *Options {
 	return defaultOptions()
+}
+
+// CountWithinRadius exposes the reserve scan so a test can assert how many
+// batch-existence lookups it makes.
+func (db *DB) CountWithinRadius(ctx context.Context) (int, error) {
+	return db.countWithinRadius(ctx)
 }

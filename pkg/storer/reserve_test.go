@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -904,4 +905,76 @@ func BenchmarkReservePutter(b *testing.B) {
 
 func networkRadiusFunc(r uint8) func() (uint8, error) {
 	return func() (uint8, error) { return r, nil }
+}
+
+// countingBatchstore counts Exists calls, delegating everything else.
+type countingBatchstore struct {
+	postage.Storer
+	existsCalls atomic.Int64
+}
+
+func (c *countingBatchstore) Exists(id []byte) (bool, error) {
+	c.existsCalls.Add(1)
+	return c.Storer.Exists(id)
+}
+
+// TestCountWithinRadiusBatchLookups pins the cost of the reserve scan.
+//
+// Every chunk carries a batch id, but a reserve holds far more chunks than
+// distinct batches — 4,064,293 against 426 on the bench node — and
+// batchstore.Exists takes a read lock and does a store lookup each time. Asking
+// once per chunk meant roughly nine and a half thousand times more lookups than
+// the answer required, every wake-up, on a scan that already blocks other
+// reserve work.
+//
+// The assertion is on lookups per distinct batch rather than a wall-clock
+// figure, so it stays meaningful on any machine and fails if someone puts the
+// call back inside the per-chunk path. See issue #28.
+func TestCountWithinRadiusBatchLookups(t *testing.T) {
+	t.Parallel()
+
+	const (
+		chunksPerBatch = 50
+		batchCount     = 4
+	)
+
+	baseAddr := swarm.RandAddress(t)
+	bs := &countingBatchstore{Storer: batchstore.New()}
+	opts := dbTestOps(baseAddr, 1000, bs, nil, time.Second)
+	opts.ValidStamp = func(ch swarm.Chunk) (swarm.Chunk, error) { return ch, nil }
+
+	st, err := diskStorer(t, opts)()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	putter := st.ReservePutter()
+	for range batchCount {
+		// One batch id shared by every chunk in the group, which is the whole
+		// point: a random stamp per chunk would give as many batches as chunks
+		// and the cache could not help.
+		batchID := postagetesting.MustNewID()
+		for range chunksPerBatch {
+			ch := chunk.GenerateValidRandomChunkAt(t, baseAddr, 1).
+				WithBatch(3, 2, false).
+				WithStamp(postagetesting.MustNewBatchStamp(batchID))
+			if err := putter.Put(context.Background(), ch); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	bs.existsCalls.Store(0)
+	if _, err := st.CountWithinRadius(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := bs.existsCalls.Load()
+	total := int64(chunksPerBatch * batchCount)
+	if calls > int64(batchCount) {
+		t.Errorf("the scan made %d batch-existence lookups for %d chunks across %d batches; "+
+			"it should ask once per batch, not once per chunk — the cost issue #28 is about",
+			calls, total, batchCount)
+	}
+	t.Logf("%d lookups for %d chunks", calls, total)
 }
