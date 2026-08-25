@@ -29,6 +29,19 @@
 #   keepalive: 30s
 ## initial nodes to connect to
 # bootnode: ["/dnsaddr/mainnet.ethswarm.org"]
+## chunk loads the reserve sampler keeps in flight.
+##
+## Sampling loads chunks from disk and hashes them. Those are separate pools:
+## loading is disk-bound, hashing is CPU-bound. This sets the loading side.
+##
+## 0 uses the default, which matches the CPU count and behaves as it did when
+## the two were one pool. Raising it offers the storage layer more concurrent
+## reads, which helps only if the disk has headroom; on a contended disk it
+## queues instead. Lowering it under-drives the disk and lengthens sampling,
+## which risks missing a redistribution round.
+##
+## The sample itself does not change with this setting, whatever it is set to.
+# sampler-read-concurrency: 0
 ## cause the node to always accept incoming connections
 # bootnode-mode: false
 ## bzz token contract address

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -259,6 +260,11 @@ const (
 	sharkyPath = "sharky"
 )
 
+// DefaultSamplerReadConcurrency is the sampler's chunk-load concurrency when
+// none is configured. It matches the worker count the sampler used before
+// reading and hashing were separated, so the default changes nothing.
+func DefaultSamplerReadConcurrency() int { return max(4, runtime.NumCPU()) }
+
 func initStore(basePath string, opts *Options) (*leveldbstore.Store, error) {
 	ldbBasePath := path.Join(basePath, indexPath)
 
@@ -393,8 +399,12 @@ type Options struct {
 	RadiusSetter      topology.SetStorageRadiuser
 	StateStore        storage.StateStorer
 
-	ReserveCapacity         int
-	ReserveWakeUpDuration   time.Duration
+	ReserveCapacity       int
+	ReserveWakeUpDuration time.Duration
+	// SamplerReadConcurrency is how many chunk loads the reserve sampler keeps
+	// in flight. Zero means the default, which preserves the previous behaviour
+	// of one pool sized to the core count.
+	SamplerReadConcurrency  int
 	ReserveMinEvictCount    uint64
 	ReserveCapacityDoubling int
 
@@ -423,6 +433,7 @@ func defaultOptions() *Options {
 		CacheCapacity:             defaultCacheCapacity,
 		Logger:                    log.Noop,
 		ReserveCapacity:           DefaultReserveCapacity,
+		SamplerReadConcurrency:    DefaultSamplerReadConcurrency(),
 		ReserveWakeUpDuration:     time.Minute * 30,
 		ShutdownTimeout:           defaultShutdownTimeout,
 	}
@@ -476,6 +487,10 @@ type reserveOpts struct {
 	cacheMinEvictCount uint64
 	minimumRadius      uint8
 	capacityDoubling   int
+	// samplerReadConcurrency is how many chunk loads the sampler has in flight.
+	// Separate from the hasher count because loading is disk-bound and hashing
+	// is CPU-bound; see issue #9.
+	samplerReadConcurrency int
 }
 
 // New returns a newly constructed DB object which implements all the above
@@ -570,12 +585,13 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 		events:           events.NewSubscriber(),
 		reserveBinEvents: events.NewSubscriber(),
 		reserveOptions: reserveOpts{
-			startupStabilizer:  opts.StartupStabilizer,
-			wakeupDuration:     opts.ReserveWakeUpDuration,
-			minEvictCount:      opts.ReserveMinEvictCount,
-			cacheMinEvictCount: opts.CacheMinEvictCount,
-			minimumRadius:      uint8(opts.MinimumStorageRadius),
-			capacityDoubling:   opts.ReserveCapacityDoubling,
+			startupStabilizer:      opts.StartupStabilizer,
+			wakeupDuration:         opts.ReserveWakeUpDuration,
+			minEvictCount:          opts.ReserveMinEvictCount,
+			cacheMinEvictCount:     opts.CacheMinEvictCount,
+			minimumRadius:          uint8(opts.MinimumStorageRadius),
+			capacityDoubling:       opts.ReserveCapacityDoubling,
+			samplerReadConcurrency: opts.SamplerReadConcurrency,
 		},
 		directUploadLimiter: make(chan struct{}, pusher.ConcurrentPushes),
 		pinIntegrity:        pinIntegrity,
