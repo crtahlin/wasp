@@ -91,12 +91,38 @@ func (db *DB) countWithinRadius(ctx context.Context) (int, error) {
 	radius := db.StorageRadius()
 
 	evictBatches := make(map[string]bool)
+
+	// Batch existence is asked once per BATCH, not once per chunk. Every chunk
+	// carries a batch id, but a reserve holds orders of magnitude more chunks
+	// than distinct batches — 4.06 million against 426 on the bench node — and
+	// batchstore.Exists takes a read lock and does a store lookup each time.
+	//
+	// Caching within a single scan changes nothing observable. A batch cannot
+	// meaningfully appear or disappear part-way through: which chunks saw the
+	// old answer and which saw the new one would depend on iteration order, so
+	// the previous behaviour was already arbitrary in that case.
+	batchExists := make(map[string]bool, 64)
+	exists := func(batchID []byte) bool {
+		key := string(batchID)
+		if e, seen := batchExists[key]; seen {
+			return e
+		}
+		e, err := db.batchstore.Exists(batchID)
+		if err != nil {
+			// Preserve the previous behaviour: an error is not treated as
+			// absence, so a transient failure cannot cause an eviction.
+			return true
+		}
+		batchExists[key] = e
+		return e
+	}
+
 	err := db.reserve.IterateChunksItems(0, func(ci *reserve.ChunkBinItem) (bool, error) {
 		if ci.Bin >= radius {
 			count++
 		}
 
-		if exists, err := db.batchstore.Exists(ci.BatchID); err == nil && !exists {
+		if !exists(ci.BatchID) {
 			missing++
 			evictBatches[string(ci.BatchID)] = true
 		}
