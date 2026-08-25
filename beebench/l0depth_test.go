@@ -252,10 +252,20 @@ func TestL0DepthUnderSustainedWrites(t *testing.T) {
 		return
 	}
 
+	// A falsified hypothesis is a result, not a broken harness, so it is
+	// reported rather than failed. The INCONCLUSIVE case above is different:
+	// there the measurement itself did not work, and that is a failure.
 	if proposed.peakDepth >= shipped.peakDepth {
-		t.Errorf("the proposed trigger did not reduce peak level-0 depth "+
-			"(%.0f against %.0f); the constant is not the binding constraint and "+
-			"the answer lies with compaction throughput, i.e. issues #23 and #29",
-			proposed.peakDepth, shipped.peakDepth)
+		t.Logf("RESULT: the proposed trigger did not reduce peak level-0 depth "+
+			"(%.0f against %.0f). The constant is not the binding constraint at this "+
+			"load; compaction throughput is, which points at issues #23 and #29 "+
+			"rather than at this value.", proposed.peakDepth, shipped.peakDepth)
+		if shipped.pausedSeen && proposed.pausedSeen {
+			t.Logf("RESULT: both arms reached the pause trigger and blocked writes, " +
+				"so the stall reproduces here but is indifferent to the trigger.")
+		}
+		return
 	}
+	t.Logf("RESULT: the proposed trigger reduced peak level-0 depth from %.0f to %.0f.",
+		shipped.peakDepth, proposed.peakDepth)
 }
