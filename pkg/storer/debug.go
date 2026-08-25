@@ -10,7 +10,6 @@ import (
 	storage "github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/chunkstore"
 	pinstore "github.com/ethersphere/bee/v2/pkg/storer/internal/pinning"
-	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/upload"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"golang.org/x/sync/errgroup"
@@ -152,10 +151,13 @@ func (db *DB) DebugInfo(ctx context.Context) (Info, error) {
 		reserveCapacity = db.reserve.Capacity()
 		reserveSize = db.reserve.Size()
 		eg.Go(func() error {
-			return db.reserve.IterateChunksItems(db.reserve.Radius(), func(ci *reserve.ChunkBinItem) (bool, error) {
-				reserveSizeWithinRadius++
-				return false, nil
-			})
+			// Shares its definition with the count behind /status, so the two
+			// endpoints cannot drift apart. Still computed fresh here: reading
+			// the maintained value instead would report zero until the first
+			// reserve wake-up, which is worse than the inconsistency it fixes.
+			var err error
+			reserveSizeWithinRadius, err = db.countChunksWithinRadius()
+			return err
 		})
 
 		var err error
