@@ -114,14 +114,6 @@ func call[T any](b *Backend, op func(transaction.Backend) (T, error)) (T, error)
 	return zero, errors.New("failover: exhausted endpoints")
 }
 
-// noValue adapts an operation that returns only an error.
-func noValue(b *Backend, op func(transaction.Backend) error) error {
-	_, err := call(b, func(be transaction.Backend) (struct{}, error) {
-		return struct{}{}, op(be)
-	})
-	return err
-}
-
 // --- transaction.Backend -----------------------------------------------------
 
 // BlockNumber also maintains the high-water mark used to bound how far behind a
