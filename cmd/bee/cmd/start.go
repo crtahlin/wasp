@@ -416,6 +416,8 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		WarmupTime:                    c.config.GetDuration(optionWarmUpTime),
 		WelcomeMessage:                c.config.GetString(optionWelcomeMessage),
 		SamplerReadConcurrency:        c.config.GetInt(optionNameSamplerReadConcurrency),
+		PullSyncMaxChunksPerSecond:    c.config.GetInt(optionNamePullSyncMaxChunksPerSecond),
+		PullerMaxChunksPerSecond:      c.config.GetInt(optionNamePullerMaxChunksPerSecond),
 		WhitelistedWithdrawalAddress:  c.config.GetStringSlice(optionNameWhitelistedWithdrawalAddress),
 	})
 

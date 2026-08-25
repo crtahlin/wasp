@@ -72,13 +72,20 @@ const (
 	IntervalPrefix = "sync_interval"
 	recalcPeersDur = time.Minute * 5
 
-	maxChunksPerSecond = 1000 // roughly 4 MB/s
+	// DefaultMaxChunksPerSecond is the total inbound sync rate across all peers,
+	// roughly 4 MB/s. Like the per-peer limit it is a policy default rather than
+	// a hardware one. See issue #26.
+	DefaultMaxChunksPerSecond = 1000
 
 	maxPODelta = 2 // the lowest level of proximity order (of peers) subtracted from the storage radius allowed for chunk syncing.
 )
 
 type Options struct {
 	Bins uint8
+	// MaxChunksPerSecond caps total inbound sync across all peers. Zero uses
+	// DefaultMaxChunksPerSecond, which is the value this was fixed at before it
+	// became configurable.
+	MaxChunksPerSecond int
 }
 
 type Puller struct {
@@ -124,6 +131,10 @@ func New(
 	if o.Bins != 0 {
 		bins = o.Bins
 	}
+	rateLimit := o.MaxChunksPerSecond
+	if rateLimit <= 0 {
+		rateLimit = DefaultMaxChunksPerSecond
+	}
 	p := &Puller{
 		base:        addr,
 		statestore:  stateStore,
@@ -137,7 +148,7 @@ func New(
 		blockLister: blockLister,
 		rate:        rate.New(DefaultHistRateWindow),
 		cancel:      func() { /* Noop, since the context is initialized in the Start(). */ },
-		limiter:     ratelimit.NewLimiter(ratelimit.Every(time.Second/maxChunksPerSecond), maxChunksPerSecond),
+		limiter:     ratelimit.NewLimiter(ratelimit.Every(time.Second/time.Duration(rateLimit)), rateLimit),
 	}
 
 	return p

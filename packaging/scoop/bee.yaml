@@ -42,6 +42,22 @@
 ##
 ## The sample itself does not change with this setting, whatever it is set to.
 # sampler-read-concurrency: 0
+## per-peer inbound chunk rate this node will serve, in chunks per second.
+##
+## 0 uses the default of 250. This is a fairness and stability choice, not a
+## hardware limit: with eight peers it caps a reserve fill at roughly 2,000
+## chunks/s, so filling 4.19 million chunks takes about half an hour at best,
+## and doubling reserve capacity doubles that.
+##
+## Raising it asks more of your peers and of your own disk; lowering it makes
+## you a slower source for others. It does not change what any other node does.
+# pullsync-max-chunks-per-second: 0
+## total inbound sync rate across all peers, in chunks per second.
+##
+## 0 uses the default of 1000, roughly 4 MB/s. Raising it only helps if peers
+## can actually supply more — confirm the limit is the binding constraint
+## before changing it, or the change does nothing.
+# puller-max-chunks-per-second: 0
 ## cause the node to always accept incoming connections
 # bootnode-mode: false
 ## bzz token contract address

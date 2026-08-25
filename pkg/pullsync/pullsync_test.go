@@ -364,6 +364,7 @@ func newPullSyncWithStamperValidator(
 		validStamp,
 		logger,
 		maxPage,
+		pullsync.DefaultMaxChunksPerSecond,
 	)
 
 	t.Cleanup(func() {

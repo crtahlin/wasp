@@ -44,11 +44,16 @@ const (
 var ErrUnsolicitedChunk = errors.New("peer sent unsolicited chunk")
 
 const (
-	MaxCursor                       = math.MaxUint64
-	DefaultMaxPage           uint64 = 250
-	pageTimeout                     = time.Second
-	handleMaxChunksPerSecond        = 250
-	handleRequestsLimitRate         = time.Second / handleMaxChunksPerSecond // handle max `handleMaxChunksPerSecond` chunks per second per peer
+	MaxCursor             = math.MaxUint64
+	DefaultMaxPage uint64 = 250
+	pageTimeout           = time.Second
+	// DefaultMaxChunksPerSecond is the per-peer inbound chunk rate a node will
+	// serve. It is a fairness and stability choice rather than a capability
+	// limit, which is why it is a default rather than a constant: with eight
+	// peers it caps a reserve fill at roughly 2,000 chunks/s, so filling
+	// 4.19 million chunks takes about half an hour at best, and doubling
+	// capacity doubles that. See issue #25.
+	DefaultMaxChunksPerSecond = 250
 )
 
 // Interface is the PullSync interface.
@@ -89,7 +94,11 @@ func New(
 	validStamp postage.ValidStampFn,
 	logger log.Logger,
 	maxPage uint64,
+	maxChunksPerSecond int,
 ) *Syncer {
+	if maxChunksPerSecond <= 0 {
+		maxChunksPerSecond = DefaultMaxChunksPerSecond
+	}
 	return &Syncer{
 		streamer:    streamer,
 		store:       store,
@@ -100,7 +109,7 @@ func New(
 		logger:      logger.WithName(loggerName).Register(),
 		quit:        make(chan struct{}),
 		maxPage:     maxPage,
-		limiter:     ratelimit.New(handleRequestsLimitRate, int(maxPage)),
+		limiter:     ratelimit.New(time.Second/time.Duration(maxChunksPerSecond), int(maxPage)),
 	}
 }
 
