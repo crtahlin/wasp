@@ -53,7 +53,7 @@ func (c *command) initDeployCmd() error {
 				c.config.GetUint64(optionNameMinimumGasTipCap),
 				c.config.GetUint64(optionNameGasLimitFallback),
 				node.BlockchainRPCConfig{
-					Endpoint:    c.config.GetString(configKeyBlockchainRpcEndpoint),
+					Endpoints:   rpcEndpoints(c.config),
 					DialTimeout: c.config.GetDuration(configKeyBlockchainRpcDialTimeout),
 					TLSTimeout:  c.config.GetDuration(configKeyBlockchainRpcTLSTimeout),
 					IdleTimeout: c.config.GetDuration(configKeyBlockchainRpcIdleTimeout),

@@ -296,7 +296,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int64(optionNamePaymentEarly, 50, "percentage below the peers payment threshold when we initiate settlement")
 	cmd.Flags().StringSlice(optionNameResolverEndpoints, []string{}, "ENS compatible API endpoint for a TLD and with contract address, can be repeated, format [tld:][contract-addr@]url")
 	cmd.Flags().Bool(optionNameBootnodeMode, false, "cause the node to always accept incoming connections")
-	cmd.Flags().String(optionNameBlockchainRpcEndpoint, "", "rpc blockchain endpoint")
+	cmd.Flags().StringSlice(optionNameBlockchainRpcEndpoint, nil, "rpc blockchain endpoint; repeat or list several for failover, in priority order")
 	cmd.Flags().Duration(optionNameBlockchainRpcDialTimeout, 30*time.Second, "blockchain rpc TCP dial timeout")
 	cmd.Flags().Duration(optionNameBlockchainRpcTLSTimeout, 10*time.Second, "blockchain rpc TLS handshake timeout")
 	cmd.Flags().Duration(optionNameBlockchainRpcIdleTimeout, 90*time.Second, "blockchain rpc idle connection timeout")
@@ -367,6 +367,25 @@ func (c *command) initLogger(cmd *cobra.Command) error {
 	}
 	c.logger = logger
 	return nil
+}
+
+// rpcEndpoints reads the blockchain RPC endpoints in priority order.
+//
+// The option became repeatable for #109, and a single value must keep working
+// unchanged. viper's GetStringSlice handles a YAML list, a repeated flag and a
+// comma-separated flag; for a plain scalar it falls back to splitting on
+// whitespace, which leaves a URL intact because URLs contain none. Blanks are
+// dropped so a stray comma or an empty list entry cannot become an endpoint
+// named "".
+func rpcEndpoints(config *viper.Viper) []string {
+	raw := config.GetStringSlice(configKeyBlockchainRpcEndpoint)
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // bindBlockchainRpcConfig supports both flat (blockchain-rpc-endpoint) and
