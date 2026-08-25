@@ -85,6 +85,23 @@ func (db *DB) startReserveWorkers(
 	db.syncer.Start(ctx)
 }
 
+// countChunksWithinRadius counts reserve chunks at or beyond the storage
+// radius.
+//
+// It exists so that the definition lives in one place. This quantity was
+// computed independently in two places — here, feeding /status, and in
+// DebugInfo, feeding /debugstorage — with different iteration bases and no
+// shared code, so the two could report different numbers for the same thing.
+// That is confusing exactly when someone is debugging. See issue #34.
+func (db *DB) countChunksWithinRadius() (int, error) {
+	count := 0
+	err := db.reserve.IterateChunksItems(db.StorageRadius(), func(*reserve.ChunkBinItem) (bool, error) {
+		count++
+		return false, nil
+	})
+	return count, err
+}
+
 func (db *DB) countWithinRadius(ctx context.Context) (int, error) {
 	count := 0
 	missing := 0

@@ -978,3 +978,51 @@ func TestCountWithinRadiusBatchLookups(t *testing.T) {
 	}
 	t.Logf("%d lookups for %d chunks", calls, total)
 }
+
+// TestDebugInfoAgreesWithStatus pins the two paths to one number.
+//
+// Reserve size within radius was computed twice and independently: once by
+// countWithinRadius, stored and served on /status, and once by DebugInfo, which
+// ran its own iteration and served the result on /debugstorage. Two counts of
+// the same quantity are two chances to disagree, and disagreeing about reserve
+// size is confusing precisely when someone is debugging. See issue #34.
+func TestDebugInfoAgreesWithStatus(t *testing.T) {
+	t.Parallel()
+
+	baseAddr := swarm.RandAddress(t)
+	opts := dbTestOps(baseAddr, 1000, nil, nil, time.Second)
+	opts.ValidStamp = func(ch swarm.Chunk) (swarm.Chunk, error) { return ch, nil }
+
+	st, err := diskStorer(t, opts)()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	putter := st.ReservePutter()
+	for po := range 4 {
+		for range 10 {
+			ch := chunk.GenerateValidRandomChunkAt(t, baseAddr, po).WithBatch(3, 2, false)
+			if err := putter.Put(context.Background(), ch); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Bring the maintained value up to date the same way the reserve does.
+	if _, err := st.CountWithinRadius(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := st.DebugInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status := st.ReserveSizeWithinRadius()
+	if uint64(info.Reserve.SizeWithinRadius) != status {
+		t.Errorf("debug reports %d chunks within radius, status reports %d; "+
+			"they are meant to be the same number and a difference sends someone "+
+			"hunting a bug that is not there",
+			info.Reserve.SizeWithinRadius, status)
+	}
+}
