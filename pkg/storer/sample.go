@@ -57,6 +57,12 @@ type Sample struct {
 // The committed depth is the sum of the radius and the doubling factor.
 // For example, the committed depth is 11, but the local node has a doubling factor of 3, so the
 // local radius will eventually drop to 8. The sampling must only consider chunks with proximity 11 to the anchor.
+// maxLoadedChunkBuffer caps how many loaded chunks may sit between the reading
+// and hashing stages. 4096 chunks is roughly 16 MiB, which is ample for any
+// reader count worth configuring and stops an extreme one from turning into
+// memory pressure during a redistribution round.
+const maxLoadedChunkBuffer = 4096
+
 // loadedChunk carries a chunk from the reading stage to the hashing stage,
 // keeping the bin item alongside it because the hasher needs its type and batch.
 type loadedChunk struct {
@@ -140,7 +146,13 @@ func (db *DB) ReserveSample(
 		readers = workers
 	}
 	sampleItemChan := make(chan SampleItem, 3*workers)
-	loadedC := make(chan loadedChunk, 3*readers)
+	// Bound the hand-off buffer. Unlike chunkC, which carries bin items, this
+	// carries loaded chunk data, so its depth is memory an operator can set by
+	// raising the reader count: at 3 per reader and ~4 KiB a chunk, a careless
+	// value costs hundreds of megabytes. The cap is generous enough that it
+	// never binds at sane settings.
+	loadedBuf := min(3*readers, maxLoadedChunkBuffer)
+	loadedC := make(chan loadedChunk, loadedBuf)
 
 	db.logger.Debug("reserve sampler workers", "readers", readers, "hashers", workers)
 	statsLock.Lock()
