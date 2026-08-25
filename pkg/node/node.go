@@ -198,6 +198,8 @@ type Options struct {
 	WarmupTime                    time.Duration
 	WelcomeMessage                string
 	SamplerReadConcurrency        int
+	PullSyncMaxChunksPerSecond    int
+	PullerMaxChunksPerSecond      int
 	WhitelistedWithdrawalAddress  []string
 }
 
@@ -1155,7 +1157,7 @@ func NewBee(
 
 	pusherService.AddFeed(localStore.PusherFeed())
 
-	pullSyncProtocol := pullsync.New(p2ps, localStore, pssService.TryUnwrap, gsocService.Handle, validStamp, logger, pullsync.DefaultMaxPage)
+	pullSyncProtocol := pullsync.New(p2ps, localStore, pssService.TryUnwrap, gsocService.Handle, validStamp, logger, pullsync.DefaultMaxPage, o.PullSyncMaxChunksPerSecond)
 	b.pullSyncCloser = pullSyncProtocol
 
 	retrieveProtocolSpec := retrieval.Protocol()
@@ -1245,7 +1247,9 @@ func NewBee(
 	)
 
 	if o.FullNodeMode && !o.BootnodeMode {
-		pullerService = puller.New(swarmAddress, stateStore, kad, localStore, pullSyncProtocol, p2ps, logger, puller.Options{})
+		pullerService = puller.New(swarmAddress, stateStore, kad, localStore, pullSyncProtocol, p2ps, logger, puller.Options{
+			MaxChunksPerSecond: o.PullerMaxChunksPerSecond,
+		})
 		b.pullerCloser = pullerService
 
 		// we pass an empty channel since startup synchronization is not needed for production code, only tests.
