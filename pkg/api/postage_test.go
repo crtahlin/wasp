@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net/http"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -870,18 +871,35 @@ func TestPostageAccessHandler(t *testing.T) {
 			t.Run(op1.name+"-"+op2.name, func(t *testing.T) {
 				t.Parallel()
 
+				// entered is closed by whichever mock the first request reaches,
+				// so the second request is issued only once the first is
+				// genuinely holding the postage access lock.
+				//
+				// This was a time.Sleep(100ms), which is a guess at a
+				// happens-before relationship rather than a guarantee of one.
+				// When the guess was wrong — a loaded runner, a slow scheduler —
+				// the SECOND request took the lock, blocked in its own mock on
+				// <-wait, and close(wait) never ran because it is the line after
+				// that request. The test then deadlocked until the package
+				// timeout: 29m15s observed on a macOS runner. See issue #128.
 				wait, done := make(chan struct{}), make(chan struct{})
+				var enterOnce sync.Once
+				entered := make(chan struct{})
+				enter := func() {
+					enterOnce.Do(func() { close(entered) })
+					<-wait
+				}
 				contract := contractMock.New(
 					contractMock.WithCreateBatchFunc(func(ctx context.Context, ib *big.Int, d uint8, i bool, l string) (common.Hash, []byte, error) {
-						<-wait
+						enter()
 						return txHash, batchOk, nil
 					}),
 					contractMock.WithTopUpBatchFunc(func(ctx context.Context, id []byte, ib *big.Int) (common.Hash, error) {
-						<-wait
+						enter()
 						return txHash, nil
 					}),
 					contractMock.WithDiluteBatchFunc(func(ctx context.Context, id []byte, newDepth uint8) (common.Hash, error) {
-						<-wait
+						enter()
 						return txHash, nil
 					}),
 				)
@@ -896,7 +914,7 @@ func TestPostageAccessHandler(t *testing.T) {
 					jsonhttptest.Request(t, ts, op1.method, op1.url, op1.respCode, jsonhttptest.WithExpectedJSONResponse(op1.resp))
 				}()
 
-				time.Sleep(time.Millisecond * 100)
+				<-entered
 
 				jsonhttptest.Request(t, ts, op2.method, op2.url, op2.respCode, jsonhttptest.WithExpectedJSONResponse(op2.resp))
 
