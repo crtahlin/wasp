@@ -136,7 +136,7 @@ type Options struct {
 	EnableWSS                     bool
 	WSSAddr                       string
 	AutoTLSStorageDir             string
-	BlockchainRpcEndpoint         string
+	BlockchainRpcEndpoints        []string
 	BlockchainRpcDialTimeout      time.Duration
 	BlockchainRpcTLSTimeout       time.Duration
 	BlockchainRpcIdleTimeout      time.Duration
@@ -396,7 +396,7 @@ func NewBee(
 		erc20Service      erc20.Service
 	)
 
-	chainEnabled := isChainEnabled(o, o.BlockchainRpcEndpoint, logger)
+	chainEnabled := isChainEnabled(o, o.BlockchainRpcEndpoints, logger)
 
 	if o.SwapEnable && !chainEnabled {
 		return nil, errors.New("swap is enabled but the chain backend is not; provide --blockchain-rpc-endpoint or disable swap")
@@ -434,7 +434,7 @@ func NewBee(
 		o.MinimumGasTipCap,
 		o.GasLimitFallback,
 		BlockchainRPCConfig{
-			Endpoint:    o.BlockchainRpcEndpoint,
+			Endpoints:   o.BlockchainRpcEndpoints,
 			DialTimeout: o.BlockchainRpcDialTimeout,
 			TLSTimeout:  o.BlockchainRpcTLSTimeout,
 			IdleTimeout: o.BlockchainRpcIdleTimeout,
@@ -1559,20 +1559,20 @@ func (b *Bee) Shutdown() error {
 
 var ErrShutdownInProgress = errors.New("shutdown in progress")
 
-func isChainEnabled(o *Options, swapEndpoint string, logger log.Logger) bool {
-	chainDisabled := swapEndpoint == ""
+func isChainEnabled(o *Options, swapEndpoints []string, logger log.Logger) bool {
+	chainDisabled := len(swapEndpoints) == 0
 	lightMode := !o.FullNodeMode
 
 	if lightMode && chainDisabled {
 		logger.Info("chain backend disabled - starting in ultra-light mode",
 			"full_node_mode", o.FullNodeMode,
-			"blockchain-rpc-endpoint", swapEndpoint)
+			"blockchain-rpc-endpoints", swapEndpoints)
 		return false
 	}
 
 	logger.Info("chain backend enabled - blockchain functionality available",
 		"full_node_mode", o.FullNodeMode,
-		"blockchain-rpc-endpoint", swapEndpoint)
+		"blockchain-rpc-endpoints", swapEndpoints)
 	return true // all other modes operate require chain enabled
 }
 

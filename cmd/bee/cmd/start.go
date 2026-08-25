@@ -354,7 +354,7 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		EnableWSS:                     c.config.GetBool(optionNameP2PWSSEnable),
 		WSSAddr:                       c.config.GetString(optionP2PWSSAddr),
 		AutoTLSStorageDir:             filepath.Join(c.config.GetString(optionNameDataDir), "autotls"),
-		BlockchainRpcEndpoint:         c.config.GetString(configKeyBlockchainRpcEndpoint),
+		BlockchainRpcEndpoints:        rpcEndpoints(c.config),
 		BlockchainRpcDialTimeout:      c.config.GetDuration(configKeyBlockchainRpcDialTimeout),
 		BlockchainRpcTLSTimeout:       c.config.GetDuration(configKeyBlockchainRpcTLSTimeout),
 		BlockchainRpcIdleTimeout:      c.config.GetDuration(configKeyBlockchainRpcIdleTimeout),

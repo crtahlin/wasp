@@ -9,6 +9,18 @@
 ## block number cache sync interval in blocks
 # block-sync-interval: 10
 ## blockchain rpc configuration
+##
+## endpoint accepts one value or a list. With more than one the node fails over
+## between them in the order given, so a provider outage stops being a node
+## outage. A single endpoint behaves exactly as before.
+##
+##   endpoint:
+##     - https://primary.example/rpc
+##     - https://standby.example/rpc
+##
+## Reads fail over. Sending a transaction does not: a lost response may mean the
+## first endpoint accepted it, so retrying elsewhere risks a duplicate. All
+## endpoints must be on the same chain; the node refuses to start otherwise.
 # blockchain-rpc:
 #   endpoint: ""
 #   dial-timeout: 30s

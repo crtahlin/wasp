@@ -32,6 +32,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
 	"github.com/ethersphere/bee/v2/pkg/transaction/backendnoop"
+	"github.com/ethersphere/bee/v2/pkg/transaction/failover"
 	"github.com/ethersphere/bee/v2/pkg/transaction/wrapped"
 )
 
@@ -43,7 +44,9 @@ const (
 
 // BlockchainRPCConfig holds the configuration parameters for the blockchain RPC client transport.
 type BlockchainRPCConfig struct {
-	Endpoint    string
+	// Endpoints in priority order. One is the ordinary case; more than one
+	// enables failover. See issue #109.
+	Endpoints   []string
 	DialTimeout time.Duration
 	TLSTimeout  time.Duration
 	IdleTimeout time.Duration
@@ -81,24 +84,66 @@ func InitChain(
 			ExpectContinueTimeout: 1 * time.Second,
 		}
 
-		rpcClient, err := rpc.DialOptions(ctx, rpcCfg.Endpoint, rpc.WithHTTPClient(&http.Client{Transport: transport}))
-		if err != nil {
-			return nil, common.Address{}, 0, nil, nil, fmt.Errorf("dial blockchain client: %w", err)
+		// Dial every configured endpoint. One unreachable endpoint is no longer
+		// fatal when others answer, which is the point of #109 — a provider
+		// outage used to take the node down ten minutes later and keep it down.
+		var (
+			endpoints []failover.Endpoint
+			dialErrs  []error
+		)
+		for _, url := range rpcCfg.Endpoints {
+			rpcClient, err := rpc.DialOptions(ctx, url, rpc.WithHTTPClient(&http.Client{Transport: transport}))
+			if err != nil {
+				dialErrs = append(dialErrs, fmt.Errorf("%s: dial: %w", url, err))
+				continue
+			}
+
+			var versionString string
+			if err = rpcClient.CallContext(ctx, &versionString, "web3_clientVersion"); err != nil {
+				logger.Warning("could not reach a blockchain rpc endpoint", "endpoint", url, "error", err)
+				dialErrs = append(dialErrs, fmt.Errorf("%s: client version: %w", url, err))
+				rpcClient.Close()
+				continue
+			}
+
+			logger.Info("connected to blockchain backend", "endpoint", url, "version", versionString)
+			endpoints = append(endpoints, failover.Endpoint{
+				Name:    url,
+				Backend: wrapped.NewBackend(ethclient.NewClient(rpcClient), minimumGasTipCap, pollingInterval, blockSyncInterval),
+			})
 		}
 
-		var versionString string
-		if err = rpcClient.CallContext(ctx, &versionString, "web3_clientVersion"); err != nil {
-			logger.Info("could not connect to backend; "+
+		if len(endpoints) == 0 {
+			logger.Info("could not connect to any blockchain backend; "+
 				"in a swap-enabled network a working blockchain node "+
 				"(for xDAI network in production, SepoliaETH in testnet) is required; "+
-				"check your node or specify another node using --blockchain-rpc-endpoint.",
-				"blockchain-rpc-endpoint", rpcCfg.Endpoint)
-			return nil, common.Address{}, 0, nil, nil, fmt.Errorf("get client version: %w", err)
+				"check your node or specify another using --blockchain-rpc-endpoint.",
+				"endpoints", rpcCfg.Endpoints)
+			return nil, common.Address{}, 0, nil, nil, fmt.Errorf("no usable blockchain rpc endpoint: %w", errors.Join(dialErrs...))
 		}
 
-		logger.Info("connected to blockchain backend", "version", versionString)
+		// Every endpoint must agree on the network. A mismatch is a
+		// configuration error, not a health problem, and failing over to it
+		// would silently put the node on a different chain.
+		endpoints, err := verifySameChain(ctx, logger, endpoints, chainID)
+		if err != nil {
+			for _, ep := range endpoints {
+				ep.Backend.Close()
+			}
+			return nil, common.Address{}, 0, nil, nil, err
+		}
 
-		backend = wrapped.NewBackend(ethclient.NewClient(rpcClient), minimumGasTipCap, pollingInterval, blockSyncInterval)
+		if len(endpoints) == 1 {
+			backend = endpoints[0].Backend
+		} else {
+			fb, err := failover.New(logger, failover.DefaultMaxBlockLag, endpoints...)
+			if err != nil {
+				return nil, common.Address{}, 0, nil, nil, fmt.Errorf("failover backend: %w", err)
+			}
+			go fb.Recover(ctx, 0)
+			logger.Info("blockchain rpc failover enabled", "endpoints", len(endpoints), "active", fb.Active())
+			backend = fb
+		}
 	}
 
 	backendChainID, err := backend.ChainID(ctx)
@@ -123,6 +168,49 @@ func InitChain(
 	}
 
 	return backend, overlayEthAddress, backendChainID.Int64(), transactionMonitor, transactionService, nil
+}
+
+// verifySameChain rejects a configuration whose endpoints disagree about which
+// network they are on.
+//
+// A mismatch is a configuration error, not a health problem — almost certainly a
+// mistyped URL — and it must be fatal rather than a reason to fail over. Failing
+// over between chains would corrupt everything downstream of the backend.
+// It returns the endpoints that answered. An endpoint that cannot be asked is
+// dropped rather than fatal, matching how a failed dial is treated: tolerating a
+// dead endpoint at dial time but not one moment later would be an odd place to
+// draw the line. Only a disagreement is fatal.
+func verifySameChain(ctx context.Context, logger log.Logger, endpoints []failover.Endpoint, want int64) ([]failover.Endpoint, error) {
+	var (
+		usable []failover.Endpoint
+		first  int64
+		seen   bool
+	)
+	for _, ep := range endpoints {
+		got, err := ep.Backend.ChainID(ctx)
+		if err != nil {
+			logger.Warning("blockchain rpc endpoint did not report a chain id, dropping it",
+				"endpoint", ep.Name, "error", err)
+			ep.Backend.Close()
+			continue
+		}
+		id := got.Int64()
+
+		if want != -1 && id != want {
+			return nil, fmt.Errorf("endpoint %s is on chain %d, but this node is configured for %d",
+				ep.Name, id, want)
+		}
+		if seen && id != first {
+			return nil, fmt.Errorf("endpoints disagree on the network: one reports chain %d, %s reports %d",
+				first, ep.Name, id)
+		}
+		first, seen = id, true
+		usable = append(usable, ep)
+	}
+	if len(usable) == 0 {
+		return nil, errors.New("no blockchain rpc endpoint reported a chain id")
+	}
+	return usable, nil
 }
 
 // InitChequebookFactory will initialize the chequebook factory with the given
