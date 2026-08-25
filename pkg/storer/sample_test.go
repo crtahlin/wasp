@@ -496,3 +496,90 @@ func BenchmarkSampleHashing(b *testing.B) {
 		})
 	}
 }
+
+// TestReserveSampleIndependentOfReadConcurrency is the property that makes the
+// reader/hasher split safe to ship: how many chunk loads are in flight is a
+// throughput decision and must not change what the sample contains.
+//
+// Sample selection keeps the smallest transformed addresses, which does not
+// depend on the order items arrive in — so decoupling loading from hashing is
+// only correct if that independence actually holds. It is asserted here rather
+// than assumed, because a sample that varies with a tuning knob would be a
+// consensus problem, not a performance one: the node would answer the same
+// redistribution question differently depending on its configuration.
+//
+// See issue #9 and docs/experiments/sampler-io-split/spec.md.
+func TestReserveSampleIndependentOfReadConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const chunkCountPerPO = 10
+	const maxPO = 10
+
+	var (
+		baseAddr    = swarm.RandAddress(t)
+		timeVar     = uint64(time.Now().UnixNano())
+		radius      = uint8(5)
+		anchor      = swarm.RandAddressAt(t, baseAddr, int(radius)).Bytes()
+		reference   storer.Sample
+		concurrency = []int{1, 2, 8, 64}
+	)
+
+	// The same chunks for every arm, so the only variable is the concurrency.
+	chs := make([]swarm.Chunk, 0, chunkCountPerPO*maxPO)
+	for po := range maxPO {
+		for range chunkCountPerPO {
+			ch := chunk.GenerateValidRandomChunkAt(t, baseAddr, po).WithBatch(3, 2, false)
+			ch = ch.WithStamp(postagetesting.MustNewStampWithTimestamp(timeVar - 1))
+			chs = append(chs, ch)
+		}
+	}
+
+	for i, readers := range concurrency {
+		opts := dbTestOps(baseAddr, 1000, nil, nil, time.Second)
+		opts.ValidStamp = func(ch swarm.Chunk) (swarm.Chunk, error) { return ch, nil }
+		opts.SamplerReadConcurrency = readers
+
+		st, err := diskStorer(t, opts)()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		putter := st.ReservePutter()
+		for _, ch := range chs {
+			if err := putter.Put(context.Background(), ch); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		sample, err := st.ReserveSample(context.TODO(), anchor, radius, timeVar, nil)
+		if err != nil {
+			t.Fatalf("read concurrency %d: %v", readers, err)
+		}
+		assertValidSample(t, sample, radius, anchor)
+
+		// Without this the test would pass even if the option were ignored
+		// entirely, since the sample is order-independent by design. Assert the
+		// setting actually reached the sampler.
+		if sample.Stats.ReadConcurrency != readers {
+			t.Fatalf("configured read concurrency %d but the sampler used %d; "+
+				"the option is not reaching the sampler", readers, sample.Stats.ReadConcurrency)
+		}
+
+		if i == 0 {
+			reference = sample
+			continue
+		}
+
+		if len(sample.Items) != len(reference.Items) {
+			t.Fatalf("read concurrency %d produced %d items, %d produced %d",
+				readers, len(sample.Items), concurrency[0], len(reference.Items))
+		}
+		for j := range sample.Items {
+			if !sample.Items[j].TransformedAddress.Equal(reference.Items[j].TransformedAddress) {
+				t.Fatalf("read concurrency %d changed the sample at position %d:\n  got  %s\n  want %s\n"+
+					"the sample must not depend on how many loads are in flight",
+					readers, j, sample.Items[j].TransformedAddress, reference.Items[j].TransformedAddress)
+			}
+		}
+	}
+}

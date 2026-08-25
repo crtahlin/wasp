@@ -57,6 +57,19 @@ type Sample struct {
 // The committed depth is the sum of the radius and the doubling factor.
 // For example, the committed depth is 11, but the local node has a doubling factor of 3, so the
 // local radius will eventually drop to 8. The sampling must only consider chunks with proximity 11 to the anchor.
+// maxLoadedChunkBuffer caps how many loaded chunks may sit between the reading
+// and hashing stages. 4096 chunks is roughly 16 MiB, which is ample for any
+// reader count worth configuring and stops an extreme one from turning into
+// memory pressure during a redistribution round.
+const maxLoadedChunkBuffer = 4096
+
+// loadedChunk carries a chunk from the reading stage to the hashing stage,
+// keeping the bin item alongside it because the hasher needs its type and batch.
+type loadedChunk struct {
+	item  *reserve.ChunkBinItem
+	chunk swarm.Chunk
+}
+
 func (db *DB) ReserveSample(
 	ctx context.Context,
 	anchor []byte,
@@ -117,18 +130,42 @@ func (db *DB) ReserveSample(
 		return err
 	})
 
-	// Phase 2: Get the chunk data and calculate transformed hash
+	// Phase 2: load chunk data, then hash it.
+	//
+	// These are separated because they are limited by different things. Loading
+	// is disk-bound and spends most of its time blocked; hashing is CPU-bound.
+	// Running both in one pool means every worker holds a core while waiting on
+	// the disk, so the concurrency offered to the storage layer is pinned to the
+	// core count whether or not that is the right number. See issue #9 and
+	// docs/experiments/sampler-io-split/spec.md.
+	//
+	// Sample selection takes the smallest transformed addresses and does not
+	// depend on the order items arrive in, so decoupling the stages is safe.
+	readers := db.reserveOptions.samplerReadConcurrency
+	if readers <= 0 {
+		readers = workers
+	}
 	sampleItemChan := make(chan SampleItem, 3*workers)
+	// Bound the hand-off buffer. Unlike chunkC, which carries bin items, this
+	// carries loaded chunk data, so its depth is memory an operator can set by
+	// raising the reader count: at 3 per reader and ~4 KiB a chunk, a careless
+	// value costs hundreds of megabytes. The cap is generous enough that it
+	// never binds at sane settings.
+	loadedBuf := min(3*readers, maxLoadedChunkBuffer)
+	loadedC := make(chan loadedChunk, loadedBuf)
 
-	db.logger.Debug("reserve sampler workers", "count", workers)
+	db.logger.Debug("reserve sampler workers", "readers", readers, "hashers", workers)
+	statsLock.Lock()
+	allStats.ReadConcurrency = readers
+	statsLock.Unlock()
 
-	for range workers {
+	var readersWg sync.WaitGroup
+	for range readers {
+		readersWg.Add(1)
 		g.Go(func() error {
+			defer readersWg.Done()
 			wstat := SampleStats{}
-			hasher := bmt.NewPrefixHasher(anchor)
-			defer func() {
-				addStats(wstat)
-			}()
+			defer func() { addStats(wstat) }()
 
 			for chItem := range chunkC {
 				// exclude chunks who's batches balance are below minimum
@@ -145,20 +182,41 @@ func (db *DB) ReserveSample(
 				}
 
 				chunkLoadStart := time.Now()
-
 				chunk, err := db.ChunkStore().Get(ctx, chItem.Address)
 				chunkLoadDuration := time.Since(chunkLoadStart)
-
 				if err != nil {
 					wstat.ChunkLoadFailed++
 					db.logger.Debug("failed loading chunk", "chunk_address", chItem.Address, "error", err)
 					continue
 				}
-
 				wstat.ChunkLoadDuration += chunkLoadDuration
 
+				select {
+				case loadedC <- loadedChunk{item: chItem, chunk: chunk}:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return nil
+		})
+	}
+
+	go func() {
+		readersWg.Wait()
+		close(loadedC)
+	}()
+
+	for range workers {
+		g.Go(func() error {
+			wstat := SampleStats{}
+			// One hasher per goroutine: bmt hashers carry state and are not
+			// safe to share.
+			hasher := bmt.NewPrefixHasher(anchor)
+			defer func() { addStats(wstat) }()
+
+			for lc := range loadedC {
 				taddrStart := time.Now()
-				taddr, err := transformedAddress(hasher, chunk, chItem.ChunkType)
+				taddr, err := transformedAddress(hasher, lc.chunk, lc.item.ChunkType)
 				if err != nil {
 					return err
 				}
@@ -167,15 +225,14 @@ func (db *DB) ReserveSample(
 				select {
 				case sampleItemChan <- SampleItem{
 					TransformedAddress: taddr,
-					ChunkAddress:       chunk.Address(),
-					ChunkData:          chunk.Data(),
-					Stamp:              postage.NewStamp(chItem.BatchID, nil, nil, nil),
+					ChunkAddress:       lc.chunk.Address(),
+					ChunkData:          lc.chunk.Data(),
+					Stamp:              postage.NewStamp(lc.item.BatchID, nil, nil, nil),
 				}:
 				case <-ctx.Done():
 					return ctx.Err()
 				}
 			}
-
 			return nil
 		})
 	}
@@ -355,6 +412,10 @@ type SampleStats struct {
 	ChunkLoadDuration         time.Duration
 	ChunkLoadFailed           int64
 	StampLoadFailed           int64
+	// ReadConcurrency is how many chunk loads were kept in flight. Recorded so
+	// a measurement can say what it measured, and so a test can tell that the
+	// setting reached the sampler at all rather than being quietly ignored.
+	ReadConcurrency int
 }
 
 func (s *SampleStats) add(other SampleStats) {

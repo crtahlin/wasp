@@ -197,6 +197,7 @@ type Options struct {
 	TrxDebugMode                  bool
 	WarmupTime                    time.Duration
 	WelcomeMessage                string
+	SamplerReadConcurrency        int
 	WhitelistedWithdrawalAddress  []string
 }
 
@@ -837,6 +838,10 @@ func NewBee(
 		Tracer:                    tracer,
 		CacheMinEvictCount:        cacheMinEvictCount,
 		MinimumStorageRadius:      o.MinimumStorageRadius,
+		SamplerReadConcurrency:    o.SamplerReadConcurrency,
+	}
+	if lo.SamplerReadConcurrency <= 0 {
+		lo.SamplerReadConcurrency = storer.DefaultSamplerReadConcurrency()
 	}
 
 	if o.FullNodeMode && !o.BootnodeMode {

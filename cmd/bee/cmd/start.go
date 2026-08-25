@@ -415,6 +415,7 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		TrxDebugMode:                  c.config.GetBool(optionNameTransactionDebugMode),
 		WarmupTime:                    c.config.GetDuration(optionWarmUpTime),
 		WelcomeMessage:                c.config.GetString(optionWelcomeMessage),
+		SamplerReadConcurrency:        c.config.GetInt(optionNameSamplerReadConcurrency),
 		WhitelistedWithdrawalAddress:  c.config.GetStringSlice(optionNameWhitelistedWithdrawalAddress),
 	})
 
