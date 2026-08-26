@@ -7,6 +7,7 @@ require (
 	github.com/armon/go-radix v1.0.0
 	github.com/btcsuite/btcd/btcec/v2 v2.3.2
 	github.com/caddyserver/certmagic v0.21.6
+	github.com/cockroachdb/pebble v1.1.5
 	github.com/coreos/go-semver v0.3.0
 	github.com/ethereum/go-ethereum v1.17.3
 	github.com/ethersphere/batch-archive v0.0.8
@@ -57,6 +58,20 @@ require (
 	resenje.org/multex v0.1.0
 	resenje.org/singleflight v0.4.0
 	resenje.org/web v0.4.3
+)
+
+require (
+	github.com/DataDog/zstd v1.4.5 // indirect
+	github.com/cockroachdb/errors v1.11.3 // indirect
+	github.com/cockroachdb/fifo v0.0.0-20240606204812-0bbfbd93a7ce // indirect
+	github.com/cockroachdb/logtags v0.0.0-20230118201751-21c54148d20b // indirect
+	github.com/cockroachdb/redact v1.1.5 // indirect
+	github.com/cockroachdb/tokenbucket v0.0.0-20230807174530-cc333fc44b06 // indirect
+	github.com/getsentry/sentry-go v0.27.0 // indirect
+	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
+	github.com/kr/text v0.2.0 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
 )
 
 require (
