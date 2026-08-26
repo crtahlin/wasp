@@ -70,6 +70,28 @@
 ## bee_localstore_reserve_has_wait_duration, and if the wait is a meaningful
 ## share of the lookup itself, the bound is costing more than it saves.
 # reserve-has-concurrency: 0
+## connected peers per bin below which the bin is not considered saturated.
+##
+## 0 uses the default of 8.
+##
+## Read the warning on the next setting before changing either: this is not a
+## local decision.
+# kademlia-saturation-peers: 0
+## connected peers per bin above which the bin is over-saturated and further
+## peers are pruned.
+##
+## 0 uses the default of 18.
+##
+## RAISING THIS SPENDS OTHER NODES' RESOURCES, NOT ONLY YOURS. Every extra
+## connection this node keeps is a connection slot occupied on a peer, and that
+## peer's limits were chosen by its own operator. A node that raises its limits
+## takes a larger share of the neighbourhood's connection budget, and the cost
+## lands on the neighbourhood rather than on whoever set the number.
+##
+## The gain is more sync sources and a denser routing table. Whether that is
+## worth the cost is a question about the neighbourhood, not about this node,
+## and it has not been measured. Leave it alone unless you are measuring it.
+# kademlia-over-saturation-peers: 0
 ## per-peer inbound chunk rate this node will serve, in chunks per second.
 ##
 ## 0 uses the default of 250. This is a fairness and stability choice, not a

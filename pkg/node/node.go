@@ -200,6 +200,8 @@ type Options struct {
 	SamplerReadConcurrency        int
 	SamplerSortWindow             int
 	ReserveHasConcurrency         int
+	KademliaSaturationPeers       int
+	KademliaOverSaturationPeers   int
 	PullSyncMaxChunksPerSecond    int
 	PullerMaxChunksPerSecond      int
 	PullerRecalcPeersDur          time.Duration
@@ -816,7 +818,16 @@ func NewBee(
 	var swapService *swap.Service
 
 	kad, err := kademlia.New(swarmAddress, addressbook, hive, p2ps, detector, logger,
-		kademlia.Options{Bootnodes: bootnodes, BootnodeMode: o.BootnodeMode, StaticNodes: o.StaticNodes, DataDir: o.DataDir})
+		kademlia.Options{
+			Bootnodes:    bootnodes,
+			BootnodeMode: o.BootnodeMode,
+			StaticNodes:  o.StaticNodes,
+			DataDir:      o.DataDir,
+			// Nil leaves kademlia on its own defaults, so an operator who says
+			// nothing gets exactly what they got before.
+			SaturationPeers:     optionalInt(o.KademliaSaturationPeers),
+			OverSaturationPeers: optionalInt(o.KademliaOverSaturationPeers),
+		})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create kademlia: %w", err)
 	}
@@ -1660,4 +1671,17 @@ func batchStoreExists(s storage.StateStorer) (bool, error) {
 func useEmbeddedSnapshot(skip, batchStoreExists, resync bool, networkID uint64, mode api.BeeNodeMode) bool {
 	storeWillRebuild := !batchStoreExists || resync
 	return !skip && storeWillRebuild && networkID == mainnetNetworkID && mode != api.UltraLightMode
+}
+
+// optionalInt turns a zero-means-unset configuration value into the pointer
+// kademlia's options use, so that "not set" and "set to zero" stay distinct.
+//
+// They are not the same thing here: a saturation limit of zero would mean every
+// bin is saturated and the node connects to nobody, which is a configuration a
+// node should be able to express and must never arrive at by leaving a flag out.
+func optionalInt(v int) *int {
+	if v <= 0 {
+		return nil
+	}
+	return &v
 }
