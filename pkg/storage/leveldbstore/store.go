@@ -169,11 +169,12 @@ func New(path string, opts *opt.Options) (*Store, bool, error) {
 
 // writeDirtyMarker creates the marker and makes it durable.
 //
-// The file itself is fsynced, and so is the directory holding it, because a
-// file that exists only in the page cache does not survive the power loss it
-// exists to record. An unclean shutdown is precisely the case where an
-// unsynced marker would be lost, which would report the store as clean when it
-// is not — the failure direction that costs data rather than time.
+// The file itself is fsynced, and so is the directory holding it where the
+// platform allows it, because a file that exists only in the page cache does
+// not survive the power loss it exists to record. An unclean shutdown is
+// precisely the case where an unsynced marker would be lost, which would report
+// the store as clean when it is not — the failure direction that costs data
+// rather than time.
 func writeDirtyMarker(path string) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -186,11 +187,9 @@ func writeDirtyMarker(path string) error {
 		return err
 	}
 
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	return errors.Join(dir.Sync(), dir.Close())
+	// Not portable, and deliberately not silently skipped: see syncDir, which
+	// is a no-op only on Windows, where there is no equivalent operation.
+	return syncDir(filepath.Dir(path))
 }
 
 // DB implements the Storer interface.
