@@ -230,9 +230,29 @@ func (db *DB) ReserveSample(
 			if swarm.Proximity(ch.Address.Bytes(), anchor) < committedDepth {
 				return false, nil
 			}
+			// Counted before the filters below, so that TotalIterated keeps
+			// meaning "chunks in the neighbourhood" rather than silently
+			// becoming "chunks in the neighbourhood that were also eligible"
+			// now that the filters run here instead of in the reader pool.
+			stats.TotalIterated++
+
+			// Decided here rather than in the reader pool, because neither
+			// decision depends on anything a later stage learns. Deciding late
+			// meant every stage after this one paid for chunks that were always
+			// going to be discarded — since #11 that includes an index lookup
+			// per chunk and a slot in the sort window.
+			if _, found := excludedBatchIDs[string(ch.BatchID)]; found {
+				stats.BelowBalanceIgnored++
+				return false, nil
+			}
+			if ch.ChunkType != swarm.ChunkTypeSingleOwner &&
+				ch.ChunkType != swarm.ChunkTypeContentAddressed {
+				stats.RogueChunk++
+				return false, nil
+			}
+
 			select {
 			case chunkC <- ch:
-				stats.TotalIterated++
 				return false, nil
 			case <-ctx.Done():
 				return false, ctx.Err()
@@ -311,19 +331,6 @@ func (db *DB) ReserveSample(
 			defer func() { addStats(wstat) }()
 
 			for chItem := range readC {
-				// exclude chunks who's batches balance are below minimum
-				if _, found := excludedBatchIDs[string(chItem.BatchID)]; found {
-					wstat.BelowBalanceIgnored++
-					continue
-				}
-
-				// Skip chunks if they are not SOC or CAC
-				if chItem.ChunkType != swarm.ChunkTypeSingleOwner &&
-					chItem.ChunkType != swarm.ChunkTypeContentAddressed {
-					wstat.RogueChunk++
-					continue
-				}
-
 				chunkLoadStart := time.Now()
 				chunk, err := db.ChunkStore().Get(ctx, chItem.Address)
 				chunkLoadDuration := time.Since(chunkLoadStart)
