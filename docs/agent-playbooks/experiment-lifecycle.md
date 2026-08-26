@@ -123,6 +123,17 @@ pointer is ever lost, and `scripts/export-patch.sh` resolves experiments through
 it. It can never be mistaken for a release tag: the Makefile matches `v[0-9]*`
 and experiment tags contain no slash.
 
+It **will** be mistaken for a version by goreleaser in snapshot mode, which
+`ignore_tags` does not filter. That is handled in `.goreleaser.yml`, where the
+snapshot version template derives from nothing at all rather than from
+`{{.Tag}}`. Do not change it back: with an `exp-*` tag on almost every merge,
+`{{.Tag}}` names a snapshot after whichever experiment `git describe` happens to
+reach.
+
+This step is easy to skip and was skipped for twenty-five merges, which left
+`export-patch.sh` able to resolve two experiments out of twenty-seven. If you
+are reading this while writing a merge, do it now.
+
 Finally, add the row to `docs/experiments/INDEX.md`.
 
 ## 7. Validate on a real node
