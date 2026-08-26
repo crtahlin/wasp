@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -168,6 +167,9 @@ func (c *command) initStartCmd() (err error) {
 				return err
 			}
 			c.bindBlockchainRpcConfig(cmd)
+			c.bindTracingConfig(cmd)
+			c.warnDeprecatedTracingKeys()
+			c.warnTracingTLSWithoutCA()
 			return nil
 		},
 	}
@@ -257,12 +259,6 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 
 	if c.config.IsSet(optionNameBlockTime) && blockTime != 0 {
 		networkConfig.blockTime = time.Duration(blockTime) * time.Second
-	}
-
-	tracingEndpoint := c.config.GetString(optionNameTracingEndpoint)
-
-	if c.config.IsSet(optionNameTracingHost) && c.config.IsSet(optionNameTracingPort) {
-		tracingEndpoint = strings.Join([]string{c.config.GetString(optionNameTracingHost), c.config.GetString(optionNameTracingPort)}, ":")
 	}
 
 	staticNodesOpt := c.config.GetStringSlice(optionNameStaticNodes)
@@ -382,6 +378,7 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		AutoTLSDomain:                 c.config.GetString(optionAutoTLSDomain),
 		AutoTLSRegistrationEndpoint:   c.config.GetString(optionAutoTLSRegistrationEndpoint),
 		FullNodeMode:                  fullNode,
+		LightNodeLimit:                c.config.GetInt(optionNameLightNodeLimit),
 		Logger:                        logger,
 		MinimumGasTipCap:              c.config.GetUint64(optionNameMinimumGasTipCap),
 		GasLimitFallback:              c.config.GetUint64(optionNameGasLimitFallback),
@@ -409,9 +406,13 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		SwapFactoryAddress:            c.config.GetString(optionNameSwapFactoryAddress),
 		SwapInitialDeposit:            c.config.GetString(optionNameSwapInitialDeposit),
 		TargetNeighborhood:            c.config.GetString(optionNameTargetNeighborhood),
-		TracingEnabled:                c.config.GetBool(optionNameTracingEnabled),
-		TracingEndpoint:               tracingEndpoint,
-		TracingServiceName:            c.config.GetString(optionNameTracingServiceName),
+		TracingEnabled:                c.config.GetBool(configKeyTracingEnabled),
+		TracingEndpoint:               c.config.GetString(configKeyTracingEndpoint),
+		TracingInsecure:               c.config.GetBool(configKeyTracingInsecure),
+		TracingCAFile:                 c.config.GetString(configKeyTracingCAFile),
+		TracingProtocol:               c.config.GetString(configKeyTracingProtocol),
+		TracingSamplingRatio:          c.config.GetFloat64(configKeyTracingSamplingRatio),
+		TracingServiceName:            c.config.GetString(configKeyTracingServiceName),
 		TrxDebugMode:                  c.config.GetBool(optionNameTransactionDebugMode),
 		WarmupTime:                    c.config.GetDuration(optionWarmUpTime),
 		WelcomeMessage:                c.config.GetString(optionWelcomeMessage),

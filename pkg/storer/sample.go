@@ -19,6 +19,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/bmt"
 	"github.com/ethersphere/bee/v2/pkg/cac"
 	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/safe"
 	"github.com/ethersphere/bee/v2/pkg/sharky"
 	"github.com/ethersphere/bee/v2/pkg/soc"
 	chunk "github.com/ethersphere/bee/v2/pkg/storage/testing"
@@ -217,7 +218,7 @@ func (db *DB) ReserveSample(
 	chunkC := make(chan *reserve.ChunkBinItem, 3*workers)
 
 	// Phase 1: Iterate chunk addresses
-	g.Go(func() error {
+	g.Go(safe.RunFunc(db.logger, "storer-sample-iterate-chunks", func() error {
 		start := time.Now()
 		stats := SampleStats{}
 		defer func() {
@@ -259,7 +260,7 @@ func (db *DB) ReserveSample(
 			}
 		})
 		return err
-	})
+	}))
 
 	readers := db.reserveOptions.samplerReadConcurrency
 	if readers <= 0 {
@@ -325,7 +326,7 @@ func (db *DB) ReserveSample(
 	var readersWg sync.WaitGroup
 	for range readers {
 		readersWg.Add(1)
-		g.Go(func() error {
+		g.Go(safe.RunFunc(db.logger, "storer-sample-reader", func() error {
 			defer readersWg.Done()
 			wstat := SampleStats{}
 			defer func() { addStats(wstat) }()
@@ -348,7 +349,7 @@ func (db *DB) ReserveSample(
 				}
 			}
 			return nil
-		})
+		}))
 	}
 
 	go func() {
@@ -357,7 +358,7 @@ func (db *DB) ReserveSample(
 	}()
 
 	for range workers {
-		g.Go(func() error {
+		g.Go(safe.RunFunc(db.logger, "storer-sample-hasher", func() error {
 			wstat := SampleStats{}
 			// One hasher per goroutine: bmt hashers carry state and are not
 			// safe to share.
@@ -384,7 +385,7 @@ func (db *DB) ReserveSample(
 				}
 			}
 			return nil
-		})
+		}))
 	}
 
 	go func() {

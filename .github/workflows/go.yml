@@ -25,6 +25,13 @@ on:
     branches:
       - '**'
 
+# Taken from upstream v2.8.2. Superseded pushes to the same pull request are
+# cancelled; pushes to main are not, because every commit on main must have a
+# result of its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Test

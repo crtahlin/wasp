@@ -21,6 +21,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/puller/intervalstore"
 	"github.com/ethersphere/bee/v2/pkg/pullsync"
 	"github.com/ethersphere/bee/v2/pkg/rate"
+	"github.com/ethersphere/bee/v2/pkg/safe"
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -150,18 +151,22 @@ func New(
 	if recalcDur <= 0 {
 		recalcDur = DefaultRecalcPeersDur
 	}
+	// histRate is shared: the puller keeps it and the metrics read from it.
+	// Upstream introduced this in v2.8.2 so a gauge can report the observed
+	// sync rate; before that newMetrics took no argument.
+	histRate := rate.New(DefaultHistRateWindow)
 	p := &Puller{
 		base:           addr,
 		statestore:     stateStore,
 		topology:       topology,
 		radius:         reserveState,
 		syncer:         pullSync,
-		metrics:        newMetrics(),
+		metrics:        newMetrics(histRate.Rate),
 		logger:         logger.WithName(loggerName).Register(),
 		syncPeers:      make(map[string]*syncPeer),
 		bins:           bins,
 		blockLister:    blockLister,
-		rate:           rate.New(DefaultHistRateWindow),
+		rate:           histRate,
 		cancel:         func() { /* Noop, since the context is initialized in the Start(). */ },
 		limiter:        ratelimit.NewLimiter(ratelimit.Every(time.Second/time.Duration(rateLimit)), rateLimit),
 		recalcPeersDur: recalcDur,
@@ -436,12 +441,16 @@ func (p *Puller) syncPeerBin(parentCtx context.Context, peer *syncPeer, bin uint
 	if cursor > 0 {
 		peer.wg.Add(1)
 		p.wg.Add(1)
-		go sync(true, peer.address, cursor)
+		safe.Go(p.logger, "puller-sync-historical", func() {
+			sync(true, peer.address, cursor)
+		})
 	}
 
 	peer.wg.Add(1)
 	p.wg.Add(1)
-	go sync(false, peer.address, cursor+1)
+	safe.Go(p.logger, "puller-sync-live", func() {
+		sync(false, peer.address, cursor+1)
+	})
 }
 
 func (p *Puller) Close() error {

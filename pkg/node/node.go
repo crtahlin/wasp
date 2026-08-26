@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	bee "github.com/ethersphere/bee/v2"
 	"github.com/ethersphere/bee/v2/pkg/accesscontrol"
 	"github.com/ethersphere/bee/v2/pkg/accounting"
 	"github.com/ethersphere/bee/v2/pkg/addressbook"
@@ -121,6 +122,7 @@ type Bee struct {
 	saludCloser              io.Closer
 	storageIncetivesCloser   io.Closer
 	pushSyncCloser           io.Closer
+	retrievalCloser          io.Closer
 	stabilizationDetector    io.Closer
 	shutdownInProgress       bool
 	shutdownMutex            sync.Mutex
@@ -164,6 +166,7 @@ type Options struct {
 	AutoTLSDomain                 string
 	AutoTLSRegistrationEndpoint   string
 	FullNodeMode                  bool
+	LightNodeLimit                int
 	GasLimitFallback              uint64
 	Logger                        log.Logger
 	MinimumGasTipCap              uint64
@@ -193,6 +196,10 @@ type Options struct {
 	TargetNeighborhood            string
 	TracingEnabled                bool
 	TracingEndpoint               string
+	TracingInsecure               bool
+	TracingCAFile                 string
+	TracingProtocol               string
+	TracingSamplingRatio          float64
 	TracingServiceName            string
 	TrxDebugMode                  bool
 	WarmupTime                    time.Duration
@@ -230,6 +237,19 @@ const (
 	maxAllowedDoubling           = 1
 )
 
+// tracingEnvironment maps a network id to the deployment.environment trace
+// attribute. Unknown ids are reported as "private".
+func tracingEnvironment(networkID uint64) string {
+	switch networkID {
+	case config.Mainnet.NetworkID:
+		return "mainnet"
+	case config.Testnet.NetworkID:
+		return "testnet"
+	default:
+		return "private"
+	}
+}
+
 func NewBee(
 	ctx context.Context,
 	addr string,
@@ -247,15 +267,6 @@ func NewBee(
 	var pullSyncStartTime time.Time
 
 	nodeMetrics := newMetrics()
-
-	tracer, tracerCloser, err := tracing.NewTracer(&tracing.Options{
-		Enabled:     o.TracingEnabled,
-		Endpoint:    o.TracingEndpoint,
-		ServiceName: o.TracingServiceName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("tracer: %w", err)
-	}
 
 	if err := validatePublicAddress(o.NATAddr); err != nil {
 		return nil, fmt.Errorf("invalid NAT address %s: %w", o.NATAddr, err)
@@ -290,7 +301,6 @@ func NewBee(
 		logger:         logger,
 		ctxCancel:      ctxCancel,
 		errorLogWriter: sink,
-		tracerCloser:   tracerCloser,
 		syncingStopped: syncutil.NewSignaler(),
 	}
 
@@ -400,6 +410,24 @@ func NewBee(
 	if err = checkOverlay(stateStore, swarmAddress); err != nil {
 		return nil, fmt.Errorf("check overlay address: %w", err)
 	}
+
+	tracer, tracerCloser, err := tracing.NewTracer(&tracing.Options{
+		Enabled:        o.TracingEnabled,
+		Endpoint:       o.TracingEndpoint,
+		Insecure:       o.TracingInsecure,
+		CAFile:         o.TracingCAFile,
+		Protocol:       o.TracingProtocol,
+		SamplingRatio:  o.TracingSamplingRatio,
+		ServiceName:    o.TracingServiceName,
+		ServiceVersion: bee.Version,
+		Environment:    tracingEnvironment(networkID),
+		InstanceID:     swarmAddress.String(),
+		Logger:         logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tracer: %w", err)
+	}
+	b.tracerCloser = tracerCloser
 
 	var (
 		chequebookService chequebook.Service = new(noOpChequebookService)
@@ -719,6 +747,7 @@ func NewBee(
 		AutoTLSCAEndpoint:           o.AutoTLSCAEndpoint,
 		WelcomeMessage:              o.WelcomeMessage,
 		FullNode:                    o.FullNodeMode,
+		LightNodeLimit:              o.LightNodeLimit,
 		Nonce:                       nonce,
 		AllowPrivateCIDRs:           o.AllowPrivateCIDRs,
 		Registry:                    registry,
@@ -1171,6 +1200,7 @@ func NewBee(
 	pssService.SetPushSyncer(pushSyncProtocol)
 
 	retrieval := retrieval.New(swarmAddress, waitNetworkRFunc, localStore, p2ps, kad, logger, acc, pricer, tracer, o.RetrievalCaching)
+	b.retrievalCloser = retrieval
 	localStore.SetRetrievalService(retrieval)
 
 	statusMetricsRegistry.MustRegister(retrieval.StatusMetrics()...)
@@ -1215,7 +1245,10 @@ func NewBee(
 		defer unsubscribe()
 		<-sub
 		logger.Info("node warmup stabilization complete, updating API status")
-		apiService.SetIsWarmingUp(false)
+		// apiService is nil when the API is disabled (empty --api-addr).
+		if apiService != nil {
+			apiService.SetIsWarmingUp(false)
+		}
 	}()
 
 	stakingContractAddress := chainCfg.StakingAddress
@@ -1470,6 +1503,24 @@ type namedCloser struct {
 	name   string
 }
 
+// shutdownClosers returns the closers that Shutdown fans out over concurrently.
+// Every service with a background worker to join on shutdown must appear here,
+// otherwise its worker leaks when the node stops.
+func (b *Bee) shutdownClosers() []namedCloser {
+	return []namedCloser{
+		{b.pssCloser, "pss"},
+		{b.gsocCloser, "gsoc"},
+		{b.pusherCloser, "pusher"},
+		{b.pullerCloser, "puller"},
+		{b.accountingCloser, "accounting"},
+		{b.pullSyncCloser, "pull sync"},
+		{b.pushSyncCloser, "push sync"},
+		{b.retrievalCloser, "retrieval"},
+		{b.hiveCloser, "hive"},
+		{b.saludCloser, "salud"},
+	}
+}
+
 func (b *Bee) Shutdown() error {
 	var mErr error
 
@@ -1530,16 +1581,7 @@ func (b *Bee) Shutdown() error {
 
 	var wg sync.WaitGroup
 
-	closers := []namedCloser{
-		{b.pssCloser, "pss"},
-		{b.gsocCloser, "gsoc"},
-		{b.pusherCloser, "pusher"},
-		{b.pullerCloser, "puller"},
-		{b.accountingCloser, "accounting"},
-		{b.pullSyncCloser, "pull sync"},
-		{b.hiveCloser, "hive"},
-		{b.saludCloser, "salud"},
-	}
+	closers := b.shutdownClosers()
 
 	wg.Add(len(closers))
 	for _, nc := range closers {
