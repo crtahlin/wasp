@@ -418,6 +418,8 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		SamplerReadConcurrency:        c.config.GetInt(optionNameSamplerReadConcurrency),
 		SamplerSortWindow:             c.config.GetInt(optionNameSamplerSortWindow),
 		ReserveHasConcurrency:         c.config.GetInt(optionNameReserveHasConcurrency),
+		KademliaSaturationPeers:       c.config.GetInt(optionNameKademliaSaturationPeers),
+		KademliaOverSaturationPeers:   c.config.GetInt(optionNameKademliaOverSaturationPeers),
 		PullSyncMaxChunksPerSecond:    c.config.GetInt(optionNamePullSyncMaxChunksPerSecond),
 		PullerMaxChunksPerSecond:      c.config.GetInt(optionNamePullerMaxChunksPerSecond),
 		PullerRecalcPeersDur:          c.config.GetDuration(optionNamePullSyncRecalcInterval),

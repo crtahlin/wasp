@@ -41,6 +41,8 @@ const (
 	optionNameSamplerReadConcurrency       = "sampler-read-concurrency"
 	optionNameSamplerSortWindow            = "sampler-sort-window"
 	optionNameReserveHasConcurrency        = "reserve-has-concurrency"
+	optionNameKademliaSaturationPeers      = "kademlia-saturation-peers"
+	optionNameKademliaOverSaturationPeers  = "kademlia-over-saturation-peers"
 	optionNamePullSyncMaxChunksPerSecond   = "pullsync-max-chunks-per-second"
 	optionNamePullerMaxChunksPerSecond     = "puller-max-chunks-per-second"
 	optionNamePullSyncRecalcInterval       = "pullsync-recalc-interval"
@@ -305,6 +307,8 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(optionNameSamplerReadConcurrency, 0, "chunk loads the reserve sampler keeps in flight; 0 uses the default, which matches the CPU count and preserves previous behaviour")
 	cmd.Flags().Int(optionNameSamplerSortWindow, 0, "chunks the reserve sampler buffers and sorts into disk order before reading; 0 reads in bin order, which is the previous behaviour")
 	cmd.Flags().Int(optionNameReserveHasConcurrency, 0, "reserve lookups pullsync may have in flight at once; 0 leaves them unbounded, which is the previous behaviour")
+	cmd.Flags().Int(optionNameKademliaSaturationPeers, 0, "connected peers per bin below which the bin is not considered saturated; 0 uses the default of 8. Raising it consumes other nodes' connection budget, not only your own")
+	cmd.Flags().Int(optionNameKademliaOverSaturationPeers, 0, "connected peers per bin above which the bin is over-saturated and further peers are pruned; 0 uses the default of 18. Raising it consumes other nodes' connection budget, not only your own")
 	cmd.Flags().String(optionNamePaymentThreshold, "13500000", "threshold in BZZ where you expect to get paid from your peers")
 	cmd.Flags().Int64(optionNamePaymentTolerance, 25, "excess debt above payment threshold in percentages where you disconnect from your peer")
 	cmd.Flags().Int64(optionNamePaymentEarly, 50, "percentage below the peers payment threshold when we initiate settlement")
