@@ -95,17 +95,40 @@ commit_parsers = [
   { message = "^Pull from upstream", skip = true },
   { message = "^chore\\(release\\)", skip = true },
 
-  { message = "^chore\\(upstream\\)", group = "Upstream" },
-  { message = "^[Ff]eat",     group = "Features" },
-  { message = "^[Ff]ix",      group = "Bug fixes" },
-  { message = "^[Pp]erf",     group = "Performance" },
-  { message = "^[Rr]efactor", group = "Refactor" },
-  { message = "^[Dd]oc",      group = "Documentation" },
-  { message = "^[Tt]est",     group = "Testing" },
-  { message = "^[Bb]uild",    group = "Build" },
-  { message = "^ci",          group = "CI" },
-  { message = "^[Cc]hore",    group = "Miscellaneous" },
-  { message = ".*",           group = "Other" },
+  # Every rule below requires a trailing (#N), and the catch-all skips instead
+  # of grouping. That is the whole mechanism for keeping the changelog to the
+  # first-parent spine, and it is worth stating because the reason is not
+  # visible from the rules themselves.
+  #
+  # merge_commit above keeps every commit with more than one parent, and
+  # git-cliff walks the entire range rather than the spine. So a branch whose
+  # own tip is a merge contributes twice: once as the pull request merge on the
+  # spine, and once as the tip that merge brought in.
+  #
+  # Every upstream sync has exactly that shape by construction — the sync
+  # branch is main with the upstream tag merged into it, so its tip is a merge
+  # — and the v2.8.2 sync duly appeared twice under Upstream, once with (#149)
+  # and once without. Rust's regex has no lookaround, so this cannot be
+  # expressed as one negative rule; it has to be a condition on each.
+  #
+  # Everything that reaches main goes through a pull request and carries its
+  # number. Anything on the spine that somehow does not is caught by
+  # scripts/check-changelog-coverage.sh, which compares the rendered changelog
+  # against the merges that actually happened and reports the gap rather than
+  # letting it disappear quietly.
+  { message = "^chore\\(upstream\\)[^\\n]*/pull/[0-9]+\\)\\)", group = "Upstream" },
+  { message = "^[Ff]eat[^\\n]*/pull/[0-9]+\\)\\)",     group = "Features" },
+  { message = "^[Ff]ix[^\\n]*/pull/[0-9]+\\)\\)",      group = "Bug fixes" },
+  { message = "^[Pp]erf[^\\n]*/pull/[0-9]+\\)\\)",     group = "Performance" },
+  { message = "^[Rr]evert[^\\n]*/pull/[0-9]+\\)\\)",   group = "Reverted" },
+  { message = "^[Rr]efactor[^\\n]*/pull/[0-9]+\\)\\)", group = "Refactor" },
+  { message = "^[Dd]oc[^\\n]*/pull/[0-9]+\\)\\)",      group = "Documentation" },
+  { message = "^[Tt]est[^\\n]*/pull/[0-9]+\\)\\)",     group = "Testing" },
+  { message = "^[Bb]uild[^\\n]*/pull/[0-9]+\\)\\)",    group = "Build" },
+  { message = "^ci[^\\n]*/pull/[0-9]+\\)\\)",          group = "CI" },
+  { message = "^[Cc]hore[^\\n]*/pull/[0-9]+\\)\\)",    group = "Miscellaneous" },
+  { message = "[^\\n]*/pull/[0-9]+\\)\\)",             group = "Other" },
+  { message = ".*",                          skip = true },
 ]
 
 [bump]
