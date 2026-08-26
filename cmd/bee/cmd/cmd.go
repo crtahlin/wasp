@@ -41,6 +41,8 @@ const (
 	optionNameSamplerReadConcurrency       = "sampler-read-concurrency"
 	optionNamePullSyncMaxChunksPerSecond   = "pullsync-max-chunks-per-second"
 	optionNamePullerMaxChunksPerSecond     = "puller-max-chunks-per-second"
+	optionNamePullSyncRecalcInterval       = "pullsync-recalc-interval"
+	optionNameReserveWakeUpDuration        = "reserve-wakeup-duration"
 	optionCORSAllowedOrigins               = "cors-allowed-origins"
 	optionNameTracingEnabled               = "tracing-enable"
 	optionNameTracingEndpoint              = "tracing-endpoint"
@@ -295,6 +297,8 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().String(optionNameVerbosity, "info", "log verbosity level 0=silent, 1=error, 2=warn, 3=info, 4=debug, 5=trace")
 	cmd.Flags().String(optionWelcomeMessage, "", "send a welcome message string during handshakes")
 	cmd.Flags().Int(optionNamePullSyncMaxChunksPerSecond, 0, "per-peer inbound chunk rate this node will serve; 0 uses the default of 250")
+	cmd.Flags().Duration(optionNamePullSyncRecalcInterval, 0, "how often the puller re-decides which peers to sync from; 0 uses the default of 5m")
+	cmd.Flags().Duration(optionNameReserveWakeUpDuration, 0, "how long the reserve worker waits between runs; 0 uses the default of 15m")
 	cmd.Flags().Int(optionNamePullerMaxChunksPerSecond, 0, "total inbound sync rate across all peers; 0 uses the default of 1000, roughly 4 MB/s")
 	cmd.Flags().Int(optionNameSamplerReadConcurrency, 0, "chunk loads the reserve sampler keeps in flight; 0 uses the default, which matches the CPU count and preserves previous behaviour")
 	cmd.Flags().String(optionNamePaymentThreshold, "13500000", "threshold in BZZ where you expect to get paid from your peers")

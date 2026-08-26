@@ -200,6 +200,8 @@ type Options struct {
 	SamplerReadConcurrency        int
 	PullSyncMaxChunksPerSecond    int
 	PullerMaxChunksPerSecond      int
+	PullerRecalcPeersDur          time.Duration
+	ReserveWakeUpDuration         time.Duration
 	WhitelistedWithdrawalAddress  []string
 }
 
@@ -215,10 +217,13 @@ const (
 	minPaymentThreshold           = 2 * refreshRate           // minimal accepted payment threshold of full nodes
 	maxPaymentThreshold           = 24 * refreshRate          // maximal accepted payment threshold of full nodes
 	mainnetNetworkID              = uint64(1)                 //
-	reserveWakeUpDuration         = 15 * time.Minute          // time to wait before waking up reserveWorker
-	reserveMinEvictCount          = 1_000
-	cacheMinEvictCount            = 10_000
-	maxAllowedDoubling            = 1
+	// DefaultReserveWakeUpDuration is how long the reserve worker waits between
+	// runs. Each run performs a full scan of the reserve, so at larger reserve
+	// sizes the scan grows while the interval does not. See issue #58.
+	DefaultReserveWakeUpDuration = 15 * time.Minute
+	reserveMinEvictCount         = 1_000
+	cacheMinEvictCount           = 10_000
+	maxAllowedDoubling           = 1
 )
 
 func NewBee(
@@ -849,7 +854,10 @@ func NewBee(
 	if o.FullNodeMode && !o.BootnodeMode {
 		// configure reserve only for full node
 		lo.ReserveCapacity = reserveCapacity
-		lo.ReserveWakeUpDuration = reserveWakeUpDuration
+		lo.ReserveWakeUpDuration = DefaultReserveWakeUpDuration
+		if o.ReserveWakeUpDuration > 0 {
+			lo.ReserveWakeUpDuration = o.ReserveWakeUpDuration
+		}
 		lo.ReserveMinEvictCount = reserveMinEvictCount
 		lo.RadiusSetter = kad
 		lo.ReserveCapacityDoubling = o.ReserveCapacityDoubling
@@ -1249,6 +1257,7 @@ func NewBee(
 	if o.FullNodeMode && !o.BootnodeMode {
 		pullerService = puller.New(swarmAddress, stateStore, kad, localStore, pullSyncProtocol, p2ps, logger, puller.Options{
 			MaxChunksPerSecond: o.PullerMaxChunksPerSecond,
+			RecalcPeersDur:     o.PullerRecalcPeersDur,
 		})
 		b.pullerCloser = pullerService
 
