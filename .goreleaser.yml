@@ -152,7 +152,20 @@ builds:
       - arm64
 
 snapshot:
-  version_template: "{{.Tag}}-snapshot"
+  # Not {{.Tag}}. ignore_tags does not filter in snapshot mode — verified, not
+  # assumed: with experiment tags present goreleaser reports "current tag is not
+  # semver" and names the build after whichever exp- tag git describe reaches,
+  # so a snapshot was called exp-rpc-redial-snapshot. Every merged experiment
+  # carries such a tag, so a snapshot taken at any point on main would be named
+  # after an unrelated experiment.
+  #
+  # Deriving from the commit instead makes the name independent of what tags
+  # happen to exist, which is the property a snapshot name needs.
+  #
+  # No commit in the template: the ldflags already append commitHash, so
+  # including it here produced "0.0.0-4c91686a-snapshot-4c91686a". The binary
+  # still reports which commit it is; only the artifact filename is stable.
+  version_template: "0.0.0-snapshot"
 
 archives:
 
