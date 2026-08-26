@@ -47,3 +47,19 @@ func (db *DB) CountWithinRadius(ctx context.Context) (int, error) {
 // MaxSamplerSortWindow exposes the read-ordering window cap so a test can
 // assert an oversized setting is clamped to it rather than honoured.
 const MaxSamplerSortWindow = maxSamplerSortWindow
+
+// AcquireSlot exposes the ReserveHas gate so its bounding and its shutdown
+// escape can be tested without standing up a store.
+func AcquireSlot(limiter chan struct{}, quit chan struct{}) (func(), error) {
+	return acquireSlot(limiter, quit)
+}
+
+// ReserveHasSlots exposes the semaphore constructor so a test can assert that
+// an unbounded setting really produces no semaphore rather than one of size
+// zero, which would block every caller for ever.
+func ReserveHasSlots(n int) chan struct{} { return reserveHasSlots(n) }
+
+// ReserveHasLimit reports the bound the store was built with, 0 when the
+// lookups are unbounded. Used to assert the option reaches the store rather
+// than being read into a field nothing consults.
+func (db *DB) ReserveHasLimit() int { return cap(db.reserveHasLimiter) }

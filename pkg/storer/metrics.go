@@ -36,6 +36,7 @@ type metrics struct {
 	ReserveSampleRunSummary       *prometheus.GaugeVec
 	ReserveSampleLastRunTimestamp prometheus.Gauge
 	RecoveryPrunedChunkCount      prometheus.Counter
+	ReserveHasWaitDuration        prometheus.Histogram
 }
 
 // newMetrics is a convenient constructor for creating new metrics.
@@ -199,6 +200,22 @@ func newMetrics() metrics {
 				Subsystem: subsystem,
 				Name:      "recovery_pruned_chunk_count",
 				Help:      "Number of corrupted chunks pruned from the index during sharky recovery.",
+			},
+		),
+		ReserveHasWaitDuration: prometheus.NewHistogram(
+			prometheus.HistogramOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "reserve_has_wait_duration",
+				Help:      "Time spent waiting for a ReserveHas slot, when the lookups are bounded.",
+				// The default buckets end at 10 seconds, which is far past the
+				// point where this is interesting. A bound that is working
+				// waits microseconds; a bound that is too tight shows up in the
+				// tens of milliseconds, and that difference has to be visible.
+				Buckets: []float64{
+					0.000001, 0.00001, 0.0001, 0.001, 0.005,
+					0.01, 0.05, 0.1, 0.5, 1,
+				},
 			},
 		),
 	}
