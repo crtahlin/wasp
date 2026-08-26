@@ -183,13 +183,32 @@ It is not evidence, and the default must not be set from it.
 
 ## Protocol impact
 
-None. Sample selection takes the 16 items with the smallest transformed address.
-`sort.Slice` over the assembled items is applied after collection and does not
-depend on arrival order, so reordering the reads cannot change the sample.
+None, but the reason is not the one the issue gives, and it is worth stating
+precisely because the sample is what a redistribution round is judged on.
 
-This is checked directly: a test samples the same fixture store with the window
-off and at several window sizes and asserts the resulting `Sample.Items` are
-identical.
+Phase 3 does not sort a collected slice. It runs an insertion sort into a list
+bounded at `SampleSize`, deciding as each item arrives whether it belongs:
+
+```go
+if le(item.TransformedAddress, currentMaxAddr) || len(sampleItems) < SampleSize {
+```
+
+That gate reads `currentMaxAddr`, which depends on what has arrived so far — so
+the *decision* is order-dependent even though the *outcome* is not. The outcome
+holds because the running maximum is always greater than or equal to the final
+maximum, so any item belonging in the final 16 passes the gate whenever it
+arrives. The set of the 16 smallest transformed addresses is the same for every
+arrival order.
+
+One case is genuinely order-dependent: two items with an **equal** transformed
+address. `insert` then keeps whichever is content-addressed, and if both are, the
+later arrival replaces the earlier. That requires a collision in a keyed BMT hash
+between two distinct chunks, so it is not a practical concern, but it is the one
+place where the reads' order reaches the sample and it should not be described as
+impossible.
+
+Checked directly: a test samples the same fixture store with the window off and
+at several window sizes and asserts the resulting `Sample.Items` are identical.
 
 ## Rollout and rollback
 
