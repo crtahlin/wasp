@@ -408,7 +408,10 @@ type Options struct {
 	// SamplerSortWindow is how many chunks the reserve sampler buffers and
 	// sorts by physical position before reading them. Zero disables ordering
 	// and issues the reads in bin order, which is the previous behaviour.
-	SamplerSortWindow       int
+	SamplerSortWindow int
+	// ReserveHasConcurrency bounds how many ReserveHas lookups may run at
+	// once. Zero leaves them unbounded, which is the previous behaviour.
+	ReserveHasConcurrency   int
 	ReserveMinEvictCount    uint64
 	ReserveCapacityDoubling int
 
@@ -480,6 +483,9 @@ type DB struct {
 	syncer           Syncer
 	reserveOptions   reserveOpts
 	shutdownTimeout  time.Duration
+	// reserveHasLimiter bounds concurrent ReserveHas lookups. Nil when
+	// unbounded, which is the default.
+	reserveHasLimiter chan struct{}
 
 	pinIntegrity *PinIntegrity
 }
@@ -499,6 +505,39 @@ type reserveOpts struct {
 	// disk order before reading them. Zero issues the reads in bin order, which
 	// is what the sampler did before ordering existed; see issue #11.
 	samplerSortWindow int
+}
+
+// reserveHasSlots returns the semaphore bounding concurrent ReserveHas
+// lookups, or nil when they are unbounded.
+//
+// The bound exists because pullsync calls ReserveHas once per offered chunk,
+// from one goroutine per syncing peer, so the concurrency the reserve sees is
+// the peer count. On a node with a large reserve and a hundred peers that is a
+// hundred concurrent index lookups competing with everything else the store is
+// doing. See issue #20.
+func reserveHasSlots(n int) chan struct{} {
+	if n <= 0 {
+		return nil
+	}
+	return make(chan struct{}, n)
+}
+
+// acquireSlot takes a slot from limiter, returning a function that gives it
+// back. A nil limiter is unbounded and returns immediately.
+//
+// It abandons the wait when quit closes. ReserveHas has no context to cancel,
+// so without that escape a node whose reserve had stopped answering could not
+// be shut down: every waiting caller would block on a slot that never frees.
+func acquireSlot(limiter chan struct{}, quit chan struct{}) (func(), error) {
+	if limiter == nil {
+		return func() {}, nil
+	}
+	select {
+	case limiter <- struct{}{}:
+		return func() { <-limiter }, nil
+	case <-quit:
+		return nil, ErrDBQuit
+	}
 }
 
 // New returns a newly constructed DB object which implements all the above
@@ -603,6 +642,7 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 			samplerSortWindow:      opts.SamplerSortWindow,
 		},
 		directUploadLimiter: make(chan struct{}, pusher.ConcurrentPushes),
+		reserveHasLimiter:   reserveHasSlots(opts.ReserveHasConcurrency),
 		pinIntegrity:        pinIntegrity,
 	}
 

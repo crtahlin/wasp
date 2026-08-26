@@ -334,6 +334,21 @@ func (db *DB) ReserveGet(ctx context.Context, addr swarm.Address, batchID []byte
 }
 
 func (db *DB) ReserveHas(addr swarm.Address, batchID []byte, stampHash []byte) (has bool, err error) {
+	// Bounded because pullsync calls this once per offered chunk from one
+	// goroutine per syncing peer, so the concurrency the reserve sees is the
+	// peer count. Unbounded by default; see issue #20.
+	waitStart := time.Now()
+	release, err := acquireSlot(db.reserveHasLimiter, db.quit)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	if db.reserveHasLimiter != nil {
+		// Recorded so a bound that is too tight is visible as queueing rather
+		// than being mistaken for the contention it was meant to remove.
+		db.metrics.ReserveHasWaitDuration.Observe(time.Since(waitStart).Seconds())
+	}
+
 	dur := captureDuration(time.Now())
 	defer func() {
 		db.metrics.MethodCallsDuration.WithLabelValues("reserve", "ReserveHas").Observe(dur())

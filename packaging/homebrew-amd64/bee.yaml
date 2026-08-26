@@ -57,6 +57,19 @@
 ##
 ## The sample itself does not change with this setting, whatever it is set to.
 # sampler-sort-window: 0
+## reserve lookups pullsync may have in flight at once.
+##
+## pullsync asks the reserve whether it already holds a chunk once per offered
+## chunk, from one goroutine per syncing peer. The concurrency the reserve sees
+## is therefore the peer count, and on a node with a hundred peers and a large
+## reserve that is a hundred index lookups competing with everything else the
+## store is doing.
+##
+## 0 leaves them unbounded, which is the previous behaviour. A bound trades
+## contention for queueing, so it can be set too tight: watch
+## bee_localstore_reserve_has_wait_duration, and if the wait is a meaningful
+## share of the lookup itself, the bound is costing more than it saves.
+# reserve-has-concurrency: 0
 ## per-peer inbound chunk rate this node will serve, in chunks per second.
 ##
 ## 0 uses the default of 250. This is a fairness and stability choice, not a

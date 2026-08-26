@@ -199,6 +199,7 @@ type Options struct {
 	WelcomeMessage                string
 	SamplerReadConcurrency        int
 	SamplerSortWindow             int
+	ReserveHasConcurrency         int
 	PullSyncMaxChunksPerSecond    int
 	PullerMaxChunksPerSecond      int
 	PullerRecalcPeersDur          time.Duration
@@ -848,6 +849,7 @@ func NewBee(
 		MinimumStorageRadius:      o.MinimumStorageRadius,
 		SamplerReadConcurrency:    o.SamplerReadConcurrency,
 		SamplerSortWindow:         o.SamplerSortWindow,
+		ReserveHasConcurrency:     o.ReserveHasConcurrency,
 	}
 	if lo.SamplerReadConcurrency <= 0 {
 		lo.SamplerReadConcurrency = storer.DefaultSamplerReadConcurrency()
