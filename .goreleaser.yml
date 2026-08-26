@@ -184,7 +184,13 @@ archives:
 
 
 nfpms:
-  - file_name_template: >-
+  # section is required by Debian policy and upstream leaves it unset, which
+  # produces an empty "Section:" field that lintian rejects. Verified on a
+  # snapshot build before setting it: the field was present and blank.
+  #
+  # net is what Debian uses for network daemons, which is what this is.
+  - section: net
+    file_name_template: >-
       {{ tolower .ProjectName }}_
       {{- tolower .Version }}_
       {{- if eq .Arch "arm" }}armhf
