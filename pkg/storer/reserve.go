@@ -94,6 +94,8 @@ func (db *DB) startReserveWorkers(
 // shared code, so the two could report different numbers for the same thing.
 // That is confusing exactly when someone is debugging. See issue #34.
 func (db *DB) countChunksWithinRadius() (int, error) {
+	defer db.recordScan("count")()
+
 	count := 0
 	err := db.reserve.IterateChunksItems(db.StorageRadius(), func(*reserve.ChunkBinItem) (bool, error) {
 		count++
@@ -102,7 +104,29 @@ func (db *DB) countChunksWithinRadius() (int, error) {
 	return count, err
 }
 
+// recordScan times a full pass over the reserve index. The returned function
+// records the elapsed time, so a caller times a pass with a single deferred
+// call.
+//
+// kind says what the pass was for, because the passes differ in what they cost
+// and in how often they have to happen, and a single number covering all of
+// them would answer neither question. See issue #28 and
+// docs/experiments/expired-batch-sweep/spec.md.
+func (db *DB) recordScan(kind string) func() {
+	start := time.Now()
+	return func() {
+		db.metrics.ReserveScanDuration.WithLabelValues(kind).Observe(time.Since(start).Seconds())
+	}
+}
+
 func (db *DB) countWithinRadius(ctx context.Context) (int, error) {
+	// "combined" rather than "count", because this pass does two jobs: it
+	// counts within radius and it reconciles chunks against the batches they
+	// claim. Labelling it the same as the count-only pass would make the two
+	// look comparable when the split in #28 separates them, and the whole point
+	// of measuring first is to be able to compare.
+	defer db.recordScan("combined")()
+
 	count := 0
 	missing := 0
 	radius := db.StorageRadius()
