@@ -73,10 +73,23 @@ storagetest.BenchmarkBatchedStore(b, store)
 Both engines, same machine, same run, reported side by side. Three runs minimum
 before any ratio is quoted, per `docs/agent-playbooks/test-bench.md`.
 
-Pebble is **already in the dependency graph** at `v1.1.5`, reached indirectly
-through go-ethereum, so the spike adds no new module and no new transitive
-dependencies. That is worth stating because "adds a dependency" would otherwise
-be a reasonable objection, and here it is not one.
+Pebble is already in `go.sum` at `v1.1.5`, reached through go-ethereum, so no
+new source enters the build that was not already resolvable.
+
+**It is not free, and an earlier draft of this spec said it was.** Importing it
+promotes Pebble to a direct requirement and pulls eleven modules into `go.mod`'s
+indirect list that nothing in the build previously needed:
+
+```
+github.com/DataDog/zstd, github.com/cockroachdb/{errors,fifo,logtags,redact,
+tokenbucket}, github.com/getsentry/sentry-go, github.com/klauspost/compress,
+github.com/kr/{pretty,text}, github.com/rogpeppe/go-internal
+```
+
+Being in the module graph and being in the build are different things, and the
+difference is exactly what "adds a dependency" means. Corrected here rather than
+left standing, because it was the one line in this spec that argued away an
+objection instead of answering it.
 
 ## Decision criteria
 
