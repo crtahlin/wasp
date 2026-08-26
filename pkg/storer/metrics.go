@@ -37,6 +37,7 @@ type metrics struct {
 	ReserveSampleLastRunTimestamp prometheus.Gauge
 	RecoveryPrunedChunkCount      prometheus.Counter
 	ReserveHasWaitDuration        prometheus.Histogram
+	ReserveScanDuration           *prometheus.HistogramVec
 }
 
 // newMetrics is a convenient constructor for creating new metrics.
@@ -201,6 +202,24 @@ func newMetrics() metrics {
 				Name:      "recovery_pruned_chunk_count",
 				Help:      "Number of corrupted chunks pruned from the index during sharky recovery.",
 			},
+		),
+		ReserveScanDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "reserve_scan_duration",
+				Help:      "Duration of a full pass over the reserve index, by what the pass was for.",
+				// The default buckets end at 10 seconds. A pass over four
+				// million chunks is expected to take longer than that, so the
+				// default would put every real observation in +Inf and report
+				// nothing at all. These run to an hour, because a pass that
+				// takes longer than the 15 minute wake-up interval is the
+				// finding, not an outlier to be clipped.
+				Buckets: []float64{
+					0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 900, 1800, 3600,
+				},
+			},
+			[]string{"kind"},
 		),
 		ReserveHasWaitDuration: prometheus.NewHistogram(
 			prometheus.HistogramOpts{

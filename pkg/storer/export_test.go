@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/events"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func (db *DB) Reserve() *reserve.Reserve {
@@ -63,3 +64,9 @@ func ReserveHasSlots(n int) chan struct{} { return reserveHasSlots(n) }
 // lookups are unbounded. Used to assert the option reaches the store rather
 // than being read into a field nothing consults.
 func (db *DB) ReserveHasLimit() int { return cap(db.reserveHasLimiter) }
+
+// ReserveScanDuration exposes the scan-duration histogram so a test can assert
+// a pass was actually timed, rather than that the code compiles.
+func (db *DB) ReserveScanDuration() *prometheus.HistogramVec {
+	return db.metrics.ReserveScanDuration
+}
