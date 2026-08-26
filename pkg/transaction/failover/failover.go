@@ -41,14 +41,40 @@ import (
 // keeps a failover from looking like one.
 const DefaultMaxBlockLag = 8
 
-// Endpoint pairs a backend with the address it talks to, for logging.
+// Endpoint describes one configured RPC endpoint.
 type Endpoint struct {
-	Name    string
+	Name string
+	// Backend is the live connection, or nil for an endpoint that did not
+	// answer when the node started. A nil backend is not the same as a missing
+	// endpoint: it keeps its place in the priority order and is reconnected by
+	// Recover if it comes back.
 	Backend transaction.Backend
+	// Dial opens a fresh connection, and is what lets an endpoint that was
+	// down at startup be adopted later. It must verify that the endpoint is on
+	// the expected chain and refuse otherwise, because nothing above it will:
+	// startup checks the chain once, and an endpoint adopted an hour later is
+	// never seen by that check.
+	//
+	// Nil means the endpoint cannot be reconnected, so once it is lost it stays
+	// lost. That is the old behaviour, and it is what a caller gets by saying
+	// nothing.
+	Dial func(context.Context) (transaction.Backend, error)
 }
 
+// endpoint is an Endpoint with its connection made replaceable.
+type endpoint struct {
+	name string
+	dial func(context.Context) (transaction.Backend, error)
+	// live is nil until the endpoint has answered at least once. Read on every
+	// chain call and written by Recover, so it is atomic rather than guarded.
+	live atomic.Pointer[conn]
+}
+
+// conn boxes the interface so it can be stored in an atomic.Pointer.
+type conn struct{ transaction.Backend }
+
 type Backend struct {
-	endpoints []Endpoint
+	endpoints []*endpoint
 	logger    log.Logger
 	maxLag    uint64
 
@@ -70,27 +96,58 @@ func New(logger log.Logger, maxLag uint64, endpoints ...Endpoint) (*Backend, err
 	if maxLag == 0 {
 		maxLag = DefaultMaxBlockLag
 	}
-	return &Backend{endpoints: endpoints, logger: logger, maxLag: maxLag}, nil
+
+	b := &Backend{logger: logger, maxLag: maxLag}
+	first := -1
+	for i, e := range endpoints {
+		ep := &endpoint{name: e.Name, dial: e.Dial}
+		if e.Backend != nil {
+			ep.live.Store(&conn{e.Backend})
+			if first < 0 {
+				first = i
+			}
+		}
+		b.endpoints = append(b.endpoints, ep)
+	}
+	if first < 0 {
+		return nil, errors.New("failover: no endpoint is connected")
+	}
+
+	// Start on the best endpoint that answered, not necessarily the first
+	// configured one. Starting on a dead endpoint would make the first chain
+	// call fail before failing over, which is a worse first impression than
+	// starting one place down the list and recovering upwards.
+	b.active.Store(int32(first))
+	return b, nil
 }
 
-func (b *Backend) current() (int, Endpoint) {
+func (b *Backend) current() (int, *endpoint, transaction.Backend) {
 	i := int(b.active.Load())
-	return i, b.endpoints[i]
+	ep := b.endpoints[i]
+	return i, ep, ep.live.Load().Backend
 }
 
-// advance moves to the next endpoint and reports whether one was available.
+// advance moves to the next connected endpoint and reports whether one was
+// found.
+//
+// Endpoints with no connection are skipped rather than tried: they are known to
+// be unreachable, and only Recover reconnects them. Trying one here would spend
+// a chain call's latency discovering what is already known, on the path that is
+// already handling a failure.
 func (b *Backend) advance(from int, cause error) bool {
-	next := from + 1
-	if next >= len(b.endpoints) {
-		return false
+	for next := from + 1; next < len(b.endpoints); next++ {
+		if b.endpoints[next].live.Load() == nil {
+			continue
+		}
+		// Only the goroutine that observed this failure advances; a concurrent
+		// caller that already moved on wins and this one follows it.
+		if b.active.CompareAndSwap(int32(from), int32(next)) {
+			b.logger.Warning("blockchain rpc endpoint failed, moving to the next",
+				"from", b.endpoints[from].name, "to", b.endpoints[next].name, "cause", cause)
+		}
+		return true
 	}
-	// Only the goroutine that observed this failure advances; a concurrent
-	// caller that already moved on wins and this one follows it.
-	if b.active.CompareAndSwap(int32(from), int32(next)) {
-		b.logger.Warning("blockchain rpc endpoint failed, moving to the next",
-			"from", b.endpoints[from].Name, "to", b.endpoints[next].Name, "cause", cause)
-	}
-	return true
+	return false
 }
 
 // call runs op against the active endpoint, moving on when an endpoint fails to
@@ -98,8 +155,8 @@ func (b *Backend) advance(from int, cause error) bool {
 func call[T any](b *Backend, op func(transaction.Backend) (T, error)) (T, error) {
 	var zero T
 	for attempts := 0; attempts < len(b.endpoints); attempts++ {
-		i, ep := b.current()
-		v, err := op(ep.Backend)
+		i, ep, live := b.current()
+		v, err := op(live)
 		if err == nil {
 			return v, nil
 		}
@@ -108,7 +165,7 @@ func call[T any](b *Backend, op func(transaction.Backend) (T, error)) (T, error)
 		}
 		if !b.advance(i, err) {
 			return zero, fmt.Errorf("failover: all %d endpoints failed, last was %s: %w",
-				len(b.endpoints), ep.Name, err)
+				len(b.endpoints), ep.name, err)
 		}
 	}
 	return zero, errors.New("failover: exhausted endpoints")
@@ -132,9 +189,9 @@ func (b *Backend) BlockNumber(ctx context.Context) (uint64, error) {
 			// it, say so: the listener may be about to see what looks like a
 			// reorg, and an operator reading logs should find this here.
 			if prev-n > b.maxLag {
-				_, ep := b.current()
+				_, ep, _ := b.current()
 				b.logger.Warning("blockchain rpc endpoint is behind the highest block seen",
-					"endpoint", ep.Name, "reported", n, "highest", prev, "lag", prev-n)
+					"endpoint", ep.name, "reported", n, "highest", prev, "lag", prev-n)
 			}
 			break
 		}
@@ -219,29 +276,32 @@ func (b *Backend) SuggestedFeeAndTip(ctx context.Context, gasPrice *big.Int, boo
 // watches them to confirmation, so the retry belongs there, with the state to do
 // it safely. Reads fail over; writes do not.
 func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
-	_, ep := b.current()
-	if err := ep.Backend.SendTransaction(ctx, tx); err != nil {
+	_, ep, live := b.current()
+	if err := live.SendTransaction(ctx, tx); err != nil {
 		if isTransportFailure(err) {
 			b.logger.Warning("send transaction failed at the transport level; not retrying "+
 				"elsewhere, because a lost response may mean it was accepted",
-				"endpoint", ep.Name, "tx", tx.Hash())
+				"endpoint", ep.name, "tx", tx.Hash())
 		}
 		return err
 	}
 	return nil
 }
 
-// Close closes every endpoint, not only the active one.
+// Close closes every connected endpoint, not only the active one. Endpoints
+// that were never reachable have nothing to close.
 func (b *Backend) Close() {
 	for _, ep := range b.endpoints {
-		ep.Backend.Close()
+		if c := ep.live.Load(); c != nil {
+			c.Close()
+		}
 	}
 }
 
 // Active reports which endpoint is currently serving, for tests and logging.
 func (b *Backend) Active() string {
-	_, ep := b.current()
-	return ep.Name
+	_, ep, _ := b.current()
+	return ep.name
 }
 
 // Recover periodically re-checks endpoints ahead of the active one and moves
@@ -281,7 +341,7 @@ func (b *Backend) Recover(ctx context.Context, interval time.Duration) {
 			if b.probe(ctx, i) {
 				if b.active.CompareAndSwap(int32(active), int32(i)) {
 					b.logger.Info("blockchain rpc endpoint recovered, moving back",
-						"from", b.endpoints[active].Name, "to", b.endpoints[i].Name)
+						"from", b.endpoints[active].name, "to", b.endpoints[i].name)
 				}
 				break
 			}
@@ -301,14 +361,52 @@ func (b *Backend) probe(ctx context.Context, i int) bool {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	n, err := ep.Backend.BlockNumber(ctx)
+	live := b.connect(ctx, ep)
+	if live == nil {
+		return false
+	}
+
+	n, err := live.BlockNumber(ctx)
 	if err != nil {
 		return false
 	}
 	if highest := b.highest.Load(); highest > n && highest-n > b.maxLag {
 		b.logger.Debug("candidate rpc endpoint is too far behind to switch to",
-			"endpoint", ep.Name, "reported", n, "highest", highest, "max_lag", b.maxLag)
+			"endpoint", ep.name, "reported", n, "highest", highest, "max_lag", b.maxLag)
 		return false
 	}
 	return true
+}
+
+// connect returns the endpoint's connection, dialling it first if it has never
+// had one. It returns nil when the endpoint cannot be reached or has no way to
+// be dialled.
+//
+// A connection made here is kept even if the endpoint then turns out to be too
+// far behind to switch to. Being behind is a reason not to use an endpoint now,
+// not a reason to throw away a working connection and pay to make it again on
+// the next probe.
+func (b *Backend) connect(ctx context.Context, ep *endpoint) transaction.Backend {
+	if c := ep.live.Load(); c != nil {
+		return c.Backend
+	}
+	if ep.dial == nil {
+		return nil
+	}
+
+	backend, err := ep.dial(ctx)
+	if err != nil {
+		b.logger.Debug("could not reconnect to a blockchain rpc endpoint",
+			"endpoint", ep.name, "error", err)
+		return nil
+	}
+
+	// Another probe may have connected the same endpoint in the meantime.
+	// Whoever loses closes their connection rather than leaking it.
+	if !ep.live.CompareAndSwap(nil, &conn{backend}) {
+		backend.Close()
+		return ep.live.Load().Backend
+	}
+	b.logger.Info("reconnected to a blockchain rpc endpoint", "endpoint", ep.name)
+	return backend
 }
