@@ -19,9 +19,11 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/bmt"
 	"github.com/ethersphere/bee/v2/pkg/cac"
 	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/sharky"
 	"github.com/ethersphere/bee/v2/pkg/soc"
 	chunk "github.com/ethersphere/bee/v2/pkg/storage/testing"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/chunkstamp"
+	"github.com/ethersphere/bee/v2/pkg/storer/internal/chunkstore"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"golang.org/x/sync/errgroup"
@@ -68,6 +70,115 @@ const maxLoadedChunkBuffer = 4096
 type loadedChunk struct {
 	item  *reserve.ChunkBinItem
 	chunk swarm.Chunk
+}
+
+// maxSamplerSortWindow caps how many bin items the ordering stage may hold
+// while it sorts them. Each entry is an item pointer plus a location, so a
+// million of them is tens of megabytes; the cap exists so a mistyped setting
+// cannot turn into memory pressure during a redistribution round.
+const maxSamplerSortWindow = 1 << 20
+
+// locatedItem pairs a bin item with where its chunk data physically sits, so a
+// window of them can be sorted into disk order before being read.
+//
+// located records whether the lookup succeeded. An item whose location could
+// not be read is still passed on rather than dropped, because the ordering
+// stage must not change which chunks the sampler sees.
+type locatedItem struct {
+	item    *reserve.ChunkBinItem
+	loc     sharky.Location
+	located bool
+}
+
+// orderSampleReads buffers windows of bin items, sorts each window by where
+// its chunk data physically sits, and emits it in that order.
+//
+// Items whose location cannot be read are kept and emitted after the sorted
+// ones. Dropping them would make the ordering stage change which chunks the
+// sampler considers, which is exactly what an ordering stage must not do — the
+// read that follows will fail on its own and be counted there, as it is when
+// this stage is switched off.
+func (db *DB) orderSampleReads(
+	ctx context.Context,
+	g *errgroup.Group,
+	in <-chan *reserve.ChunkBinItem,
+	window int,
+	readers int,
+	addStats func(SampleStats),
+) <-chan *reserve.ChunkBinItem {
+	out := make(chan *reserve.ChunkBinItem, 3*readers)
+
+	g.Go(func() error {
+		// Reported from inside the stage rather than from the caller, so that
+		// a window which never reached the stage reads as 0 and a test can
+		// tell the difference between configured and used.
+		stats := SampleStats{SortWindow: window}
+		defer func() {
+			close(out)
+			addStats(stats)
+		}()
+
+		idx := db.storage.IndexStore()
+		buf := make([]locatedItem, 0, window)
+
+		flush := func() error {
+			sortStart := time.Now()
+			// Stable, so that items which could not be located keep their
+			// arrival order rather than being shuffled by an arbitrary
+			// comparison among equals.
+			sort.SliceStable(buf, func(i, j int) bool {
+				a, b := buf[i], buf[j]
+				if a.located != b.located {
+					return a.located
+				}
+				if !a.located {
+					return false
+				}
+				if a.loc.Shard != b.loc.Shard {
+					return a.loc.Shard < b.loc.Shard
+				}
+				return a.loc.Slot < b.loc.Slot
+			})
+			stats.SortDuration += time.Since(sortStart)
+
+			for _, li := range buf {
+				select {
+				case out <- li.item:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			buf = buf[:0]
+			return nil
+		}
+
+		for item := range in {
+			rIdx := &chunkstore.RetrievalIndexItem{Address: item.Address}
+			lookupStart := time.Now()
+			err := idx.Get(rIdx)
+			stats.LocateDuration += time.Since(lookupStart)
+
+			li := locatedItem{item: item}
+			if err != nil {
+				stats.LocateFailed++
+				db.logger.Debug("failed locating chunk", "chunk_address", item.Address, "error", err)
+			} else {
+				li.loc = rIdx.Location
+				li.located = true
+			}
+			buf = append(buf, li)
+
+			if len(buf) >= window {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+
+		return flush()
+	})
+
+	return out
 }
 
 func (db *DB) ReserveSample(
@@ -119,9 +230,29 @@ func (db *DB) ReserveSample(
 			if swarm.Proximity(ch.Address.Bytes(), anchor) < committedDepth {
 				return false, nil
 			}
+			// Counted before the filters below, so that TotalIterated keeps
+			// meaning "chunks in the neighbourhood" rather than silently
+			// becoming "chunks in the neighbourhood that were also eligible"
+			// now that the filters run here instead of in the reader pool.
+			stats.TotalIterated++
+
+			// Decided here rather than in the reader pool, because neither
+			// decision depends on anything a later stage learns. Deciding late
+			// meant every stage after this one paid for chunks that were always
+			// going to be discarded — since #11 that includes an index lookup
+			// per chunk and a slot in the sort window.
+			if _, found := excludedBatchIDs[string(ch.BatchID)]; found {
+				stats.BelowBalanceIgnored++
+				return false, nil
+			}
+			if ch.ChunkType != swarm.ChunkTypeSingleOwner &&
+				ch.ChunkType != swarm.ChunkTypeContentAddressed {
+				stats.RogueChunk++
+				return false, nil
+			}
+
 			select {
 			case chunkC <- ch:
-				stats.TotalIterated++
 				return false, nil
 			case <-ctx.Done():
 				return false, ctx.Err()
@@ -129,6 +260,41 @@ func (db *DB) ReserveSample(
 		})
 		return err
 	})
+
+	readers := db.reserveOptions.samplerReadConcurrency
+	if readers <= 0 {
+		readers = workers
+	}
+
+	// Phase 1b: order the reads by physical position.
+	//
+	// Bin order comes from the chunk address, which is a hash, so it says
+	// nothing about where the data sits in the sharky shard files. Every read
+	// is therefore a seek to an unrelated position, and raising the reader
+	// count does not help: more concurrent random reads is still random reads.
+	//
+	// This stage buffers a window of items, reads each one's location from
+	// retrievalIdx, sorts the window by (shard, slot), and emits it in that
+	// order. The location is used only as a sort key and then discarded — the
+	// readers still go through ChunkStore().Get, which repeats the lookup.
+	//
+	// The repeat is deliberate. Get holds a per-address lock across the lookup
+	// and the read; splitting them would open a window as wide as this one, in
+	// which the chunk can be evicted and its slot reused by an unrelated Put.
+	// The read would then return another chunk's bytes labelled with the
+	// address that was asked for, and the sampler would hash those. The second
+	// lookup is for a key read moments earlier, so it is served from cache
+	// rather than the device. See docs/experiments/sampler-read-ordering/spec.md.
+	readC := (<-chan *reserve.ChunkBinItem)(chunkC)
+	sortWindow := db.reserveOptions.samplerSortWindow
+	if sortWindow > maxSamplerSortWindow {
+		db.logger.Warning("reserve sampler sort window capped",
+			"requested", sortWindow, "used", maxSamplerSortWindow)
+		sortWindow = maxSamplerSortWindow
+	}
+	if sortWindow > 0 {
+		readC = db.orderSampleReads(ctx, g, chunkC, sortWindow, readers, addStats)
+	}
 
 	// Phase 2: load chunk data, then hash it.
 	//
@@ -141,10 +307,6 @@ func (db *DB) ReserveSample(
 	//
 	// Sample selection takes the smallest transformed addresses and does not
 	// depend on the order items arrive in, so decoupling the stages is safe.
-	readers := db.reserveOptions.samplerReadConcurrency
-	if readers <= 0 {
-		readers = workers
-	}
 	sampleItemChan := make(chan SampleItem, 3*workers)
 	// Bound the hand-off buffer. Unlike chunkC, which carries bin items, this
 	// carries loaded chunk data, so its depth is memory an operator can set by
@@ -154,7 +316,8 @@ func (db *DB) ReserveSample(
 	loadedBuf := min(3*readers, maxLoadedChunkBuffer)
 	loadedC := make(chan loadedChunk, loadedBuf)
 
-	db.logger.Debug("reserve sampler workers", "readers", readers, "hashers", workers)
+	db.logger.Debug("reserve sampler workers",
+		"readers", readers, "hashers", workers, "sort_window", sortWindow)
 	statsLock.Lock()
 	allStats.ReadConcurrency = readers
 	statsLock.Unlock()
@@ -167,20 +330,7 @@ func (db *DB) ReserveSample(
 			wstat := SampleStats{}
 			defer func() { addStats(wstat) }()
 
-			for chItem := range chunkC {
-				// exclude chunks who's batches balance are below minimum
-				if _, found := excludedBatchIDs[string(chItem.BatchID)]; found {
-					wstat.BelowBalanceIgnored++
-					continue
-				}
-
-				// Skip chunks if they are not SOC or CAC
-				if chItem.ChunkType != swarm.ChunkTypeSingleOwner &&
-					chItem.ChunkType != swarm.ChunkTypeContentAddressed {
-					wstat.RogueChunk++
-					continue
-				}
-
+			for chItem := range readC {
 				chunkLoadStart := time.Now()
 				chunk, err := db.ChunkStore().Get(ctx, chItem.Address)
 				chunkLoadDuration := time.Since(chunkLoadStart)
@@ -416,6 +566,22 @@ type SampleStats struct {
 	// a measurement can say what it measured, and so a test can tell that the
 	// setting reached the sampler at all rather than being quietly ignored.
 	ReadConcurrency int
+	// SortWindow is the read-ordering window actually used, after the cap. Zero
+	// means the reads were issued in bin order, as they were before ordering
+	// existed.
+	SortWindow int
+	// LocateDuration is time spent reading retrievalIdx for the sort key. It is
+	// the cost side of read ordering and is reported separately so it can be
+	// weighed against what the ordering saves, rather than the two being
+	// visible only as one net number.
+	LocateDuration time.Duration
+	// SortDuration is time spent sorting the windows. Expected to be small
+	// beside LocateDuration; recorded so that "small" is a measurement.
+	SortDuration time.Duration
+	// LocateFailed counts items whose location could not be read. These are
+	// still passed to the readers, so they are not lost — they are counted here
+	// and will usually be counted again in ChunkLoadFailed.
+	LocateFailed int64
 }
 
 func (s *SampleStats) add(other SampleStats) {
@@ -433,6 +599,15 @@ func (s *SampleStats) add(other SampleStats) {
 	s.ChunkLoadFailed += other.ChunkLoadFailed
 	s.StampLoadFailed += other.StampLoadFailed
 	s.TotalIterated += other.TotalIterated
+	// Assigned, not summed: exactly one ordering stage runs, and a sum would
+	// still read correctly today while quietly becoming a multiple if that ever
+	// stopped being true.
+	if other.SortWindow > 0 {
+		s.SortWindow = other.SortWindow
+	}
+	s.LocateDuration += other.LocateDuration
+	s.SortDuration += other.SortDuration
+	s.LocateFailed += other.LocateFailed
 }
 
 // RandSample returns Sample with random values.
