@@ -216,3 +216,169 @@ func TestWillNotRecoverToAStaleEndpoint(t *testing.T) {
 }
 
 var _ transaction.Backend = (*failover.Backend)(nil)
+
+// deadEndpoint is an endpoint that was not reachable at startup: no connection,
+// but a Dial that can produce one later.
+func deadEndpoint(name string, dial func(context.Context) (transaction.Backend, error)) failover.Endpoint {
+	return failover.Endpoint{Name: name, Dial: dial}
+}
+
+// TestStartsOnTheBestEndpointThatAnswered asserts the node does not start
+// pointed at an endpoint that is known to be down.
+//
+// Starting on a dead endpoint would make the first chain call fail before
+// failing over, which is a worse first impression than starting one place down
+// the list and recovering upwards.
+func TestStartsOnTheBestEndpointThatAnswered(t *testing.T) {
+	t.Parallel()
+
+	b := newBackend(t,
+		deadEndpoint("primary", nil),
+		endpoint("secondary", backendmock.WithBlockNumberFunc(func(context.Context) (uint64, error) {
+			return 100, nil
+		})),
+	)
+
+	if got := b.Active(); got != "secondary" {
+		t.Fatalf("active endpoint is %q, want secondary; the node started on an endpoint known to be down", got)
+	}
+	if _, err := b.BlockNumber(context.Background()); err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+}
+
+// TestNewRejectsAnAllDeadList asserts a list where nothing is connected is an
+// error rather than a Backend that panics on its first call.
+func TestNewRejectsAnAllDeadList(t *testing.T) {
+	t.Parallel()
+
+	_, err := failover.New(log.Noop, failover.DefaultMaxBlockLag,
+		deadEndpoint("primary", nil),
+		deadEndpoint("secondary", nil),
+	)
+	if err == nil {
+		t.Fatal("expected an error when no endpoint is connected")
+	}
+}
+
+// TestRecoverDialsAnEndpointThatWasDownAtStartup is the point of issue #119.
+//
+// An endpoint that did not answer at boot used to be dropped from the list, so
+// nothing ever put it back and the operator had to notice and restart to return
+// to the endpoint they had chosen. On an otherwise healthy node there is
+// nothing to prompt them to look.
+func TestRecoverDialsAnEndpointThatWasDownAtStartup(t *testing.T) {
+	t.Parallel()
+
+	var dials atomic.Int32
+	primaryUp := make(chan struct{})
+
+	dial := func(context.Context) (transaction.Backend, error) {
+		dials.Add(1)
+		select {
+		case <-primaryUp:
+			return backendmock.New(backendmock.WithBlockNumberFunc(func(context.Context) (uint64, error) {
+				return 100, nil
+			})), nil
+		default:
+			return nil, errDown
+		}
+	}
+
+	b := newBackend(t,
+		deadEndpoint("primary", dial),
+		endpoint("secondary", backendmock.WithBlockNumberFunc(func(context.Context) (uint64, error) {
+			return 100, nil
+		})),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Recover(ctx, 10*time.Millisecond)
+
+	// It must keep trying while the endpoint is down, or "recovers later" would
+	// only mean "recovers if it happens to be up at the first probe".
+	waitFor(t, time.Second, func() bool { return dials.Load() >= 2 })
+	if got := b.Active(); got != "secondary" {
+		t.Fatalf("active endpoint is %q while the primary is still down, want secondary", got)
+	}
+
+	close(primaryUp)
+
+	waitFor(t, 5*time.Second, func() bool { return b.Active() == "primary" })
+}
+
+// TestRecoverIgnoresAnEndpointItCannotDial asserts an endpoint with no Dial is
+// left alone rather than retried or promoted.
+//
+// A nil Dial is what a caller gets by saying nothing, and it has to keep meaning
+// the old behaviour: once lost, stays lost.
+func TestRecoverIgnoresAnEndpointItCannotDial(t *testing.T) {
+	t.Parallel()
+
+	b := newBackend(t,
+		deadEndpoint("primary", nil),
+		endpoint("secondary", backendmock.WithBlockNumberFunc(func(context.Context) (uint64, error) {
+			return 100, nil
+		})),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Recover(ctx, 10*time.Millisecond)
+
+	time.Sleep(200 * time.Millisecond)
+	if got := b.Active(); got != "secondary" {
+		t.Fatalf("active endpoint is %q, want secondary; an endpoint with no way to be dialled was promoted", got)
+	}
+}
+
+// TestFailoverSkipsUnconnectedEndpoints asserts a failing call moves past an
+// endpoint that has never connected rather than trying it.
+//
+// It is known to be unreachable, and only Recover reconnects it. Trying it here
+// would spend a chain call's latency discovering what is already known, on the
+// path that is already handling a failure.
+func TestFailoverSkipsUnconnectedEndpoints(t *testing.T) {
+	t.Parallel()
+
+	var thirdCalls atomic.Int32
+
+	b := newBackend(t,
+		endpoint("primary", backendmock.WithBlockNumberFunc(func(context.Context) (uint64, error) {
+			return 0, errDown
+		})),
+		deadEndpoint("secondary", func(context.Context) (transaction.Backend, error) {
+			t.Error("a failing call dialled an unconnected endpoint; only Recover should do that")
+			return nil, errDown
+		}),
+		endpoint("third", backendmock.WithBlockNumberFunc(func(context.Context) (uint64, error) {
+			thirdCalls.Add(1)
+			return 100, nil
+		})),
+	)
+
+	if _, err := b.BlockNumber(context.Background()); err != nil {
+		t.Fatalf("call failed: %v", err)
+	}
+	if got := thirdCalls.Load(); got != 1 {
+		t.Fatalf("third endpoint served %d calls, want 1", got)
+	}
+	if got := b.Active(); got != "third" {
+		t.Fatalf("active endpoint is %q, want third", got)
+	}
+}
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, within time.Duration, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("condition did not hold within %s", within)
+}

@@ -87,33 +87,41 @@ func InitChain(
 		// Dial every configured endpoint. One unreachable endpoint is no longer
 		// fatal when others answer, which is the point of #109 — a provider
 		// outage used to take the node down ten minutes later and keep it down.
+		//
+		// An endpoint that does not answer now keeps its place in the list with
+		// no connection, rather than being dropped. Dropping it meant a
+		// preferred endpoint that happened to be down at boot was never
+		// reconsidered, and the operator had to notice and restart to get back
+		// to the endpoint they chose. See issue #119.
 		var (
-			endpoints []failover.Endpoint
+			// Every configured endpoint ends up in this list now, connected or
+			// not, so its length is known in advance.
+			endpoints = make([]failover.Endpoint, 0, len(rpcCfg.Endpoints))
 			dialErrs  []error
+			connected int
 		)
 		for _, url := range rpcCfg.Endpoints {
-			rpcClient, err := rpc.DialOptions(ctx, url, rpc.WithHTTPClient(&http.Client{Transport: transport}))
+			dial := dialEndpoint(url, transport, chainID, minimumGasTipCap, pollingInterval, blockSyncInterval)
+
+			backend, err := dial(ctx)
 			if err != nil {
-				dialErrs = append(dialErrs, fmt.Errorf("%s: dial: %w", url, err))
-				continue
+				logger.Warning("could not reach a blockchain rpc endpoint; "+
+					"keeping it in the list and retrying in the background",
+					"endpoint", url, "error", err)
+				dialErrs = append(dialErrs, err)
+			} else {
+				logger.Info("connected to blockchain backend", "endpoint", url)
+				connected++
 			}
 
-			var versionString string
-			if err = rpcClient.CallContext(ctx, &versionString, "web3_clientVersion"); err != nil {
-				logger.Warning("could not reach a blockchain rpc endpoint", "endpoint", url, "error", err)
-				dialErrs = append(dialErrs, fmt.Errorf("%s: client version: %w", url, err))
-				rpcClient.Close()
-				continue
-			}
-
-			logger.Info("connected to blockchain backend", "endpoint", url, "version", versionString)
 			endpoints = append(endpoints, failover.Endpoint{
 				Name:    url,
-				Backend: wrapped.NewBackend(ethclient.NewClient(rpcClient), minimumGasTipCap, pollingInterval, blockSyncInterval),
+				Backend: backend,
+				Dial:    dial,
 			})
 		}
 
-		if len(endpoints) == 0 {
+		if connected == 0 {
 			logger.Info("could not connect to any blockchain backend; "+
 				"in a swap-enabled network a working blockchain node "+
 				"(for xDAI network in production, SepoliaETH in testnet) is required; "+
@@ -128,12 +136,19 @@ func InitChain(
 		endpoints, err := verifySameChain(ctx, logger, endpoints, chainID)
 		if err != nil {
 			for _, ep := range endpoints {
-				ep.Backend.Close()
+				if ep.Backend != nil {
+					ep.Backend.Close()
+				}
 			}
 			return nil, common.Address{}, 0, nil, nil, err
 		}
 
-		if len(endpoints) == 1 {
+		// One configured endpoint keeps the plain backend: the failover wrapper
+		// would add indirection and nothing else, since Recover has nowhere
+		// better to move to. The nil check matters because verifySameChain can
+		// drop a connection it could not question, and a nil backend here would
+		// be dereferenced two lines later rather than reported.
+		if len(endpoints) == 1 && endpoints[0].Backend != nil {
 			backend = endpoints[0].Backend
 		} else {
 			fb, err := failover.New(logger, failover.DefaultMaxBlockLag, endpoints...)
@@ -187,11 +202,22 @@ func verifySameChain(ctx context.Context, logger log.Logger, endpoints []failove
 		seen   bool
 	)
 	for _, ep := range endpoints {
+		if ep.Backend == nil {
+			// Not reachable now, so there is nothing to ask. It keeps its place
+			// and its Dial, which verifies the chain itself before the endpoint
+			// can ever be adopted.
+			usable = append(usable, ep)
+			continue
+		}
+
 		got, err := ep.Backend.ChainID(ctx)
 		if err != nil {
-			logger.Warning("blockchain rpc endpoint did not report a chain id, dropping it",
+			logger.Warning("blockchain rpc endpoint did not report a chain id, "+
+				"dropping the connection but keeping the endpoint",
 				"endpoint", ep.Name, "error", err)
 			ep.Backend.Close()
+			ep.Backend = nil
+			usable = append(usable, ep)
 			continue
 		}
 		id := got.Int64()
@@ -207,10 +233,63 @@ func verifySameChain(ctx context.Context, logger log.Logger, endpoints []failove
 		first, seen = id, true
 		usable = append(usable, ep)
 	}
-	if len(usable) == 0 {
+	if !seen {
 		return nil, errors.New("no blockchain rpc endpoint reported a chain id")
 	}
 	return usable, nil
+}
+
+// dialEndpoint returns a function that opens a connection to url and refuses it
+// unless it is on the expected chain.
+//
+// The chain check lives here, in the dial, rather than only in the startup
+// sweep. An endpoint that was down at boot is adopted later by the failover
+// backend, long after the startup check has run, and nothing would look at it
+// again. A mistyped URL that happened to be unreachable at boot would then be
+// taken up an hour later on whatever chain it is really on.
+//
+// It is not fatal here, unlike at startup. Refusing to start because a
+// configuration is wrong is right; killing a running node because a standby
+// came back on the wrong chain is not, and the node is working on another
+// endpoint at that moment. The mismatch is logged and the endpoint is left
+// unconnected.
+func dialEndpoint(
+	url string,
+	transport *http.Transport,
+	wantChainID int64,
+	minimumGasTipCap uint64,
+	pollingInterval time.Duration,
+	blockSyncInterval uint64,
+) func(context.Context) (transaction.Backend, error) {
+	return func(ctx context.Context) (transaction.Backend, error) {
+		rpcClient, err := rpc.DialOptions(ctx, url, rpc.WithHTTPClient(&http.Client{Transport: transport}))
+		if err != nil {
+			return nil, fmt.Errorf("%s: dial: %w", url, err)
+		}
+
+		var versionString string
+		if err := rpcClient.CallContext(ctx, &versionString, "web3_clientVersion"); err != nil {
+			rpcClient.Close()
+			return nil, fmt.Errorf("%s: client version: %w", url, err)
+		}
+
+		backend := wrapped.NewBackend(ethclient.NewClient(rpcClient), minimumGasTipCap, pollingInterval, blockSyncInterval)
+
+		if wantChainID != -1 {
+			got, err := backend.ChainID(ctx)
+			if err != nil {
+				backend.Close()
+				return nil, fmt.Errorf("%s: chain id: %w", url, err)
+			}
+			if got.Int64() != wantChainID {
+				backend.Close()
+				return nil, fmt.Errorf("%s: is on chain %d, but this node is configured for %d",
+					url, got.Int64(), wantChainID)
+			}
+		}
+
+		return backend, nil
+	}
 }
 
 // InitChequebookFactory will initialize the chequebook factory with the given
