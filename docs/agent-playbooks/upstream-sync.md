@@ -61,8 +61,16 @@ Three things, in order:
    here are expected and small; take care that resolving them does not silently
    revert a fork change.
 
-3. **Workflows upstream ADDED.** This one is easy to miss because it does not
-   conflict — a new file merges cleanly and then fails on every subsequent run.
+3. **Workflows upstream ADDED, and jobs added inside workflows we keep.** This
+   one is easy to miss because it does not conflict — a new file merges cleanly
+   and then fails on every subsequent run.
+
+   The `v2.8.2` sync showed the harder version: upstream added two **jobs inside
+   `go.yml`** rather than new files. `Coverage Report` needs `CODECOV_TOKEN`
+   with `fail_ci_if_error: true`, `Trigger Beekeeper` needs `GHA_PAT_BASIC`, and
+   it also moved Linux testing onto a `[self-hosted, linux, bee]` runner that
+   does not exist here and would queue forever. Read the whole diff of every
+   workflow that conflicts, not only the file list.
    Upstream keeps adding workflows that need Ethersphere organisation secrets
    or push into Ethersphere repositories. A real example: the `v2.8.1` →
    `v2.8.2-rc1` sync introduces `swarm-cli-bee-version.yaml`, which dispatches
@@ -73,6 +81,46 @@ Three things, in order:
    git diff --name-status main...HEAD -- .github/workflows/ | grep '^A'
    ```
 4. **CI green**, then merge with a merge commit.
+
+## Never `git fetch --tags upstream`
+
+The `upstream` remote is configured to fetch tags into a **separate namespace**,
+`refs/tags/upstream/*`, by an extra refspec that `scripts/setup-upstream.sh`
+installs. `git fetch --tags` overrides that refspec and drops upstream's tags
+into the plain namespace instead.
+
+That is not untidy, it is wrong, and it is wrong silently. The Makefile derives
+the fork version with `git describe --tags --match 'v[0-9]*'`, so the moment
+upstream's `v2.8.2` lands in `refs/tags/`, a local build reports:
+
+```
+wasp 2.8.2-8d9caf63 (upstream bee v2.8.2)
+```
+
+The fork claims upstream's version number as its own. Nothing fails, no test
+catches it, and a binary built and deployed in that state misidentifies itself
+to whoever reads its logs six months later. It happened during the `v2.8.2`
+sync.
+
+Use the configured refspec, which needs no flag:
+
+```bash
+git fetch upstream                    # tags land in refs/tags/upstream/*
+git rev-parse upstream/v2.8.2         # this is how you name the tag
+```
+
+If it has already happened, delete only the tags that upstream also owns:
+
+```bash
+for t in $(git tag -l 'v[0-9]*'); do
+  git rev-parse -q --verify "refs/tags/upstream/$t" >/dev/null && git tag -d "$t"
+done
+git describe --tags --abbrev=0 --match 'v[0-9]*'   # must be a wasp version
+```
+
+Check `git ls-remote --tags origin 'refs/tags/v2*'` as well: if the polluted
+tags were pushed, every clone inherits the problem and they have to be deleted
+on the remote too.
 
 ## Resolving conflicts locally
 
