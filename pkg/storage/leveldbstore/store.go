@@ -7,6 +7,8 @@ package leveldbstore
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ethersphere/bee/v2/pkg/storage"
@@ -20,9 +22,34 @@ import (
 
 const (
 	separator = "/"
-	// dirtyKey is written on open and deleted on clean close to detect unclean shutdowns.
-	dirtyKey = ".store-dirty-shutdown"
+	// legacyDirtyKey is the marker as it used to be written: a key inside the
+	// database itself. Deleting it on close made shutdown depend on the store
+	// being writable at exactly the moment it is least likely to be, so the
+	// marker moved out of LevelDB. The key is still read on open, because
+	// stores written by earlier builds carry it, and its presence there means
+	// what it always meant. See issue #115.
+	legacyDirtyKey = ".store-dirty-shutdown"
+	// dirtyMarkerName is the marker file, inside the store directory.
+	//
+	// Inside rather than beside, so the marker is removed along with the store
+	// when someone deletes it. A sibling would outlive the directory and make a
+	// freshly created store report an unclean shutdown it never had.
+	//
+	// goleveldb leaves it alone: its file storage only removes files it
+	// recognises — its own numbered files and pending CURRENT renames — and
+	// ignores anything else in the directory.
+	dirtyMarkerName = ".dirty-shutdown"
 )
+
+// dirtyMarkerPath returns the marker file for a store directory, or "" for an
+// in-memory store, which has no directory and cannot outlive the process it
+// runs in.
+func dirtyMarkerPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Join(path, dirtyMarkerName)
+}
 
 // key returns the Item identifier for the leveldb storage.
 func key(item storage.Key) []byte {
@@ -60,6 +87,9 @@ type Store struct {
 	// Writing it fails outright in read-only mode, and a reader has no unclean
 	// shutdown to record.
 	readOnly bool
+	// marker is the file whose presence means "a writer has this store open".
+	// Empty for an in-memory store and for a read-only open.
+	marker string
 }
 
 // New returns a new store the backed by leveldb.
@@ -84,10 +114,24 @@ func New(path string, opts *opt.Options) (*Store, bool, error) {
 		return nil, false, err
 	}
 
-	dirty, err := db.Has([]byte(dirtyKey), nil)
+	// Read both markers. A store written by an earlier build carries the key
+	// inside the database; one written by this build carries the sibling file.
+	// Either means the last writer did not close cleanly.
+	legacyDirty, err := db.Has([]byte(legacyDirtyKey), nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("has dirty record: %w", err)
 	}
+
+	marker := dirtyMarkerPath(path)
+	fileDirty := false
+	if marker != "" {
+		if _, err := os.Stat(marker); err == nil {
+			fileDirty = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, false, fmt.Errorf("stat dirty marker: %w", err)
+		}
+	}
+	dirty := legacyDirty || fileDirty
 
 	// A read-only open cannot claim the database, and must not try: the write
 	// fails with "leveldb: read-only mode" and takes the whole open down, so
@@ -97,17 +141,56 @@ func New(path string, opts *opt.Options) (*Store, bool, error) {
 	//
 	// The dirty flag read above is still returned, so a read-only caller can
 	// still see that a previous *writer* exited uncleanly.
-	if !opts.GetReadOnly() {
-		if err = db.Put([]byte(dirtyKey), []byte{}, nil); err != nil {
-			return nil, false, fmt.Errorf("put dirty record: %w", err)
+	if opts.GetReadOnly() {
+		return &Store{db: db, path: path, readOnly: true}, dirty, nil
+	}
+
+	// Clear the legacy key now rather than on close. Open is when writes are
+	// known to work; close is exactly when they may not be, which is the whole
+	// reason the marker moved. Best effort: failing to tidy up an old key is
+	// not a reason to refuse to open the store, and the file marker written
+	// below is what this build will read next time.
+	if legacyDirty {
+		_ = db.Delete([]byte(legacyDirtyKey), nil)
+	}
+
+	if marker != "" {
+		if err := writeDirtyMarker(marker); err != nil {
+			return nil, false, fmt.Errorf("write dirty marker: %w", err)
 		}
 	}
 
 	return &Store{
-		db:       db,
-		path:     path,
-		readOnly: opts.GetReadOnly(),
+		db:     db,
+		path:   path,
+		marker: marker,
 	}, dirty, nil
+}
+
+// writeDirtyMarker creates the marker and makes it durable.
+//
+// The file itself is fsynced, and so is the directory holding it, because a
+// file that exists only in the page cache does not survive the power loss it
+// exists to record. An unclean shutdown is precisely the case where an
+// unsynced marker would be lost, which would report the store as clean when it
+// is not — the failure direction that costs data rather than time.
+func writeDirtyMarker(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return errors.Join(err, f.Close())
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	return errors.Join(dir.Sync(), dir.Close())
 }
 
 // DB implements the Storer interface.
@@ -116,12 +199,28 @@ func (s *Store) DB() *leveldb.DB {
 }
 
 // Close implements the storage.Store interface.
-func (s *Store) Close() (err error) {
-	if s.readOnly {
-		// Nothing to clear: a read-only open never set the marker.
-		return s.db.Close()
+//
+// It performs no database write. Deleting a key here made shutdown depend on
+// the store being writable, so a store whose writes were paused at the level-0
+// trigger could not be closed at all: the node hung, was killed, and started
+// again into recovery over an unclean marker it had never had the chance to
+// clear. See issue #115.
+//
+// The marker is removed only after the database closes without error. A close
+// that fails leaves the store marked dirty, which is the safe direction: a
+// needless recovery pass costs time, and a skipped one costs data.
+func (s *Store) Close() error {
+	if err := s.db.Close(); err != nil {
+		return err
 	}
-	return errors.Join(s.db.Delete([]byte(dirtyKey), nil), s.db.Close())
+	if s.marker == "" {
+		// Read-only or in-memory: nothing was ever claimed.
+		return nil
+	}
+	if err := os.Remove(s.marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove dirty marker: %w", err)
+	}
+	return nil
 }
 
 // Get implements the storage.Store interface.
