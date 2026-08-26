@@ -43,3 +43,7 @@ func DefaultOptions() *Options {
 func (db *DB) CountWithinRadius(ctx context.Context) (int, error) {
 	return db.countWithinRadius(ctx)
 }
+
+// MaxSamplerSortWindow exposes the read-ordering window cap so a test can
+// assert an oversized setting is clamped to it rather than honoured.
+const MaxSamplerSortWindow = maxSamplerSortWindow

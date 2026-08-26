@@ -583,3 +583,148 @@ func TestReserveSampleIndependentOfReadConcurrency(t *testing.T) {
 		}
 	}
 }
+
+// TestReserveSampleIndependentOfSortWindow asserts that ordering the reads by
+// physical position does not change the sample.
+//
+// The ordering stage rewrites the order in which chunks reach the hashers. The
+// sample is order-independent by design, but "by design" is not the same as "in
+// this code": phase 3 does not sort a collected slice, it runs an insertion sort
+// whose admission gate reads the running maximum of the list so far. The
+// conclusion holds because that running maximum is always at least the final
+// one, and this test is what keeps it holding.
+//
+// A sample that varied with a tuning setting would be a consensus problem, not a
+// performance one. See issue #11 and
+// docs/experiments/sampler-read-ordering/spec.md.
+func TestReserveSampleIndependentOfSortWindow(t *testing.T) {
+	t.Parallel()
+
+	const chunkCountPerPO = 10
+	const maxPO = 10
+
+	var (
+		baseAddr  = swarm.RandAddress(t)
+		timeVar   = uint64(time.Now().UnixNano())
+		radius    = uint8(5)
+		anchor    = swarm.RandAddressAt(t, baseAddr, int(radius)).Bytes()
+		reference storer.Sample
+		// 0 is the off arm and must come first, so every other arm is compared
+		// against the behaviour this change is not allowed to alter. 7 is not a
+		// divisor of the chunk count, so the last window is a short one.
+		windows = []int{0, 1, 7, 1000}
+	)
+
+	// The same chunks for every arm, so the only variable is the window.
+	chs := make([]swarm.Chunk, 0, chunkCountPerPO*maxPO)
+	for po := range maxPO {
+		for range chunkCountPerPO {
+			ch := chunk.GenerateValidRandomChunkAt(t, baseAddr, po).WithBatch(3, 2, false)
+			ch = ch.WithStamp(postagetesting.MustNewStampWithTimestamp(timeVar - 1))
+			chs = append(chs, ch)
+		}
+	}
+
+	for i, window := range windows {
+		opts := dbTestOps(baseAddr, 1000, nil, nil, time.Second)
+		opts.ValidStamp = func(ch swarm.Chunk) (swarm.Chunk, error) { return ch, nil }
+		opts.SamplerSortWindow = window
+
+		st, err := diskStorer(t, opts)()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		putter := st.ReservePutter()
+		for _, ch := range chs {
+			if err := putter.Put(context.Background(), ch); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		sample, err := st.ReserveSample(context.TODO(), anchor, radius, timeVar, nil)
+		if err != nil {
+			t.Fatalf("sort window %d: %v", window, err)
+		}
+		assertValidSample(t, sample, radius, anchor)
+
+		// Without this the test would pass even if the option were ignored,
+		// since the sample is order-independent by design.
+		if sample.Stats.SortWindow != window {
+			t.Fatalf("configured sort window %d but the sampler used %d; "+
+				"the option is not reaching the sampler", window, sample.Stats.SortWindow)
+		}
+
+		// Every chunk was just written, so every location must be readable. A
+		// failure here means the ordering stage is looking the location up in
+		// the wrong place, which would silently degrade to no ordering at all.
+		if window > 0 && sample.Stats.LocateFailed != 0 {
+			t.Fatalf("sort window %d: %d chunks could not be located; "+
+				"ordering silently degrades to bin order when this happens",
+				window, sample.Stats.LocateFailed)
+		}
+
+		if i == 0 {
+			reference = sample
+			continue
+		}
+
+		if len(sample.Items) != len(reference.Items) {
+			t.Fatalf("sort window %d produced %d items, ordering off produced %d",
+				window, len(sample.Items), len(reference.Items))
+		}
+		for j := range sample.Items {
+			if !sample.Items[j].TransformedAddress.Equal(reference.Items[j].TransformedAddress) {
+				t.Fatalf("sort window %d changed the sample at position %d:\n  got  %s\n  want %s\n"+
+					"the sample must not depend on the order the reads are issued in",
+					window, j, sample.Items[j].TransformedAddress, reference.Items[j].TransformedAddress)
+			}
+		}
+	}
+}
+
+// TestReserveSampleSortWindowCapped asserts an oversized window is clamped
+// rather than honoured.
+//
+// The window is allocated up front, so an operator who types one zero too many
+// would otherwise ask the node to reserve that many entries during a
+// redistribution round. The cap is what stops a configuration mistake becoming
+// memory pressure at the worst moment.
+func TestReserveSampleSortWindowCapped(t *testing.T) {
+	t.Parallel()
+
+	var (
+		baseAddr = swarm.RandAddress(t)
+		timeVar  = uint64(time.Now().UnixNano())
+		radius   = uint8(5)
+		anchor   = swarm.RandAddressAt(t, baseAddr, int(radius)).Bytes()
+	)
+
+	opts := dbTestOps(baseAddr, 1000, nil, nil, time.Second)
+	opts.ValidStamp = func(ch swarm.Chunk) (swarm.Chunk, error) { return ch, nil }
+	opts.SamplerSortWindow = 1 << 30
+
+	st, err := diskStorer(t, opts)()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	putter := st.ReservePutter()
+	for po := range 10 {
+		ch := chunk.GenerateValidRandomChunkAt(t, baseAddr, po).WithBatch(3, 2, false)
+		ch = ch.WithStamp(postagetesting.MustNewStampWithTimestamp(timeVar - 1))
+		if err := putter.Put(context.Background(), ch); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sample, err := st.ReserveSample(context.TODO(), anchor, radius, timeVar, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := storer.MaxSamplerSortWindow; sample.Stats.SortWindow != want {
+		t.Fatalf("asked for a window of %d, sampler used %d, want it capped to %d",
+			opts.SamplerSortWindow, sample.Stats.SortWindow, want)
+	}
+}

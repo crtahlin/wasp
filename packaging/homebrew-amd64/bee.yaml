@@ -42,6 +42,21 @@
 ##
 ## The sample itself does not change with this setting, whatever it is set to.
 # sampler-read-concurrency: 0
+## chunks the reserve sampler buffers and sorts into disk order before reading.
+##
+## Reads are issued in bin order, which comes from the chunk address and so says
+## nothing about where the data sits on disk. Every read is a seek to an
+## unrelated position. Buffering a window and sorting it by physical position
+## shortens those seeks.
+##
+## 0 reads in bin order, which is what the sampler did before ordering existed.
+## A non-zero value costs one extra index lookup per chunk, for a key read
+## moments earlier and so served from cache. Worth setting on a seek-bound disk;
+## on an SSD the seeks it removes were cheap and the extra lookup may not pay
+## for itself. Values above 1048576 are capped.
+##
+## The sample itself does not change with this setting, whatever it is set to.
+# sampler-sort-window: 0
 ## per-peer inbound chunk rate this node will serve, in chunks per second.
 ##
 ## 0 uses the default of 250. This is a fairness and stability choice, not a

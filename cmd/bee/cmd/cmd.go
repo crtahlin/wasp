@@ -39,6 +39,7 @@ const (
 	optionNameNetworkID                    = "network-id"
 	optionWelcomeMessage                   = "welcome-message"
 	optionNameSamplerReadConcurrency       = "sampler-read-concurrency"
+	optionNameSamplerSortWindow            = "sampler-sort-window"
 	optionNamePullSyncMaxChunksPerSecond   = "pullsync-max-chunks-per-second"
 	optionNamePullerMaxChunksPerSecond     = "puller-max-chunks-per-second"
 	optionNamePullSyncRecalcInterval       = "pullsync-recalc-interval"
@@ -301,6 +302,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Duration(optionNameReserveWakeUpDuration, 0, "how long the reserve worker waits between runs; 0 uses the default of 15m")
 	cmd.Flags().Int(optionNamePullerMaxChunksPerSecond, 0, "total inbound sync rate across all peers; 0 uses the default of 1000, roughly 4 MB/s")
 	cmd.Flags().Int(optionNameSamplerReadConcurrency, 0, "chunk loads the reserve sampler keeps in flight; 0 uses the default, which matches the CPU count and preserves previous behaviour")
+	cmd.Flags().Int(optionNameSamplerSortWindow, 0, "chunks the reserve sampler buffers and sorts into disk order before reading; 0 reads in bin order, which is the previous behaviour")
 	cmd.Flags().String(optionNamePaymentThreshold, "13500000", "threshold in BZZ where you expect to get paid from your peers")
 	cmd.Flags().Int64(optionNamePaymentTolerance, 25, "excess debt above payment threshold in percentages where you disconnect from your peer")
 	cmd.Flags().Int64(optionNamePaymentEarly, 50, "percentage below the peers payment threshold when we initiate settlement")

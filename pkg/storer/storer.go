@@ -404,7 +404,11 @@ type Options struct {
 	// SamplerReadConcurrency is how many chunk loads the reserve sampler keeps
 	// in flight. Zero means the default, which preserves the previous behaviour
 	// of one pool sized to the core count.
-	SamplerReadConcurrency  int
+	SamplerReadConcurrency int
+	// SamplerSortWindow is how many chunks the reserve sampler buffers and
+	// sorts by physical position before reading them. Zero disables ordering
+	// and issues the reads in bin order, which is the previous behaviour.
+	SamplerSortWindow       int
 	ReserveMinEvictCount    uint64
 	ReserveCapacityDoubling int
 
@@ -491,6 +495,10 @@ type reserveOpts struct {
 	// Separate from the hasher count because loading is disk-bound and hashing
 	// is CPU-bound; see issue #9.
 	samplerReadConcurrency int
+	// samplerSortWindow is how many chunks the sampler buffers and sorts into
+	// disk order before reading them. Zero issues the reads in bin order, which
+	// is what the sampler did before ordering existed; see issue #11.
+	samplerSortWindow int
 }
 
 // New returns a newly constructed DB object which implements all the above
@@ -592,6 +600,7 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 			minimumRadius:          uint8(opts.MinimumStorageRadius),
 			capacityDoubling:       opts.ReserveCapacityDoubling,
 			samplerReadConcurrency: opts.SamplerReadConcurrency,
+			samplerSortWindow:      opts.SamplerSortWindow,
 		},
 		directUploadLimiter: make(chan struct{}, pusher.ConcurrentPushes),
 		pinIntegrity:        pinIntegrity,
