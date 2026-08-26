@@ -70,7 +70,12 @@ const (
 	DefaultHistRateWindow = time.Minute * 15
 
 	IntervalPrefix = "sync_interval"
-	recalcPeersDur = time.Minute * 5
+
+	// DefaultRecalcPeersDur is how long the puller waits before re-deciding which
+	// peers to sync from. After a radius change it can therefore be up to this
+	// long before syncing follows the new radius, which slows reserve filling and
+	// matters more the larger the reserve. See issue #59.
+	DefaultRecalcPeersDur = time.Minute * 5
 
 	// DefaultMaxChunksPerSecond is the total inbound sync rate across all peers,
 	// roughly 4 MB/s. Like the per-peer limit it is a policy default rather than
@@ -86,6 +91,9 @@ type Options struct {
 	// DefaultMaxChunksPerSecond, which is the value this was fixed at before it
 	// became configurable.
 	MaxChunksPerSecond int
+	// RecalcPeersDur is how often the puller re-decides which peers to sync
+	// from. Zero uses DefaultRecalcPeersDur.
+	RecalcPeersDur time.Duration
 }
 
 type Puller struct {
@@ -105,6 +113,9 @@ type Puller struct {
 	intervalMtx  sync.Mutex
 
 	cancel func()
+
+	// recalcPeersDur is how often syncPeers is re-derived; see Options.
+	recalcPeersDur time.Duration
 
 	wg sync.WaitGroup
 
@@ -135,20 +146,25 @@ func New(
 	if rateLimit <= 0 {
 		rateLimit = DefaultMaxChunksPerSecond
 	}
+	recalcDur := o.RecalcPeersDur
+	if recalcDur <= 0 {
+		recalcDur = DefaultRecalcPeersDur
+	}
 	p := &Puller{
-		base:        addr,
-		statestore:  stateStore,
-		topology:    topology,
-		radius:      reserveState,
-		syncer:      pullSync,
-		metrics:     newMetrics(),
-		logger:      logger.WithName(loggerName).Register(),
-		syncPeers:   make(map[string]*syncPeer),
-		bins:        bins,
-		blockLister: blockLister,
-		rate:        rate.New(DefaultHistRateWindow),
-		cancel:      func() { /* Noop, since the context is initialized in the Start(). */ },
-		limiter:     ratelimit.NewLimiter(ratelimit.Every(time.Second/time.Duration(rateLimit)), rateLimit),
+		base:           addr,
+		statestore:     stateStore,
+		topology:       topology,
+		radius:         reserveState,
+		syncer:         pullSync,
+		metrics:        newMetrics(),
+		logger:         logger.WithName(loggerName).Register(),
+		syncPeers:      make(map[string]*syncPeer),
+		bins:           bins,
+		blockLister:    blockLister,
+		rate:           rate.New(DefaultHistRateWindow),
+		cancel:         func() { /* Noop, since the context is initialized in the Start(). */ },
+		limiter:        ratelimit.NewLimiter(ratelimit.Every(time.Second/time.Duration(rateLimit)), rateLimit),
+		recalcPeersDur: recalcDur,
 	}
 
 	return p
@@ -216,7 +232,7 @@ func (p *Puller) manage(ctx context.Context) {
 		p.recalcPeers(ctx, newRadius)
 	}
 
-	tick := time.NewTicker(recalcPeersDur)
+	tick := time.NewTicker(p.recalcPeersDur)
 	defer tick.Stop()
 
 	for {

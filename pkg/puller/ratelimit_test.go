@@ -5,6 +5,8 @@
 package puller_test
 
 import (
+	"time"
+
 	"testing"
 
 	"github.com/ethersphere/bee/v2/pkg/puller"
@@ -24,5 +26,16 @@ func TestDefaultMaxChunksPerSecond(t *testing.T) {
 		t.Errorf("default inbound sync rate is %d, was 1000 before it became "+
 			"configurable; changing the default is a behaviour change for every "+
 			"node, not a configuration change", puller.DefaultMaxChunksPerSecond)
+	}
+}
+
+// TestDefaultRecalcPeersDur pins the interval at what the constant held before
+// it became configurable. See issue #59.
+func TestDefaultRecalcPeersDur(t *testing.T) {
+	t.Parallel()
+
+	if puller.DefaultRecalcPeersDur != 5*time.Minute {
+		t.Errorf("default peer recalculation interval is %s, was 5m before it "+
+			"became configurable", puller.DefaultRecalcPeersDur)
 	}
 }

@@ -58,6 +58,21 @@
 ## can actually supply more — confirm the limit is the binding constraint
 ## before changing it, or the change does nothing.
 # puller-max-chunks-per-second: 0
+## how often the puller re-decides which peers to sync from.
+##
+## 0 uses the default of 5m. After a radius change the puller can wait up to
+## this long before syncing follows the new radius, which slows reserve filling
+## and matters more the larger the reserve.
+##
+## Shortening it costs reserve lookup pressure, because each recalculation asks
+## the reserve about peers — see issue #20 before lowering it much.
+# pullsync-recalc-interval: 0
+## how long the reserve worker waits between runs.
+##
+## 0 uses the default of 15m. Each run scans the reserve, so at larger reserve
+## sizes the scan grows while this interval does not, and the node spends an
+## increasing share of its time scanning.
+# reserve-wakeup-duration: 0
 ## cause the node to always accept incoming connections
 # bootnode-mode: false
 ## bzz token contract address
