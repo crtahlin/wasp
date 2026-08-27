@@ -28,15 +28,25 @@ func TestStore(t *testing.T) {
 	storagetest.TestStore(t, store)
 }
 
-// newBenchStore gives one sub-benchmark a store of its own.
+// newBenchStore gives one sub-benchmark a store of its own, backed by a real
+// directory.
+//
+// Two things are deliberate here.
 //
 // The suite used to share a single store, which made each sub-benchmark's
 // numbers a function of what the sub-benchmarks before it had written, and so
 // of which -bench selection was run. See issue #146.
+//
+// And the path is a temp directory rather than "". An empty path gives
+// goleveldb its in-memory backend, which is what this benchmark used to do —
+// so every published comparison against pebblestore, which has always used a
+// directory, was measuring memory against disk rather than one engine against
+// another. A bee node's index store is on disk, so disk is the configuration
+// worth measuring. See issue #15.
 func newBenchStore(b *testing.B) *leveldbstore.Store {
 	b.Helper()
 
-	st, _, err := leveldbstore.New("", &opt.Options{
+	st, _, err := leveldbstore.New(b.TempDir(), &opt.Options{
 		Compression: opt.SnappyCompression,
 	})
 	if err != nil {

@@ -5,14 +5,23 @@ Spec: [`spec.md`](spec.md)
 
 ## Verdict: park with the evidence
 
-Against the criteria written before the numbers existed, the deciding one was
-"passes the conformance suite unmodified **and** is not slower on batched writes
-and prefix iteration".
+The criterion written before the numbers existed was "passes the conformance
+suite unmodified **and** is not slower on batched writes and prefix iteration".
 
-The suite passes. The rest cannot be answered with the harness this repository
-has, and the numbers that do exist point in both directions at once. Parking is
-what the spec says to do in that case, and the evidence is below so the next
-attempt starts from it rather than from scratch.
+The suite passes. Prefix iteration is now measurable for the first time and
+Pebble is **1.19x slower** at it. Batched writes are split: 8.61x faster in one
+benchmark, 1.61x slower in the other.
+
+So the criterion is not met, and the answer is park. Honouring a criterion
+written in advance is the entire reason for writing one down, and an 8.61x gain
+on batched writes is exactly the sort of number that would otherwise be used to
+argue past it.
+
+That is a genuine trade rather than a dismissal: an engine that writes several
+times faster and reads modestly slower may well suit a node that ingests
+continuously and reads its reserve rarely. Deciding that needs a workload shaped
+like a node's, which is the third item under "what would change the verdict"
+below — not a microbenchmark.
 
 ## Conformance: passes, after two adaptations in the store
 
@@ -37,47 +46,74 @@ rather than writing a new one.
 
 ## Benchmarks
 
-Apple M5 Pro, `-benchtime 300ms -count 3`, median of three. Both engines run the
-**same benchmark selection**, which matters — see the harness defects below.
+**The numbers first published here were wrong, and are corrected below.** What
+they measured is recorded in the next section rather than deleted, because the
+way they were wrong is the useful part.
 
-**Table — Store operations, goleveldb against Pebble, same selection and machine**
+Apple M5 Pro, `-benchtime 200ms -count 3`, median of three. Both engines on
+disk, a fresh store per sub-benchmark, 100,000-entry datasets.
 
-| operation | goleveldb ns/op | Pebble ns/op | ratio |
+**Table — Store operations, goleveldb against Pebble, like for like**
+
+| operation | goleveldb ns | Pebble ns | verdict |
 |---|---|---|---|
-| `WriteSequential` | 369.2 | 976.4 | **2.6x slower** |
-| `ReadRandom` | 226.1 | 219.3 | 1.03x faster |
-| `ReadRandomMissing` | 199.9 | 1531 | **7.7x slower** |
-| `WriteInBatches` | 749.4 | 87.8 | **8.5x faster** |
-| `WriteInFixedSizeBatches` | 243.8 | 927.5 | **3.8x slower** |
+| `WriteSequential` | 7,637 | 1,499 | **5.09x faster** |
+| `WriteInBatches` | 836 | 97 | **8.61x faster** |
+| `ReadRandom` | 5,100 | 5,906 | 1.16x slower |
+| `IterateSequential` (per entry) | 19.0 ms | 22.7 ms | 1.19x slower |
+| `WriteInFixedSizeBatches` | 1,110 | 1,789 | 1.61x slower |
+| `ReadSequential` | 1,533 | 5,312 | 3.47x slower |
+| `ReadRandomMissing` | 232 | 6,249 | *see below — measures nothing useful* |
 
-Two batched-write benchmarks disagreeing by more than an order of magnitude in
-opposite directions is the clearest signal here, and it is a signal about the
-benchmarks rather than about the engines.
+Pebble is substantially faster at writing and slower at reading. That is a
+coherent result for an LSM tuned differently, and unlike the first attempt it is
+a comparison of two engines rather than of memory against disk.
 
-### The missing-key result is about level 0, not about Pebble
+### `ReadRandomMissing` is excluded from the verdict
 
-`ReadRandomMissing` at 7.7x looked like a missing bloom filter. Pebble sets
-filters per level and applies none unless asked, so a zero `pebble.Options` has
-none at all.
+It does not measure what its name says, in either engine. Hit keys are formatted
+`"1%015d"` and missing keys `"0%015d"`, so **every missing key sits below the
+entire stored keyspace**. A lookup is rejected by a table-level key-range check
+before any bloom filter or data block is consulted.
 
-Adding one changed nothing: **1,531 ns with the filter against 1,539 ns
-without**, same selection, same machine.
+That is why configuring a bloom filter changes nothing: 4,750 ns with it against
+4,748 ns without, over three runs each, on a 100,000-entry dataset. The filter
+is never reached. The `DefaultOptions` bloom filter is retained on general
+grounds, and the code says plainly that this harness cannot test it.
 
-The reason is that the benchmark never builds a level for a filter to help with.
-One million entries leave **98 files in level 0 and none below it**. Level-0
-files overlap, so a point lookup consults many of them whatever their filters
-say. goleveldb compacts level 0 far sooner — its trigger is 4 files — so its
-misses are cheap.
+A node looking up a chunk it does not hold looks up an address *inside* its
+keyspace. The 27x gap is the cost of two different range-rejection paths and
+says nothing about that case. Filed separately.
 
-So the number measures *level-0 depth during sustained ingest with no idle
-time*, which is a benchmark artefact here and is precisely the behaviour
-[#24](https://github.com/crtahlin/wasp/issues/24) found is not reachable on a
-real node at real ingest rates. It should not be read as "Pebble is slow at
-missing keys".
+## What the first version of this document got wrong
 
-The filter is kept in `DefaultOptions` on reasoning — a settled reserve has data
-below level 0, where it does pay — and the code says plainly that this is an
-argument the harness cannot test.
+Two independent defects, both of which made the original table meaningless.
+
+**The datasets held one key.** `b.N` reads as **1** before `b.Loop()` runs, and
+every generator was sized from `b.N`. Verified directly:
+
+```
+b.N before the loop = 1, iterations actually run = 126247629
+```
+
+So `WriteSequential` was reporting hundreds of thousands of iterations of
+overwriting *the same key* as distinct writes. Nothing failed; the number simply
+meant something other than its name.
+
+**The two engines were not both on disk.** `leveldbstore`'s benchmark store was
+built with `New("", ...)` — goleveldb's in-memory backend — while
+`pebblestore`'s used `b.TempDir()`. Every published figure compared memory
+against disk. On the corrected harness the same leveldb `ReadRandom` moves from
+226 ns in memory to 9,198 ns on disk: a 40x difference, which was the dominant
+term in the original table.
+
+Both are fixed — the first in [#159](https://github.com/crtahlin/wasp/pull/159),
+the second here.
+
+The earlier conclusion that the level-0 file count explained the missing-key gap
+was reasoning on top of these broken numbers. The 98-files-in-L0 observation was
+real, but it was not the explanation, and the actual explanation above is
+simpler.
 
 ## Two defects in the shared benchmark harness
 
@@ -124,10 +160,11 @@ are different, and the spec's first draft got that wrong.
 
 In order of what it would cost:
 
-1. **Fix the harness.** Until seven benchmarks run, no comparison here is more
-   than indicative. Filed separately; it is an upstream defect.
-2. **Measure prefix iteration**, since it is half the deciding criterion and is
-   currently unmeasurable.
+1. **Done** — the harness is fixed ([#146](https://github.com/crtahlin/wasp/issues/146),
+   [#159](https://github.com/crtahlin/wasp/pull/159)) and the numbers above are
+   the result.
+2. **Done** — prefix iteration now reports per-entry cost, and Pebble is 1.19x
+   slower. That is the half of the criterion that decides this.
 3. **Run both engines under a real reserve**, which is the only setting where
    compaction behaviour appears at all.
 
