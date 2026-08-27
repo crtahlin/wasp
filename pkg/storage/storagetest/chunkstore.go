@@ -199,7 +199,7 @@ func RunChunkStoreBenchmarkTests(b *testing.B, s storage.ChunkStore) {
 func BenchmarkChunkStoreWriteSequential(b *testing.B, s storage.Putter) {
 	b.Helper()
 
-	doWriteChunk(b, s, newSequentialEntryGenerator(b.N))
+	doWriteChunk(b, s, newSequentialEntryGenerator(0, b.N))
 }
 
 func BenchmarkChunkStoreWriteRandom(b *testing.B, s storage.Putter) {
@@ -281,5 +281,5 @@ func BenchmarkChunkStoreDeleteRandom(b *testing.B, s storage.ChunkStore) {
 func BenchmarkChunkStoreDeleteSequential(b *testing.B, s storage.ChunkStore) {
 	b.Helper()
 
-	doDeleteChunk(b, s, newSequentialEntryGenerator(b.N))
+	doDeleteChunk(b, s, newSequentialEntryGenerator(0, b.N))
 }

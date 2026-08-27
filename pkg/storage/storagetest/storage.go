@@ -813,151 +813,165 @@ func TestItemClone(t *testing.T, test *ItemCloneTest) {
 	}
 }
 
-func BenchmarkStore(b *testing.B, s storage.Store) {
+// BenchmarkStore provides a benchmark suite for a storage.Store.
+//
+// newStore is a constructor rather than a store because every sub-benchmark
+// needs one of its own, and is responsible for registering its own cleanup on
+// the *testing.B it is handed.
+//
+// The suite used to share a single store. Each sub-benchmark then started from
+// whatever its predecessors had written, so the reported numbers were a
+// function of the -bench selection rather than of the store: on leveldbstore,
+// ReadRandomMissing reported 134.6 ns/op run on its own and 218.7 ns/op inside
+// the full suite, same code, same machine, same minute. Nothing said the two
+// were not comparable. See issue #146.
+func BenchmarkStore(b *testing.B, newStore func(b *testing.B) storage.Store) {
 	b.Run("WriteSequential", func(b *testing.B) {
-		BenchmarkWriteSequential(b, s)
+		BenchmarkWriteSequential(b, newStore(b))
 	})
 	b.Run("WriteRandom", func(b *testing.B) {
-		BenchmarkWriteRandom(b, s)
+		BenchmarkWriteRandom(b, newStore)
 	})
 	b.Run("ReadSequential", func(b *testing.B) {
-		BenchmarkReadSequential(b, s)
+		BenchmarkReadSequential(b, newStore(b))
 	})
 	b.Run("ReadRandom", func(b *testing.B) {
-		BenchmarkReadRandom(b, s)
+		BenchmarkReadRandom(b, newStore(b))
 	})
 	b.Run("ReadRandomMissing", func(b *testing.B) {
-		BenchmarkReadRandomMissing(b, s)
+		BenchmarkReadRandomMissing(b, newStore(b))
 	})
 	b.Run("ReadReverse", func(b *testing.B) {
-		BenchmarkReadReverse(b, s)
+		BenchmarkReadReverse(b, newStore(b))
 	})
 	b.Run("ReadRedHot", func(b *testing.B) {
-		BenchmarkReadHot(b, s)
+		BenchmarkReadHot(b, newStore(b))
 	})
 	b.Run("IterateSequential", func(b *testing.B) {
-		BenchmarkIterateSequential(b, s)
+		BenchmarkIterateSequential(b, newStore(b))
 	})
 	b.Run("IterateReverse", func(b *testing.B) {
-		BenchmarkIterateReverse(b, s)
+		BenchmarkIterateReverse(b, newStore(b))
 	})
 	b.Run("DeleteRandom", func(b *testing.B) {
-		BenchmarkDeleteRandom(b, s)
+		BenchmarkDeleteRandom(b, newStore(b))
 	})
 	b.Run("DeleteSequential", func(b *testing.B) {
-		BenchmarkDeleteSequential(b, s)
+		BenchmarkDeleteSequential(b, newStore(b))
 	})
 }
 
 // BenchmarkBatchedStore provides a benchmark suite for the
 // storage.BatchedStore. Only the Write and Delete methods are tested.
-func BenchmarkBatchedStore(b *testing.B, bs storage.BatchStore) {
+//
+// As with BenchmarkStore, newStore is a constructor so that each sub-benchmark
+// gets a store of its own.
+func BenchmarkBatchedStore(b *testing.B, newStore func(b *testing.B) storage.BatchStore) {
 	b.Run("WriteInBatches", func(b *testing.B) {
-		BenchmarkWriteInBatches(b, bs)
+		BenchmarkWriteInBatches(b, newStore(b))
 	})
 	b.Run("WriteInFixedSizeBatches", func(b *testing.B) {
-		BenchmarkWriteInFixedSizeBatches(b, bs)
+		BenchmarkWriteInFixedSizeBatches(b, newStore(b))
 	})
 	b.Run("DeleteInBatches", func(b *testing.B) {
-		BenchmarkDeleteInBatches(b, bs)
+		BenchmarkDeleteInBatches(b, newStore(b))
 	})
 	b.Run("DeleteInFixedSizeBatches", func(b *testing.B) {
-		BenchmarkDeleteInFixedSizeBatches(b, bs)
+		BenchmarkDeleteInFixedSizeBatches(b, newStore(b))
 	})
 }
 
 func BenchmarkReadRandom(b *testing.B, db storage.Store) {
-	g := newRandomKeyGenerator(b.N)
+	populate(b, db)
+	g := newRoundKeyGenerator(newRandomKeyGenerator(*datasetSize))
 	resetBenchmark(b)
 	doRead(b, db, g, false)
 }
 
 func BenchmarkReadRandomMissing(b *testing.B, db storage.Store) {
-	g := newRandomMissingKeyGenerator(b.N)
+	// The store is populated even though every key looked up is absent from
+	// it. A miss in an empty store is a different operation with a different
+	// cost, and it is not the one this benchmark is named for.
+	populate(b, db)
+	g := newRoundKeyGenerator(newRandomMissingKeyGenerator(*datasetSize))
 	resetBenchmark(b)
 	doRead(b, db, g, true)
 }
 
 func BenchmarkReadSequential(b *testing.B, db storage.Store) {
-	g := newSequentialKeyGenerator(b.N)
 	populate(b, db)
+	g := newRoundKeyGenerator(newSequentialKeyGenerator(*datasetSize))
 	resetBenchmark(b)
 	doRead(b, db, g, false)
 }
 
 func BenchmarkReadReverse(b *testing.B, db storage.Store) {
-	g := newReversedKeyGenerator(newSequentialKeyGenerator(b.N))
 	populate(b, db)
+	// The wrap has to be outside the reversal, not inside it: reversing an
+	// index past the end of the key set gives a negative one.
+	g := newRoundKeyGenerator(newReversedKeyGenerator(newSequentialKeyGenerator(*datasetSize)))
 	resetBenchmark(b)
 	doRead(b, db, g, false)
 }
 
 func BenchmarkReadHot(b *testing.B, db storage.Store) {
-	k := maxInt((b.N+99)/100, 1)
-	g := newRoundKeyGenerator(newRandomKeyGenerator(k))
 	populate(b, db)
+	k := maxInt(*datasetSize/100, 1)
+	g := newRoundKeyGenerator(newRandomKeyGenerator(k))
 	resetBenchmark(b)
 	doRead(b, db, g, false)
 }
 
 func BenchmarkIterateSequential(b *testing.B, db storage.Store) {
-	populate(b, db)
-	resetBenchmark(b)
-	var counter int
-	fn := func(r storage.Result) (bool, error) {
-		counter++
-		if counter > b.N {
-			return true, nil
-		}
-		return false, nil
-	}
-	q := storage.Query{
-		Factory: func() storage.Item { return new(obj1) },
-		Order:   storage.KeyAscendingOrder,
-	}
-	if err := db.Iterate(q, fn); err != nil {
-		b.Fatal("iterate", err)
-	}
+	benchmarkIterate(b, db, storage.KeyAscendingOrder)
 }
 
 func BenchmarkIterateReverse(b *testing.B, db storage.Store) {
+	benchmarkIterate(b, db, storage.KeyDescendingOrder)
+}
+
+// benchmarkIterate measures one full scan of the dataset per iteration.
+//
+// The unit is a whole scan rather than a single entry because Iterate drives
+// its own callback and cannot be stepped one result at a time from the loop
+// condition. The per-entry figure the old code reached for is reported
+// alongside as ns/entry.
+func benchmarkIterate(b *testing.B, db storage.Store, order storage.Order) {
+	b.Helper()
+
 	populate(b, db)
-	resetBenchmark(b)
-	var counter int
-	fn := func(storage.Result) (bool, error) {
-		counter++
-		if counter > b.N {
-			return true, nil
-		}
-		return false, nil
-	}
 	q := storage.Query{
 		Factory: func() storage.Item { return new(obj1) },
-		Order:   storage.KeyDescendingOrder,
+		Order:   order,
 	}
-	if err := db.Iterate(q, fn); err != nil {
-		b.Fatal("iterate", err)
+	fn := func(storage.Result) (bool, error) { return false, nil }
+	resetBenchmark(b)
+	for b.Loop() {
+		if err := db.Iterate(q, fn); err != nil {
+			b.Fatal("iterate", err)
+		}
 	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(*datasetSize), "ns/entry")
 }
 
 func BenchmarkWriteSequential(b *testing.B, db storage.Store) {
-	g := newSequentialEntryGenerator(b.N)
+	eb := newEntryBlocks(b, newSequentialEntryGenerator, nil)
 	resetBenchmark(b)
-	doWrite(b, db, g)
+	doWrite(b, db, eb)
 }
 
 func BenchmarkWriteInBatches(b *testing.B, bs storage.BatchStore) {
-	g := newSequentialEntryGenerator(b.N)
+	eb := newEntryBlocks(b, newSequentialEntryGenerator, nil)
 	batch := bs.Batch(context.Background())
 	resetBenchmark(b)
-	for i := 0; b.Loop(); i++ {
-		key := g.Key(i)
+	for b.Loop() {
+		key, value := eb.next()
 		item := &obj1{
 			Id:  string(key),
-			Buf: g.Value(i),
+			Buf: value,
 		}
 		if err := batch.Put(item); err != nil {
-			b.Fatalf("write key '%s': %v", string(g.Key(i)), err)
+			b.Fatalf("write key '%s': %v", string(key), err)
 		}
 	}
 	if err := batch.Commit(); err != nil {
@@ -966,67 +980,102 @@ func BenchmarkWriteInBatches(b *testing.B, bs storage.BatchStore) {
 }
 
 func BenchmarkWriteInFixedSizeBatches(b *testing.B, bs storage.BatchStore) {
-	g := newSequentialEntryGenerator(b.N)
+	eb := newEntryBlocks(b, newSequentialEntryGenerator, nil)
 	writer := newBatchDBWriter(bs)
 	resetBenchmark(b)
-	for i := 0; b.Loop(); i++ {
-		writer.Put(g.Key(i), g.Value(i))
+	for b.Loop() {
+		writer.Put(eb.next())
 	}
 }
 
-func BenchmarkWriteRandom(b *testing.B, db storage.Store) {
-	for i, n := 1, *maxConcurrency; i <= n; i *= 2 {
-		name := fmt.Sprintf("parallelism-%d", i)
+// BenchmarkWriteRandom measures concurrent writes at a range of parallelism
+// levels, each level against a store of its own.
+//
+// One measured iteration is a whole block of writes spread evenly across the
+// goroutines, not a single Put, and ns/entry is reported so that the levels
+// stay comparable with each other and with WriteSequential. The unit has to be
+// the block: b.Loop may only be called by the goroutine running the benchmark,
+// so the workers cannot each drive their own measured loop the way they did
+// under the b.N idiom. Doing so is what made every level above parallelism-2
+// fail with "B.Loop called with timer stopped".
+//
+// A whole -dataset_size block per iteration is also what keeps the goroutines,
+// which are started afresh each iteration, from being what is measured: at
+// parallelism-2048 their startup is a few per cent of a 100000-entry block and
+// would be most of a small one. The price is a coarse iteration count, so give
+// this benchmark a -benchtime of a second or more.
+func BenchmarkWriteRandom(b *testing.B, newStore func(b *testing.B) storage.Store) {
+	for parallelism := 1; parallelism <= *maxConcurrency; parallelism *= 2 {
 		runtime.GC()
-		parallelism := i
-		b.Run(name, func(b *testing.B) {
-			var gens []entryGenerator
-			start, step := 0, (b.N+parallelism)/parallelism
-			n := step * parallelism
-			g := newFullRandomEntryGenerator(0, n)
-			for range parallelism {
-				gens = append(gens, newStartAtEntryGenerator(start, g))
-				start += step
-			}
+		b.Run(fmt.Sprintf("parallelism-%d", parallelism), func(b *testing.B) {
+			db := newStore(b)
+			w := newDBWriter(db)
+			step := (*datasetSize + parallelism - 1) / parallelism
+			size := step * parallelism
+			g := newFullRandomEntryGenerator(0, size)
 			resetBenchmark(b)
-			var wg sync.WaitGroup
-			wg.Add(len(gens))
-			for _, g := range gens {
-				go func(g entryGenerator) {
-					defer wg.Done()
-					doWrite(b, db, g)
-				}(g)
+			for i := 0; b.Loop(); i++ {
+				if i > 0 {
+					// Every iteration writes keys it has not written
+					// before. Reusing the block would make all but the
+					// first iteration an overwrite, which is a different
+					// operation in an LSM store.
+					b.StopTimer()
+					g = newFullRandomEntryGenerator(i*size, size)
+					b.StartTimer()
+				}
+				var wg sync.WaitGroup
+				wg.Add(parallelism)
+				for p := range parallelism {
+					go func(offset int) {
+						defer wg.Done()
+						for j := offset; j < offset+step; j++ {
+							if err := w.Put(g.Key(j), g.Value(j)); err != nil {
+								// Errorf, not Fatalf: FailNow may only be
+								// called from the goroutine running the
+								// benchmark.
+								b.Errorf("write key '%s': %v", string(g.Key(j)), err)
+								return
+							}
+						}
+					}(p * step)
+				}
+				wg.Wait()
 			}
-			wg.Wait()
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(size), "ns/entry")
 		})
 	}
 }
 
 func BenchmarkDeleteRandom(b *testing.B, db storage.Store) {
-	g := newFullRandomEntryGenerator(0, b.N)
-	doWrite(b, db, g)
+	eb := newEntryBlocks(b, newFullRandomEntryGenerator, func(g entryGenerator) {
+		writeDataset(b, db, g)
+	})
 	resetBenchmark(b)
-	doDelete(b, db, g)
+	doDelete(b, db, eb)
 }
 
 func BenchmarkDeleteSequential(b *testing.B, db storage.Store) {
-	g := newSequentialEntryGenerator(b.N)
-	doWrite(b, db, g)
+	eb := newEntryBlocks(b, newSequentialEntryGenerator, func(g entryGenerator) {
+		writeDataset(b, db, g)
+	})
 	resetBenchmark(b)
-	doDelete(b, db, g)
+	doDelete(b, db, eb)
 }
 
 func BenchmarkDeleteInBatches(b *testing.B, bs storage.BatchStore) {
-	g := newSequentialEntryGenerator(b.N)
-	doWrite(b, bs, g)
+	eb := newEntryBlocks(b, newSequentialEntryGenerator, func(g entryGenerator) {
+		writeDataset(b, bs, g)
+	})
 	resetBenchmark(b)
 	batch := bs.Batch(context.Background())
-	for i := 0; b.Loop(); i++ {
+	for b.Loop() {
+		key, _ := eb.next()
 		item := &obj1{
-			Id: string(g.Key(i)),
+			Id: string(key),
 		}
 		if err := batch.Delete(item); err != nil {
-			b.Fatalf("delete key '%s': %v", string(g.Key(i)), err)
+			b.Fatalf("delete key '%s': %v", string(key), err)
 		}
 	}
 	if err := batch.Commit(); err != nil {
@@ -1035,11 +1084,13 @@ func BenchmarkDeleteInBatches(b *testing.B, bs storage.BatchStore) {
 }
 
 func BenchmarkDeleteInFixedSizeBatches(b *testing.B, bs storage.BatchStore) {
-	g := newSequentialEntryGenerator(b.N)
-	doWrite(b, bs, g)
+	eb := newEntryBlocks(b, newSequentialEntryGenerator, func(g entryGenerator) {
+		writeDataset(b, bs, g)
+	})
 	resetBenchmark(b)
 	writer := newBatchDBWriter(bs)
-	for i := 0; b.Loop(); i++ {
-		writer.Delete(g.Key(i))
+	for b.Loop() {
+		key, _ := eb.next()
+		writer.Delete(key)
 	}
 }

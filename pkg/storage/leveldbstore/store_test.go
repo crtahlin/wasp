@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storage/leveldbstore"
 	"github.com/ethersphere/bee/v2/pkg/storage/storagetest"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -27,7 +28,14 @@ func TestStore(t *testing.T) {
 	storagetest.TestStore(t, store)
 }
 
-func BenchmarkStore(b *testing.B) {
+// newBenchStore gives one sub-benchmark a store of its own.
+//
+// The suite used to share a single store, which made each sub-benchmark's
+// numbers a function of what the sub-benchmarks before it had written, and so
+// of which -bench selection was run. See issue #146.
+func newBenchStore(b *testing.B) *leveldbstore.Store {
+	b.Helper()
+
 	st, _, err := leveldbstore.New("", &opt.Options{
 		Compression: opt.SnappyCompression,
 	})
@@ -35,7 +43,15 @@ func BenchmarkStore(b *testing.B) {
 		b.Fatalf("create store failed: %v", err)
 	}
 	b.Cleanup(func() { _ = st.Close() })
-	storagetest.BenchmarkStore(b, st)
+	return st
+}
+
+func BenchmarkStore(b *testing.B) {
+	storagetest.BenchmarkStore(b, func(b *testing.B) storage.Store {
+		b.Helper()
+
+		return newBenchStore(b)
+	})
 }
 
 func TestBatchedStore(t *testing.T) {
@@ -50,14 +66,11 @@ func TestBatchedStore(t *testing.T) {
 }
 
 func BenchmarkBatchedStore(b *testing.B) {
-	st, _, err := leveldbstore.New("", &opt.Options{
-		Compression: opt.SnappyCompression,
+	storagetest.BenchmarkBatchedStore(b, func(b *testing.B) storage.BatchStore {
+		b.Helper()
+
+		return newBenchStore(b)
 	})
-	if err != nil {
-		b.Fatalf("create store failed: %v", err)
-	}
-	b.Cleanup(func() { _ = st.Close() })
-	storagetest.BenchmarkBatchedStore(b, st)
 }
 
 func TestDirtyMarker(t *testing.T) {
