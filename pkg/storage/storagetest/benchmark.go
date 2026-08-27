@@ -26,6 +26,21 @@ var (
 	compressionRatio = flag.Float64("compression_ratio", 0.5, "")
 	maxConcurrency   = flag.Int("max_concurrency", 2048, "Max concurrency in concurrent benchmark")
 	batchSize        = flag.Int("batch_size", 1000, "Max number of records that would trigger commit")
+
+	// datasetSize is how many entries a benchmark's setup phase writes, and
+	// how many distinct entries a measured loop works through before it moves
+	// on to the next block.
+	//
+	// It used to be b.N. That no longer means anything: b.Loop owns the
+	// iteration count and reports it only after the loop has finished, so b.N
+	// reads as 1 everywhere setup runs. Sizing from b.N therefore did not
+	// scale the dataset with the run, it collapsed it to a single entry.
+	//
+	// A fixed size is a deliberate change of what these benchmarks measure:
+	// the dataset no longer grows with -benchtime. Raise this to measure
+	// against a store too large to sit in the page cache. At the default,
+	// 100000 entries of 100 bytes is roughly 12MB.
+	datasetSize = flag.Int("dataset_size", 100000, "Number of entries written by a benchmark's setup phase")
 )
 
 var keyLen = 16
@@ -144,12 +159,68 @@ func newFullRandomEntryGenerator(start, size int) entryGenerator {
 	}
 }
 
-func newSequentialEntryGenerator(size int) entryGenerator {
+func newSequentialEntryGenerator(start, size int) entryGenerator {
 	r := rand.New(rand.NewSource(time.Now().Unix()))
 	return &pairedEntryGenerator{
-		keyGenerator:         newSequentialKeyGenerator(size),
+		keyGenerator:         &predefinedKeyGenerator{keys: newSequentialKeys(size, start, hitKeyFormat)},
 		randomValueGenerator: makeRandomValueGenerator(r, *compressionRatio, *valueSize),
 	}
+}
+
+// entryBlocks feeds a measured loop from a block of entries prepared ahead of
+// the iterations that use it.
+//
+// A measured loop can run for many more iterations than any dataset prepared
+// before it holds, and b.Loop will not say how many in advance. Generating
+// keys inside the loop would put the cost of fmt.Fprintf into every reported
+// ns/op, and reusing one block would turn a write benchmark into an overwrite
+// benchmark and a delete benchmark into a delete-missing benchmark. So the
+// loop walks a block, and when it runs off the end the next block of distinct
+// keys is built - and, for the delete benchmarks, written into the store -
+// with the timer stopped. Only the operation under test is ever measured.
+type entryBlocks struct {
+	b      *testing.B
+	newGen func(start, size int) entryGenerator
+	// refill runs on every new block, with the timer stopped. The delete
+	// benchmarks use it to put the block into the store first.
+	refill func(entryGenerator)
+	size   int
+	start  int
+	i      int
+	g      entryGenerator
+}
+
+// newEntryBlocks prepares the first block. Call it before the measured loop:
+// work done before the first b.Loop call is not measured.
+func newEntryBlocks(b *testing.B, newGen func(start, size int) entryGenerator, refill func(entryGenerator)) *entryBlocks {
+	b.Helper()
+
+	eb := &entryBlocks{b: b, newGen: newGen, refill: refill, size: *datasetSize}
+	eb.roll()
+	return eb
+}
+
+// roll replaces the current block. The timer must be stopped, or not yet
+// started, when it is called.
+func (eb *entryBlocks) roll() {
+	eb.g = eb.newGen(eb.start, eb.size)
+	eb.start += eb.size
+	eb.i = 0
+	if eb.refill != nil {
+		eb.refill(eb.g)
+	}
+}
+
+// next returns the key and value for the next measured iteration.
+func (eb *entryBlocks) next() (key, value []byte) {
+	if eb.i == eb.size {
+		eb.b.StopTimer()
+		eb.roll()
+		eb.b.StartTimer()
+	}
+	i := eb.i
+	eb.i++
+	return eb.g.Key(i), eb.g.Value(i)
 }
 
 type keyGenerator interface {
@@ -224,6 +295,12 @@ func maxInt(a int, b int) int {
 	return b
 }
 
+// doRead measures Get over the keys g produces.
+//
+// The loop runs for as many iterations as b.Loop decides, which is normally
+// far more than the dataset holds, so g must be one that wraps: pass it
+// through newRoundKeyGenerator, outermost, or the reads run off the end of the
+// key set and fall back on its first key for ever after.
 func doRead(b *testing.B, db storage.Store, g keyGenerator, allowNotFound bool) {
 	b.Helper()
 
@@ -265,24 +342,46 @@ func newDBWriter(db storage.Store) *singularDBWriter {
 	return &singularDBWriter{db: db}
 }
 
-func doWrite(b *testing.B, db storage.Store, g entryGenerator) {
+// doWrite measures Put over an unbounded run of distinct keys.
+func doWrite(b *testing.B, db storage.Store, eb *entryBlocks) {
 	b.Helper()
 
 	w := newDBWriter(db)
-	for i := 0; b.Loop(); i++ {
-		if err := w.Put(g.Key(i), g.Value(i)); err != nil {
-			b.Fatalf("write key '%s': %v", string(g.Key(i)), err)
+	for b.Loop() {
+		key, value := eb.next()
+		if err := w.Put(key, value); err != nil {
+			b.Fatalf("write key '%s': %v", string(key), err)
 		}
 	}
 }
 
-func doDelete(b *testing.B, db storage.Store, g keyGenerator) {
+// doDelete measures Delete of keys that are present. eb must have been given a
+// refill that writes each block into db, or the loop would spend all but its
+// first pass deleting keys that are already gone.
+func doDelete(b *testing.B, db storage.Store, eb *entryBlocks) {
 	b.Helper()
 
 	w := newDBWriter(db)
-	for i := 0; b.Loop(); i++ {
-		if err := w.Delete(g.Key(i)); err != nil {
-			b.Fatalf("delete key '%s': %v", string(g.Key(i)), err)
+	for b.Loop() {
+		key, _ := eb.next()
+		if err := w.Delete(key); err != nil {
+			b.Fatalf("delete key '%s': %v", string(key), err)
+		}
+	}
+}
+
+// writeDataset writes every entry of g into db outside the measured loop.
+//
+// Setup cannot go through doWrite: b.Loop drives the one measured phase a
+// benchmark is allowed, and calling it a second time fails with "B.Loop called
+// with timer stopped".
+func writeDataset(b *testing.B, db storage.Store, g entryGenerator) {
+	b.Helper()
+
+	w := newDBWriter(db)
+	for i := range g.NKey() {
+		if err := w.Put(g.Key(i), g.Value(i)); err != nil {
+			b.Fatalf("write key '%s': %v", string(g.Key(i)), err)
 		}
 	}
 }
@@ -294,10 +393,12 @@ func resetBenchmark(b *testing.B) {
 	b.ResetTimer()
 }
 
+// populate writes the fixed dataset that the read and iterate benchmarks work
+// against.
 func populate(b *testing.B, db storage.Store) {
 	b.Helper()
 
-	doWrite(b, db, newFullRandomEntryGenerator(0, b.N))
+	writeDataset(b, db, newFullRandomEntryGenerator(0, *datasetSize))
 }
 
 // chunk

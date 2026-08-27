@@ -74,7 +74,7 @@ func TestSequentialEntryGenerator(t *testing.T) {
 	t.Parallel()
 
 	t.Run("generated values are consecutive ascending", func(t *testing.T) {
-		gen := newSequentialEntryGenerator(10)
+		gen := newSequentialEntryGenerator(0, 10)
 		for i := 0; i < gen.NKey(); i++ {
 			expected := fmt.Sprintf(format, i)
 			if expected != string(gen.Key(i)) {
@@ -103,7 +103,7 @@ func TestStartAtEntryGenerator(t *testing.T) {
 
 	t.Run("generated values are consecutive ascending", func(t *testing.T) {
 		startAt := 5
-		gen := newStartAtEntryGenerator(startAt, newSequentialEntryGenerator(10))
+		gen := newStartAtEntryGenerator(startAt, newSequentialEntryGenerator(0, 10))
 		for i := 0; i < gen.NKey(); i++ {
 			expected := fmt.Sprintf(format, i+startAt)
 			if expected != string(gen.Key(i)) {

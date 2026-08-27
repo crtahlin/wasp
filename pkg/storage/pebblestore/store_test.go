@@ -9,23 +9,37 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storage/pebblestore"
 	"github.com/ethersphere/bee/v2/pkg/storage/storagetest"
 )
 
-// benchOptions lets one benchmark run be repeated with the bloom filter off,
-// under an identical benchmark selection.
+// benchOptions lets one benchmark run be repeated with the bloom filter off.
 //
-// The selection matters: the sub-benchmarks share a store, so running a
-// different subset changes the state each one sees and the numbers with it.
-// Two runs of the same names is the only comparison that means anything, which
-// is why this is an environment variable rather than a second set of
-// benchmarks under different names.
+// It is an environment variable rather than a second set of benchmarks under
+// different names so that both runs report under the same benchmark names and
+// can be compared directly, for instance with benchstat.
 func benchOptions() *pebble.Options {
 	if os.Getenv("PEBBLE_NO_FILTER") == "1" {
 		return &pebble.Options{}
 	}
 	return nil
+}
+
+// newBenchStore gives one sub-benchmark a store of its own.
+//
+// The suite used to share a single store, which made each sub-benchmark's
+// numbers a function of what the sub-benchmarks before it had written, and so
+// of which -bench selection was run. See issue #146.
+func newBenchStore(b *testing.B) *pebblestore.Store {
+	b.Helper()
+
+	store, err := pebblestore.New(b.TempDir(), benchOptions())
+	if err != nil {
+		b.Fatalf("create store failed: %v", err)
+	}
+	b.Cleanup(func() { _ = store.Close() })
+	return store
 }
 
 // The conformance suite is the existing shared one, not a new one written for
@@ -58,21 +72,17 @@ func TestBatchedStore(t *testing.T) {
 }
 
 func BenchmarkStore(b *testing.B) {
-	store, err := pebblestore.New(b.TempDir(), benchOptions())
-	if err != nil {
-		b.Fatalf("create store failed: %v", err)
-	}
-	b.Cleanup(func() { _ = store.Close() })
+	storagetest.BenchmarkStore(b, func(b *testing.B) storage.Store {
+		b.Helper()
 
-	storagetest.BenchmarkStore(b, store)
+		return newBenchStore(b)
+	})
 }
 
 func BenchmarkBatchedStore(b *testing.B) {
-	store, err := pebblestore.New(b.TempDir(), benchOptions())
-	if err != nil {
-		b.Fatalf("create store failed: %v", err)
-	}
-	b.Cleanup(func() { _ = store.Close() })
+	storagetest.BenchmarkBatchedStore(b, func(b *testing.B) storage.BatchStore {
+		b.Helper()
 
-	storagetest.BenchmarkBatchedStore(b, store)
+		return newBenchStore(b)
+	})
 }

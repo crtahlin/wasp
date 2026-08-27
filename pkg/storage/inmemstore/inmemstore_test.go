@@ -7,6 +7,7 @@ package inmemstore_test
 import (
 	"testing"
 
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	inmem "github.com/ethersphere/bee/v2/pkg/storage/inmemstore"
 	"github.com/ethersphere/bee/v2/pkg/storage/storagetest"
 )
@@ -17,8 +18,13 @@ func TestStore(t *testing.T) {
 	storagetest.TestStore(t, inmem.New())
 }
 
+// Each sub-benchmark gets a store of its own: sharing one made every
+// benchmark's numbers depend on what the benchmarks before it had written, and
+// so on which -bench selection was run. See issue #146.
 func BenchmarkStore(b *testing.B) {
-	storagetest.BenchmarkStore(b, inmem.New())
+	storagetest.BenchmarkStore(b, func(*testing.B) storage.Store {
+		return inmem.New()
+	})
 }
 
 func TestBatchedStore(t *testing.T) {
@@ -28,5 +34,7 @@ func TestBatchedStore(t *testing.T) {
 }
 
 func BenchmarkBatchedStore(b *testing.B) {
-	storagetest.BenchmarkBatchedStore(b, inmem.New())
+	storagetest.BenchmarkBatchedStore(b, func(*testing.B) storage.BatchStore {
+		return inmem.New()
+	})
 }
