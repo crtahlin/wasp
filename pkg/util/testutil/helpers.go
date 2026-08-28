@@ -76,5 +76,10 @@ func NewLogger(t *testing.T) log.Logger {
 		return len(p), nil
 	})
 
-	return log.NewLogger(t.Name(), log.WithSink(testWriter))
+	// Synchronous on purpose. The sink is t.Log, and a background drain
+	// goroutine reaching it after the test has finished panics with
+	// "Log in goroutine after Test... has completed" — in whichever package
+	// happened to build the logger, not in pkg/log. Blocking is harmless for a
+	// debugging aid.
+	return log.NewLogger(t.Name(), log.WithSink(testWriter), log.WithSynchronousSink())
 }

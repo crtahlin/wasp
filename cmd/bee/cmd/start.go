@@ -138,6 +138,15 @@ func (c *command) initStartCmd() (err error) {
 					case <-done:
 						logger.Info("node shutdown")
 					}
+
+					// Last, after the final log line: the sink buffers, so
+					// without this the lines an operator most wants — the ones
+					// explaining why the node stopped — are still in the queue
+					// when the process exits. Bounded internally, so a log
+					// consumer that has gone away cannot hold the exit open.
+					if err := log.CloseAsyncSinks(); err != nil {
+						fmt.Fprintln(os.Stderr, err)
+					}
 				},
 			}
 

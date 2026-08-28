@@ -153,7 +153,11 @@ func newGsocTest(t *testing.T, socId []byte, pingPeriod time.Duration) (gsoc.Lis
 	}
 	chunkAddr, _ := soc.CreateAddress(socId, owner.Bytes())
 
-	gsoc := gsoc.New(log.NewLogger("test"))
+	// testutil's logger rather than log.NewLogger("test"): the latter takes
+	// the package default sink, which is os.Stderr, so this test both spammed
+	// the suite's output and left the sink's drain goroutine running for
+	// goleak to find. testutil's writes to t.Log and is synchronous.
+	gsoc := gsoc.New(testutil.NewLogger(t))
 	testutil.CleanupCloser(t, gsoc)
 
 	_, cl, listener, _ := newTestServer(t, testServerOptions{
