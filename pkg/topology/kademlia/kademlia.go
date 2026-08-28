@@ -565,7 +565,7 @@ func (k *Kad) manage() {
 	// An unbounded wg.Wait() here is what turned one wedged dial into a node
 	// that never looked for peers again: the loop never came back, so it never
 	// dialled, never reached the zero-peer bootnode fallback below, and never
-	// updated its own gauges — which is why a node holding zero peers was seen
+	// updated its own gauges. That is why a node holding zero peers was seen
 	// reporting 88 connected. See issue #158.
 	//
 	// The WaitGroup is shared with connectionAttemptsHandler, which outlives
