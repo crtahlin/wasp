@@ -5,6 +5,7 @@
 package kademlia_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -2618,5 +2619,142 @@ func TestKademliaDialsWhileLogSinkIsStalled(t *testing.T) {
 		t.Fatal("kademlia made no dial attempts while the log consumer was " +
 			"stalled: a stalled log reader stops the node connecting to peers " +
 			"(issue #156)")
+	}
+}
+
+// countingLogSink counts log lines containing a substring.
+//
+// Synchronous on purpose: the count must be final the moment the manage loop
+// has written, with no drain goroutine still holding a line.
+type countingLogSink struct {
+	want []byte
+
+	mu sync.Mutex
+	n  int
+}
+
+func (w *countingLogSink) Write(p []byte) (int, error) {
+	if bytes.Contains(p, w.want) {
+		w.mu.Lock()
+		w.n++
+		w.mu.Unlock()
+	}
+	return len(p), nil
+}
+
+func (w *countingLogSink) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.n
+}
+
+// TestManageLoopSurvivesAWedgedDial covers issue #158.
+//
+// The manage loop starts its dials and then waits for all of them. That wait
+// used to have no bound, so a single dial that never returned stopped the loop
+// for good: no more dialling, no zero-peer bootnode fallback, and no gauge
+// updates, which is why a node holding zero peers was seen reporting 88
+// connected.
+//
+// The property is that one wedged dial must not stop the loop. What is counted
+// is passes of the loop that gave up waiting, not dials attempted. Dials
+// attempted was the first attempt at this and it was wrong: once every known
+// peer is wedged there are none left to dial, so a perfectly healthy loop
+// attempts no more of them. That version passed here and failed on Windows,
+// where the first pass reached every peer.
+func TestManageLoopSurvivesAWedgedDial(t *testing.T) {
+	var (
+		gaveUp int
+		wedged int32
+	)
+
+	synctest.Test(t, func(t *testing.T) {
+		// Never closed while the loop runs: the first dial to reach it stays
+		// there, exactly as a dial blocked writing a log line did.
+		wedge := make(chan struct{})
+
+		sink := &countingLogSink{want: []byte("gave up waiting")}
+
+		// Warning verbosity is enough for the line being counted, but Debug
+		// keeps this consistent with the other kademlia log tests.
+		logger := log.NewLogger(t.Name(),
+			log.WithSink(sink),
+			log.WithVerbosity(log.VerbosityDebug),
+		)
+
+		detector, err := stabilization.NewDetector(stabilization.Config{
+			PeriodDuration:             1 * time.Second,
+			NumPeriodsForStabilization: 2,
+			StabilizationFactor:        1,
+			WarmupTime:                 0,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var (
+			base    = swarm.RandAddress(t)
+			pk, _   = beeCrypto.GenerateSecp256k1Key()
+			signer  = beeCrypto.NewDefaultSigner(pk)
+			ab      = addressbook.New(mockstate.NewStateStore())
+			started atomic.Int32
+		)
+
+		// Built here rather than through newTestKademliaWithAddrDiscovery,
+		// which owns its own p2p mock and offers no way to wedge a dial.
+		p2ps := p2pmock.New(p2pmock.WithConnectFunc(
+			func(ctx context.Context, addrs []ma.Multiaddr) (*bzz.Address, error) {
+				started.Add(1)
+				<-wedge
+				return nil, errors.New("released")
+			},
+		))
+
+		kad, err := kademlia.New(base, ab, mock.NewDiscovery(), p2ps, detector,
+			logger, kademlia.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p2ps.SetPickyNotifier(kad)
+		kad.SetStorageRadius(0)
+
+		if err := kad.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			close(wedge)
+			if err := kad.Close(); err != nil {
+				t.Error(err)
+			}
+			// goleveldb's mpoolDrain is not awaited by Close, so let the fake
+			// clock carry it past its own timeout before the bubble ends.
+			time.Sleep(2 * time.Second)
+			synctest.Wait()
+		}()
+
+		for _, peer := range mineBin(t, base, 0, 20, true) {
+			addOne(t, signer, kad, ab, peer)
+		}
+
+		// Long enough for many passes: each costs connectorTimeout in the
+		// wait plus the loop's own interval.
+		synctest.Wait()
+		time.Sleep(30 * time.Minute)
+		synctest.Wait()
+
+		gaveUp = sink.count()
+		wedged = started.Load()
+	})
+
+	if wedged == 0 {
+		t.Fatal("no dial was ever started, so nothing was wedged and this " +
+			"test proves nothing")
+	}
+	// Two, not one. One proves execution got past the wait once; two proves
+	// the loop came round and reached it again, which is the property.
+	if gaveUp < 2 {
+		t.Fatalf("the manage loop gave up waiting %d times, want at least 2: "+
+			"a single stuck dial still stops the node looking for peers "+
+			"(issue #158)", gaveUp)
 	}
 }

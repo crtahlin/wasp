@@ -20,6 +20,7 @@ type metrics struct {
 	InternalMetricsFlushTime              prometheus.Histogram
 	InternalMetricsFlushTotalErrors       prometheus.Counter
 	TotalBeforeExpireWaits                prometheus.Counter
+	ConnectorTimeouts                     prometheus.Counter
 	TotalInboundConnections               prometheus.Counter
 	TotalInboundDisconnections            prometheus.Counter
 	TotalOutboundConnections              prometheus.Counter
@@ -85,6 +86,14 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "internal_metrics_flush_total_errors",
 			Help:      "Number of total errors occurred during flushing the internal metrics to the state-store.",
+		}),
+		ConnectorTimeouts: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "connector_timeouts",
+			Help: "Times the manage loop gave up waiting for its dials to finish. " +
+				"Non-zero means a dial is wedged: the loop keeps running, but " +
+				"until that dial returns every pass will time out.",
 		}),
 		TotalBeforeExpireWaits: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
