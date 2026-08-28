@@ -31,7 +31,7 @@ pkg/p2p/libp2p.(*Service).Connect     pkg/p2p/libp2p/libp2p.go:1201
 pkg/topology/kademlia.(*Kad).connect  pkg/topology/kademlia/kademlia.go:975
 ```
 
-Seven dial goroutines were stuck there, and kademlia's manage loop was parked in
+Seven dial goroutines were stuck there, and kademlia's manage loop was blocked in
 `sync.WaitGroup.Wait` at `kademlia.go:629` waiting for them. The node held zero
 peers, had made zero dial attempts, and reported `/health` `ok` throughout. Only
 a restart recovered it.
@@ -63,7 +63,7 @@ and non-blocking, a stalled consumer costs log lines and nothing else: dialling
 continues, the manage loop keeps cycling, and the node stays reachable.
 
 If that is wrong, the block is not only in the sink — some other unbounded wait
-on the connect path would keep the loop parked, and the kademlia test below would
+on the connect path would keep the loop blocked, and the kademlia test below would
 still fail after the change. That is a real possibility worth naming rather than
 assuming away, and it is what the end-to-end test is for.
 

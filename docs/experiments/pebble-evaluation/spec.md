@@ -18,7 +18,7 @@ the two — checked, not assumed. There is nothing to upgrade to.
 An unmaintained storage engine underneath a node that stores other people's data
 is the problem; the race is one symptom of it.
 
-## What this spike answers
+## What this evaluation answers
 
 Two questions, and deliberately no others.
 
@@ -36,7 +36,7 @@ The output is a decision with numbers behind it, not a migration.
 - **No on-disk migration.** Existing nodes hold a goleveldb index store. Moving
   them is a separate and larger problem, and nothing here should be read as
   progress on it.
-- **No production wiring.** The spike does not make Pebble selectable by
+- **No production wiring.** This evaluation does not make Pebble selectable by
   operators. A store that has never run on a node has not been evaluated for
   running on a node.
 - **No claim about the reserve at scale.** The benchmarks are synthetic and run
@@ -114,5 +114,5 @@ consensus surface. Nothing here can be observed by a peer.
 
 ## Rollout and rollback
 
-Nothing is rolled out. The spike lands as a package with tests and a results
+Nothing is rolled out. The work lands as a package with tests and a results
 document, wired to nothing. Rollback is deleting the package.
