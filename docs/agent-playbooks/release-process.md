@@ -168,9 +168,29 @@ were never triggered. Two other workflows did run on that same pull request, on 
 `assign-author` even reported a failure, and the merge went through anyway because nothing
 was required at the time.
 
-Do not repeat the diagnosis that GitHub held the checks in `action_required` pending
-approval. It did not happen here, and `gh api .../approve` — previously recommended in
-this playbook — fixes nothing. Check what actually ran before theorising:
+Two different faults look identical from the pull request page: no checks, and
+`mergeStateStatus: BLOCKED`. They need opposite fixes, so find out which one you have
+before doing anything.
+
+**No workflow runs exist at all.** Nothing was triggered. Look at the workflow's triggers
+and path filters. This is what happened on #43: `go.yml` filtered `**/*.md` on
+`pull_request`, and a release pull request changes only `CHANGELOG.md`.
+
+**Runs exist and sit in `action_required`.** They were created and are being held for
+approval, which GitHub does for a pull request opened by an app. This is what happened on
+the `v0.1.0` release pull request (#154), which `Prepare release` opens as
+`github-actions[bot]`. Approving them releases the runs:
+
+```bash
+gh run list --repo crtahlin/wasp --branch <branch> --json databaseId,name,status,conclusion
+gh api -X POST "repos/crtahlin/wasp/actions/runs/<id>/approve"
+```
+
+An earlier version of this playbook said `action_required` was never the cause and that
+`gh api .../approve` fixes nothing. That was correct about #43 and wrong as a general
+rule, and it cost time on #154 by pointing at a path filter that was not there.
+
+Check what actually ran before theorising:
 
 ```bash
 SHA=$(gh pr view <n> --repo crtahlin/wasp --json headRefOid -q .headRefOid)
