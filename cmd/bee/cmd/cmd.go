@@ -537,20 +537,28 @@ func newLogger(cmd *cobra.Command, verbosity string) (log.Logger, error) {
 		log.WithLogMetrics(),
 	)
 
-	// Buffer the sink unless the operator turned it off. Writing straight to
-	// a pipe whose reader has stopped blocks for ever, and because the
-	// peer-connection path logs, that stops the node dialling. See issue #156.
-	buffer := log.DefaultSinkBuffer
-	if cmd.Flags().Changed(optionNameLogSinkBuffer) {
-		buffer, _ = cmd.Flags().GetInt(optionNameLogSinkBuffer)
+	opts := []log.Option{
+		log.WithSink(sink),
+		log.WithVerbosity(vLevel),
 	}
 
-	return log.NewLogger(
-		node.LoggerName,
-		log.WithSink(sink),
-		log.WithSinkBuffer(buffer),
-		log.WithVerbosity(vLevel),
-	).Register(), nil
+	// Only pass WithSinkBuffer when the operator actually set the flag.
+	//
+	// WithSinkBuffer means "buffer this writer whatever it is", so passing it
+	// unconditionally buffers a test's bytes.Buffer as readily as a pipe. That
+	// raced against db_test.go reading the buffer it had installed with
+	// SetOut. Left alone, the package default buffers only an *os.File, which
+	// is what os.Stdout is in production and what a captured test buffer is
+	// not. See issue #156.
+	if cmd.Flags().Changed(optionNameLogSinkBuffer) {
+		buffer, _ := cmd.Flags().GetInt(optionNameLogSinkBuffer)
+		opts = append(opts, log.WithSinkBuffer(buffer))
+		if buffer <= 0 {
+			opts = append(opts, log.WithSynchronousSink())
+		}
+	}
+
+	return log.NewLogger(node.LoggerName, opts...).Register(), nil
 }
 
 func (c *command) CheckUnknownParams(cmd *cobra.Command, args []string) error {
