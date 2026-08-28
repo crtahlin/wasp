@@ -43,6 +43,7 @@ const (
 	optionNameReserveHasConcurrency        = "reserve-has-concurrency"
 	optionNameKademliaSaturationPeers      = "kademlia-saturation-peers"
 	optionNameKademliaOverSaturationPeers  = "kademlia-over-saturation-peers"
+	optionNameLogSinkBuffer                = "log-sink-buffer"
 	optionNamePullSyncMaxChunksPerSecond   = "pullsync-max-chunks-per-second"
 	optionNamePullerMaxChunksPerSecond     = "puller-max-chunks-per-second"
 	optionNamePullSyncRecalcInterval       = "pullsync-recalc-interval"
@@ -362,6 +363,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(optionNameReserveHasConcurrency, 0, "reserve lookups pullsync may have in flight at once; 0 leaves them unbounded, which is the previous behaviour")
 	cmd.Flags().Int(optionNameKademliaSaturationPeers, 0, "connected peers per bin below which the bin is not considered saturated; 0 uses the default of 8. Raising it consumes other nodes' connection budget, not only your own")
 	cmd.Flags().Int(optionNameKademliaOverSaturationPeers, 0, "connected peers per bin above which the bin is over-saturated and further peers are pruned; 0 uses the default of 18. Raising it consumes other nodes' connection budget, not only your own")
+	cmd.Flags().Int(optionNameLogSinkBuffer, log.DefaultSinkBuffer, "log lines that may wait to be written before further lines are dropped; 0 writes synchronously, which lets a stalled log reader block the node")
 	cmd.Flags().String(optionNamePaymentThreshold, "13500000", "threshold in BZZ where you expect to get paid from your peers")
 	cmd.Flags().Int64(optionNamePaymentTolerance, 25, "excess debt above payment threshold in percentages where you disconnect from your peer")
 	cmd.Flags().Int64(optionNamePaymentEarly, 50, "percentage below the peers payment threshold when we initiate settlement")
@@ -535,9 +537,18 @@ func newLogger(cmd *cobra.Command, verbosity string) (log.Logger, error) {
 		log.WithLogMetrics(),
 	)
 
+	// Buffer the sink unless the operator turned it off. Writing straight to
+	// a pipe whose reader has stopped blocks for ever, and because the
+	// peer-connection path logs, that stops the node dialling. See issue #156.
+	buffer := log.DefaultSinkBuffer
+	if cmd.Flags().Changed(optionNameLogSinkBuffer) {
+		buffer, _ = cmd.Flags().GetInt(optionNameLogSinkBuffer)
+	}
+
 	return log.NewLogger(
 		node.LoggerName,
 		log.WithSink(sink),
+		log.WithSinkBuffer(buffer),
 		log.WithVerbosity(vLevel),
 	).Register(), nil
 }

@@ -192,6 +192,15 @@ func (ls *lockWriter) Write(bs []byte) (int, error) {
 
 // Options specifies parameters that affect logger behavior.
 type Options struct {
+	// sinkBuffer is how many rendered lines may wait to be written before
+	// further lines are dropped. Zero or less writes synchronously, which is
+	// the behaviour this package had before issue #156.
+	sinkBuffer int
+	// sinkBufferForced buffers the sink whatever its type. Without it only an
+	// *os.File is buffered, since that is the only writer known to be able to
+	// block on a syscall for ever.
+	sinkBufferForced bool
+
 	sink       io.Writer
 	verbosity  Level
 	levelHooks levelHooks
@@ -201,6 +210,27 @@ type Options struct {
 
 // Option represent Options parameters modifier.
 type Option func(*Options)
+
+// WithSynchronousSink makes writes land on the sink before the log call
+// returns, at the cost of letting a stalled writer block the caller.
+//
+// Needed by callers that must observe output immediately: Example(), which
+// compares exact stdout, and testutil.NewLogger, whose sink is t.Log and which
+// would panic if a background goroutine reached it after the test finished.
+func WithSynchronousSink() Option {
+	return func(opts *Options) { opts.sinkBuffer = 0 }
+}
+
+// WithSinkBuffer sets how many rendered lines may wait to be written before
+// further lines are dropped. Zero or less means write synchronously.
+func WithSinkBuffer(lines int) Option {
+	return func(opts *Options) {
+		opts.sinkBuffer = lines
+		// Explicit means "buffer this one", not "buffer it if it happens to be
+		// a file". A caller naming a capacity has a writer it wants buffered.
+		opts.sinkBufferForced = lines > 0
+	}
+}
 
 // WithSink tells the logger to log to the given sync.
 // The provided sync should be safe for concurrent use,

@@ -92,6 +92,21 @@
 ## worth the cost is a question about the neighbourhood, not about this node,
 ## and it has not been measured. Leave it alone unless you are measuring it.
 # kademlia-over-saturation-peers: 0
+## log lines that may wait to be written before further lines are dropped.
+##
+## Bee writes its log to standard output, which under systemd, Docker or a
+## desktop launcher is a pipe. If whatever reads that pipe stops, the write
+## blocks, and because the code that connects to peers also logs, the node
+## stops dialling and never recovers. It keeps answering its API and reporting
+## healthy while holding zero peers.
+##
+## Buffering means a stalled log reader costs log lines instead. When the
+## reader catches up, a "dropped N log lines" notice is written so the gap is
+## visible.
+##
+## 0 writes synchronously, which is the older behaviour and lets a stalled
+## reader block the node. Only set it if you have a reason.
+# log-sink-buffer: 4096
 ## per-peer inbound chunk rate this node will serve, in chunks per second.
 ##
 ## 0 uses the default of 250. This is a fairness and stability choice, not a

@@ -15,6 +15,9 @@ import (
 func Example() {
 	log.ModifyDefaults(
 		log.WithSink(os.Stdout),
+		// Example compares exact stdout, so the write has to land before the
+		// log call returns.
+		log.WithSynchronousSink(),
 		log.WithVerbosity(log.VerbosityAll),
 	)
 

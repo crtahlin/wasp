@@ -2115,6 +2115,7 @@ func newTestKademliaWithAddrDiscovery(
 	t *testing.T,
 	base swarm.Address,
 	disc *mock.Discovery,
+	logger log.Logger,
 	connCounter, failedConnCounter *int32,
 	kadOpts kademlia.Options,
 ) (swarm.Address, *kademlia.Kad, addressbook.Interface, *mock.Discovery, beeCrypto.Signer) {
@@ -2136,8 +2137,12 @@ func newTestKademliaWithAddrDiscovery(
 		ssMock = mockstate.NewStateStore()                              // state store
 		ab     = addressbook.New(ssMock)                                // address book
 		p2p    = p2pMock(t, ab, signer, connCounter, failedConnCounter) // p2p mock
-		logger = log.Noop                                               // logger
 	)
+	// A test that needs to observe what kademlia logs passes its own logger;
+	// everything else gets the silent one it always had.
+	if logger == nil {
+		logger = log.Noop
+	}
 	kad, err := kademlia.New(base, ab, disc, p2p, detector, logger, kadOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -2153,14 +2158,14 @@ func newTestKademlia(t *testing.T, connCounter, failedConnCounter *int32, kadOpt
 
 	base := swarm.RandAddress(t)
 	disc := mock.NewDiscovery() // mock discovery protocols
-	return newTestKademliaWithAddrDiscovery(t, base, disc, connCounter, failedConnCounter, kadOpts)
+	return newTestKademliaWithAddrDiscovery(t, base, disc, nil, connCounter, failedConnCounter, kadOpts)
 }
 
 func newTestKademliaWithAddr(t *testing.T, base swarm.Address, connCounter, failedConnCounter *int32, kadOpts kademlia.Options) (swarm.Address, *kademlia.Kad, addressbook.Interface, *mock.Discovery, beeCrypto.Signer) {
 	t.Helper()
 
 	disc := mock.NewDiscovery() // mock discovery protocol
-	return newTestKademliaWithAddrDiscovery(t, base, disc, connCounter, failedConnCounter, kadOpts)
+	return newTestKademliaWithAddrDiscovery(t, base, disc, nil, connCounter, failedConnCounter, kadOpts)
 }
 
 func newTestKademliaWithDiscovery(
@@ -2172,7 +2177,7 @@ func newTestKademliaWithDiscovery(
 	t.Helper()
 
 	base := swarm.RandAddress(t)
-	return newTestKademliaWithAddrDiscovery(t, base, disc, connCounter, failedConnCounter, kadOpts)
+	return newTestKademliaWithAddrDiscovery(t, base, disc, nil, connCounter, failedConnCounter, kadOpts)
 }
 
 func p2pMock(t *testing.T, ab addressbook.Interface, signer beeCrypto.Signer, counter, failedCounter *int32) p2p.Service {
@@ -2515,5 +2520,103 @@ func TestAddPeersSkipsSelf(t *testing.T) {
 
 	if foundSelf {
 		t.Fatal("self address should not be in connected peers")
+	}
+}
+
+// stalledLogSink blocks every Write until release is closed.
+//
+// Channel-based on purpose: testing/synctest treats a blocked channel receive
+// as durably blocked, which lets synctest.Wait observe the stall and return
+// rather than the test hanging on it.
+type stalledLogSink struct {
+	release chan struct{}
+}
+
+func (w *stalledLogSink) Write(p []byte) (int, error) {
+	<-w.release
+	return len(p), nil
+}
+
+// TestKademliaDialsWhileLogSinkIsStalled is the property that actually matters
+// in issue #156, at the layer where it hurt.
+//
+// A stock node was found with zero peers and zero dial attempts for 105
+// minutes while reporting healthy. The dial goroutines were blocked writing a
+// log line and the manage loop was blocked in wg.Wait waiting for them, so
+// kademlia never dialled again and never reached its zero-peer bootnode
+// fallback.
+//
+// Logging must not be able to stop a node connecting to peers. This test does
+// not care how that is achieved.
+//
+// On an unfixed tree it does not reach its own assertion: every goroutine in
+// the bubble, including this one, ends up blocked in the sink and synctest
+// reports "deadlock: all goroutines in bubble are blocked". That is the
+// production failure reproduced exactly, and it is instant and deterministic,
+// so it is left as the failure mode rather than contrived into a tidier
+// message. Verified against the unfixed tree before the fix was written.
+func TestKademliaDialsWhileLogSinkIsStalled(t *testing.T) {
+	var attempts int32
+
+	synctest.Test(t, func(t *testing.T) {
+		// Created inside the bubble: channels a bubbled goroutine blocks on
+		// must belong to it.
+		sink := &stalledLogSink{release: make(chan struct{})}
+
+		// Debug verbosity so the connect path actually logs. At a quieter
+		// level the sink is never reached and the test would pass while
+		// proving nothing.
+		logger := log.NewLogger(t.Name(),
+			log.WithSink(sink),
+			// Asked for explicitly: this sink is a fake, and only *os.File is
+			// buffered by default. The production sink is os.Stdout, which is
+			// one.
+			log.WithSinkBuffer(log.DefaultSinkBuffer),
+			log.WithVerbosity(log.VerbosityDebug),
+		)
+
+		var conns int32
+		base, kad, ab, _, signer := newTestKademliaWithAddrDiscovery(
+			t, swarm.RandAddress(t), mock.NewDiscovery(), logger, &conns, nil,
+			kademlia.Options{},
+		)
+		kad.SetStorageRadius(0)
+
+		if err := kad.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			// Release before closing, or Close's own logging blocks too and
+			// the bubble never drains.
+			close(sink.release)
+			if err := kad.Close(); err != nil {
+				t.Error(err)
+			}
+			// Stop the log sink's drain goroutine as well: synctest requires
+			// every bubbled goroutine to have exited before the bubble closes.
+			if err := log.CloseAsyncSinks(); err != nil {
+				t.Error(err)
+			}
+			// goleveldb's mpoolDrain waits up to 1s after the metrics store is
+			// closed before exiting and is not awaited by DB.Close, so advance
+			// the fake clock past it and let it settle before the bubble ends.
+			time.Sleep(2 * time.Second)
+			synctest.Wait()
+		}()
+
+		for _, peer := range mineBin(t, base, 0, 20, true) {
+			addOne(t, signer, kad, ab, peer)
+		}
+
+		// Returns once every bubbled goroutine is durably blocked or finished,
+		// so by here kademlia has either dialled or is stuck.
+		synctest.Wait()
+		attempts = atomic.LoadInt32(&conns)
+	})
+
+	if attempts == 0 {
+		t.Fatal("kademlia made no dial attempts while the log consumer was " +
+			"stalled: a stalled log reader stops the node connecting to peers " +
+			"(issue #156)")
 	}
 }
