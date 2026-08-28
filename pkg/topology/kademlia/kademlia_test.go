@@ -2620,3 +2620,96 @@ func TestKademliaDialsWhileLogSinkIsStalled(t *testing.T) {
 			"(issue #156)")
 	}
 }
+
+// TestManageLoopSurvivesAWedgedDial covers issue #158.
+//
+// The manage loop starts its dials and then waits for all of them. That wait
+// used to have no bound, so a single dial that never returned stopped the loop
+// for good: no more dialling, no zero-peer bootnode fallback, and no gauge
+// updates — which is why a node holding zero peers was seen reporting 88
+// connected.
+//
+// The property is that one wedged dial must not stop the node looking for
+// peers. How long the loop waits does not matter, only that it comes back.
+func TestManageLoopSurvivesAWedgedDial(t *testing.T) {
+	var recovered bool
+
+	synctest.Test(t, func(t *testing.T) {
+		// Never closed while the loop is running: the first dial to reach it
+		// stays there, exactly as a dial blocked writing a log line did.
+		wedge := make(chan struct{})
+
+		detector, err := stabilization.NewDetector(stabilization.Config{
+			PeriodDuration:             1 * time.Second,
+			NumPeriodsForStabilization: 2,
+			StabilizationFactor:        1,
+			WarmupTime:                 0,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var (
+			base   = swarm.RandAddress(t)
+			pk, _  = beeCrypto.GenerateSecp256k1Key()
+			signer = beeCrypto.NewDefaultSigner(pk)
+			ab     = addressbook.New(mockstate.NewStateStore())
+			wedged atomic.Int32
+		)
+
+		p2ps := p2pmock.New(p2pmock.WithConnectFunc(
+			func(ctx context.Context, addrs []ma.Multiaddr) (*bzz.Address, error) {
+				wedged.Add(1)
+				<-wedge
+				return nil, errors.New("released")
+			},
+		))
+
+		kad, err := kademlia.New(base, ab, mock.NewDiscovery(), p2ps, detector, log.Noop,
+			kademlia.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p2ps.SetPickyNotifier(kad)
+		kad.SetStorageRadius(0)
+
+		if err := kad.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			close(wedge)
+			if err := kad.Close(); err != nil {
+				t.Error(err)
+			}
+			// goleveldb's mpoolDrain is not awaited by Close, so let the fake
+			// clock carry it past its own timeout before the bubble ends.
+			time.Sleep(2 * time.Second)
+			synctest.Wait()
+		}()
+
+		for _, peer := range mineBin(t, base, 0, 20, true) {
+			addOne(t, signer, kad, ab, peer)
+		}
+
+		// Every dial that starts is now wedged. Advance well past
+		// connectorTimeout: if the wait were unbounded, the loop would still
+		// be inside it and would never start another.
+		synctest.Wait()
+		before := wedged.Load()
+		time.Sleep(10 * time.Minute)
+		synctest.Wait()
+
+		// More dials were attempted after the first batch wedged, so the loop
+		// came back around rather than staying in the wait.
+		recovered = wedged.Load() > before
+		if before == 0 {
+			t.Fatal("no dial was ever attempted, so nothing was wedged and " +
+				"this test proves nothing")
+		}
+	})
+
+	if !recovered {
+		t.Fatal("the manage loop never attempted another dial after one wedged: " +
+			"a single stuck dial still stops the node looking for peers (issue #158)")
+	}
+}

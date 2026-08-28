@@ -45,6 +45,10 @@ const (
 	// Each underlay address gets up to 15s for connection (in libp2p.Connect).
 	// This budget allows multiple addresses to be tried sequentially per peer.
 	peerConnectionAttemptTimeout = 45 * time.Second // timeout for establishing a new connection with peer.
+	// connectorTimeout bounds how long the manage loop waits for the dials it
+	// started. Generously above peerConnectionAttemptTimeout, so a slow but
+	// working dial is never cut short: only a wedged one trips this.
+	connectorTimeout = 2 * peerConnectionAttemptTimeout
 
 	// lastSeenRefreshInterval is how often the peers we are connected to are
 	// marked as seen in the addressbook. A peer we hold a connection to is
@@ -555,6 +559,45 @@ func (k *Kad) manage() {
 	// The wg makes sure that we wait for all the connection attempts,
 	// spun up by goroutines, to finish before we try the boot-nodes.
 	var wg sync.WaitGroup
+
+	// waitBounded waits for the dials this pass started, but not for ever.
+	//
+	// An unbounded wg.Wait() here is what turned one wedged dial into a node
+	// that never looked for peers again: the loop never came back, so it never
+	// dialled, never reached the zero-peer bootnode fallback below, and never
+	// updated its own gauges — which is why a node holding zero peers was seen
+	// reporting 88 connected. See issue #158.
+	//
+	// The WaitGroup is shared with connectionAttemptsHandler, which outlives
+	// any one pass, so it cannot be scoped per pass. That means a dial stuck
+	// for good leaves the counter above zero and every later pass times out
+	// too. That is the intended outcome: the loop keeps running and the node
+	// keeps working, degraded and visibly so through ConnectorTimeouts.
+	//
+	// One waiter goroutine, reused. Starting a fresh one per pass would leak
+	// one every fifteen seconds for as long as the dial stayed stuck.
+	var (
+		waiterDone    chan struct{}
+		waiterRunning bool
+	)
+	waitBounded := func() bool {
+		if !waiterRunning {
+			waiterDone = make(chan struct{})
+			waiterRunning = true
+			done := waiterDone
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+		}
+		select {
+		case <-waiterDone:
+			waiterRunning = false
+			return true
+		case <-time.After(connectorTimeout):
+			return false
+		}
+	}
 	neighbourhoodChan := make(chan *peerConnInfo)
 	balanceChan := make(chan *peerConnInfo)
 	go k.connectionAttemptsHandler(ctx, &wg, neighbourhoodChan, balanceChan)
@@ -665,7 +708,12 @@ func (k *Kad) manage() {
 			oldDepth := k.neighborhoodDepth()
 			k.connectBalanced(&wg, balanceChan)
 			k.connectNeighbours(&wg, neighbourhoodChan)
-			wg.Wait()
+			if !waitBounded() {
+				k.metrics.ConnectorTimeouts.Inc()
+				k.logger.Warning("kademlia: gave up waiting for dials to finish; "+
+					"continuing so the node keeps looking for peers",
+					"timeout", connectorTimeout)
+			}
 
 			depth := k.neighborhoodDepth()
 
