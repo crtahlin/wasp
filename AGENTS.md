@@ -162,6 +162,19 @@ for i, l in enumerate(sys.stdin.read().split("\n")):
 Use character counting, not `awk`'s `length()`, which counts bytes and so
 falsely flags any line containing an em-dash or other non-ASCII character.
 
+## Writing
+
+Plain language. No project-management jargon: not "park", "parked", "spike",
+"blast radius", "backlog grooming", "circle back", "table it". Say what actually
+happens: "decided not to proceed now, keeping the evidence", "stopped work on
+it", "limits how far the damage reaches".
+
+No English idioms, and no em-dashes. Define any term on first use.
+
+This applies to committed artefacts, not only to conversation. "Park" reached
+merged specs, a results document and issue comments before anyone noticed, and
+it cost a cleanup commit. Check before merging, not after.
+
 ## Where the detail lives
 
 | If you are… | Read |

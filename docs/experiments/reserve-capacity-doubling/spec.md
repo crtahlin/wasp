@@ -170,7 +170,7 @@ reason to keep the cap where it is.
 **None of this can be measured on bench-1 as it stands.** It needs a node with
 doubling greater than 1, which needs the cap raised, and a node whose reserve is
 filling, which bench-1's is not. The measurement is the same prerequisite that
-parked [#23](https://github.com/crtahlin/wasp/issues/23).
+stopped work on [#23](https://github.com/crtahlin/wasp/issues/23).
 
 ## Rollout and rollback
 

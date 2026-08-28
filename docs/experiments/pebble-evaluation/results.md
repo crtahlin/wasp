@@ -3,7 +3,7 @@
 Issue: [#15](https://github.com/crtahlin/wasp/issues/15) ·
 Spec: [`spec.md`](spec.md)
 
-## Verdict: park with the evidence
+## Verdict: do not adopt Pebble now, and keep the evidence
 
 The criterion written before the numbers existed was "passes the conformance
 suite unmodified **and** is not slower on batched writes and prefix iteration".
@@ -12,7 +12,7 @@ The suite passes. Prefix iteration is now measurable for the first time and
 Pebble is **1.19x slower** at it. Batched writes are split: 8.61x faster in one
 benchmark, 1.61x slower in the other.
 
-So the criterion is not met, and the answer is park. Honouring a criterion
+So the criterion is not met, and the answer is not to adopt it now. Honouring a criterion
 written in advance is the entire reason for writing one down, and an 8.61x gain
 on batched writes is exactly the sort of number that would otherwise be used to
 argue past it.
@@ -171,4 +171,4 @@ In order of what it would cost:
 The maintenance argument for Pebble is unchanged and remains the strongest point
 in its favour: goleveldb has had no commit since July 2022 and the race in
 `compTriggerWait` is unfixed at its `HEAD`. That argument does not need a
-benchmark, and it is why this is parked rather than closed.
+benchmark, and it is why this issue stays open rather than being closed.
