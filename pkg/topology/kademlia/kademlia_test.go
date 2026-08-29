@@ -2758,3 +2758,86 @@ func TestManageLoopSurvivesAWedgedDial(t *testing.T) {
 			"(issue #158)", gaveUp)
 	}
 }
+
+// TestCloseIsNotHeldUpByAWedgedDial covers issue #167.
+//
+// Bounding the manage loop's wait for dials (#158) stopped a wedged dial
+// stopping the node, but the wait itself did not watch the shutdown channels.
+// A node whose dial was wedged sat in that wait while stopping, and a restart
+// is exactly what an operator reaches for when a dial is wedged.
+//
+// The property is that the manage loop returns while a dial is still stuck.
+// Close already enforces that: it gives the loop five seconds and reports
+// "kademlia manage loop did not shut down properly" otherwise. So the
+// assertion is simply that Close succeeds, which is the node's own definition
+// of having stopped cleanly rather than a duration this test invents.
+func TestCloseIsNotHeldUpByAWedgedDial(t *testing.T) {
+	var closeErr error
+
+	synctest.Test(t, func(t *testing.T) {
+		wedge := make(chan struct{})
+		defer close(wedge)
+
+		detector, err := stabilization.NewDetector(stabilization.Config{
+			PeriodDuration:             1 * time.Second,
+			NumPeriodsForStabilization: 2,
+			StabilizationFactor:        1,
+			WarmupTime:                 0,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var (
+			base    = swarm.RandAddress(t)
+			pk, _   = beeCrypto.GenerateSecp256k1Key()
+			signer  = beeCrypto.NewDefaultSigner(pk)
+			ab      = addressbook.New(mockstate.NewStateStore())
+			started atomic.Int32
+		)
+
+		p2ps := p2pmock.New(p2pmock.WithConnectFunc(
+			func(ctx context.Context, addrs []ma.Multiaddr) (*bzz.Address, error) {
+				started.Add(1)
+				<-wedge
+				return nil, errors.New("released")
+			},
+		))
+
+		kad, err := kademlia.New(base, ab, mock.NewDiscovery(), p2ps, detector,
+			log.Noop, kademlia.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p2ps.SetPickyNotifier(kad)
+		kad.SetStorageRadius(0)
+
+		if err := kad.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, peer := range mineBin(t, base, 0, 20, true) {
+			addOne(t, signer, kad, ab, peer)
+		}
+
+		// Let the dials start and wedge, and let the loop settle into its
+		// wait. Closing before it gets there would prove nothing.
+		synctest.Wait()
+		if started.Load() == 0 {
+			t.Fatal("no dial was ever started, so nothing was wedged and this " +
+				"test proves nothing")
+		}
+
+		closeErr = kad.Close()
+
+		// goleveldb's mpoolDrain is not awaited by Close, so let the fake
+		// clock carry it past its own timeout before the bubble ends.
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+	})
+
+	if closeErr != nil {
+		t.Fatalf("Close failed with a dial wedged: %v; shutting down still "+
+			"waits for a stuck dial (issue #167)", closeErr)
+	}
+}
