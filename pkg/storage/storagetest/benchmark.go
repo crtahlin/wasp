@@ -479,8 +479,27 @@ func doWriteChunk(b *testing.B, db storage.Putter, eb *entryBlocks) {
 	}
 }
 
+// chunkAddresses builds every address g can produce, once.
+//
+// Reads draw from a fixed generator, so the addresses can be prepared before
+// the timer starts. Building them inside the loop put a hex decode and a
+// 32-byte allocation into every reported ns/op, which on a store answering in
+// the low hundreds of nanoseconds is a fifth of the figure. The benchmark is
+// supposed to be measuring the store.
+func chunkAddresses(b *testing.B, g keyGenerator) []swarm.Address {
+	b.Helper()
+
+	addrs := make([]swarm.Address, g.NKey())
+	for i := range addrs {
+		addrs[i] = chunkAddress(b, g.Key(i))
+	}
+	return addrs
+}
+
 func doReadChunk(b *testing.B, db storage.ChunkStore, g keyGenerator, allowNotFound bool) {
 	b.Helper()
+
+	addrs := chunkAddresses(b, g)
 
 	// Outside the timed loop, and before it, so the benchmark cannot report a
 	// number at all unless it is reading what it claims to read. A chunk store
@@ -489,20 +508,25 @@ func doReadChunk(b *testing.B, db storage.ChunkStore, g keyGenerator, allowNotFo
 	// produces a plausible figure. That is exactly what issue #160 was: the
 	// read benchmarks had been timing misses and calling them hits.
 	if !allowNotFound {
-		if _, err := db.Get(context.Background(), chunkAddress(b, g.Key(0))); err != nil {
+		if _, err := db.Get(context.Background(), addrs[0]); err != nil {
 			b.Fatalf("read benchmark cannot find its own data at key '%s': %v; "+
 				"it would otherwise report the cost of a miss as a hit", string(g.Key(0)), err)
 		}
 	}
 
 	for i := 0; b.Loop(); i++ {
-		key := string(g.Key(i))
-		_, err := db.Get(context.Background(), chunkAddress(b, g.Key(i)))
+		// Modulo, because a measured loop runs for more iterations than the
+		// generator has keys. g.Key already wraps, but the prepared slice has
+		// to be indexed explicitly.
+		_, err := db.Get(context.Background(), addrs[i%len(addrs)])
 		switch {
 		case err == nil:
 		case allowNotFound && errors.Is(err, storage.ErrNotFound):
 		default:
-			b.Fatalf("%d: db get key[%s] error: %s\n", b.N, key, err)
+			// Converted here rather than each iteration: this loop reports in
+			// the low hundreds of nanoseconds, and a string conversion per
+			// iteration would be a measurable share of that.
+			b.Fatalf("%d: db get key[%s] error: %s\n", b.N, string(g.Key(i)), err)
 		}
 	}
 }
