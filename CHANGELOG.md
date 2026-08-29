@@ -4,6 +4,22 @@ Changes this fork makes to upstream Bee. Upstream's own changes are absorbed as
 single `chore(upstream)` entries — see `.upstream-base` for the release this
 build derives from, and upstream's release notes for what it contains.
 
+## [0.1.1](https://github.com/crtahlin/wasp/releases/tag/v0.1.1) - 2026-08-29
+
+
+### Bug fixes
+- make the store benchmarks run and reproduce ([#159](https://github.com/crtahlin/wasp/pull/159))
+- benchmark against disk, not memory ([#161](https://github.com/crtahlin/wasp/pull/161))
+- stop a stalled log consumer deadlocking the node ([#164](https://github.com/crtahlin/wasp/pull/164))
+- bound the manage loop's wait for dials ([#165](https://github.com/crtahlin/wasp/pull/165))
+
+### Documentation
+- stop a stalled log sink deadlocking the node ([#157](https://github.com/crtahlin/wasp/pull/157))
+- say what happens instead of project-management jargon ([#163](https://github.com/crtahlin/wasp/pull/163))
+- tell the two missing-checks faults apart ([#166](https://github.com/crtahlin/wasp/pull/166))
+
+### Miscellaneous
+- drop a stray agent-worktree gitlink from the tree ([#168](https://github.com/crtahlin/wasp/pull/168))
 ## [0.1.0](https://github.com/crtahlin/wasp/releases/tag/v0.1.0) - 2026-08-27
 
 
