@@ -183,6 +183,9 @@ func RunChunkStoreBenchmarkTests(b *testing.B, newStore func(b *testing.B) stora
 	b.Run("ReadRandomMissing", func(b *testing.B) {
 		BenchmarkChunkStoreReadRandomMissing(b, newStore(b))
 	})
+	b.Run("ReadRandomOutOfRange", func(b *testing.B) {
+		BenchmarkChunkStoreReadRandomOutOfRange(b, newStore(b))
+	})
 	b.Run("ReadReverse", func(b *testing.B) {
 		BenchmarkChunkStoreReadReverse(b, newStore(b))
 	})
@@ -249,6 +252,18 @@ func BenchmarkChunkStoreReadRandomMissing(b *testing.B, s storage.ChunkStore) {
 	// is not the one this benchmark is named for.
 	populateChunks(b, s)
 	g := newRoundKeyGenerator(newRandomMissingKeyGenerator(*datasetSize))
+	resetBenchmark(b)
+	doReadChunk(b, s, g, true)
+}
+
+// BenchmarkChunkStoreReadRandomOutOfRange measures the cheaper miss: an
+// address below the whole stored key space, rejected on the key range. See
+// BenchmarkReadRandomOutOfRange and issue #162.
+func BenchmarkChunkStoreReadRandomOutOfRange(b *testing.B, s storage.ChunkStore) {
+	b.Helper()
+
+	populateChunks(b, s)
+	g := newRoundKeyGenerator(newRandomOutOfRangeKeyGenerator(*datasetSize))
 	resetBenchmark(b)
 	doReadChunk(b, s, g, true)
 }

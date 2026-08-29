@@ -841,6 +841,9 @@ func BenchmarkStore(b *testing.B, newStore func(b *testing.B) storage.Store) {
 	b.Run("ReadRandomMissing", func(b *testing.B) {
 		BenchmarkReadRandomMissing(b, newStore(b))
 	})
+	b.Run("ReadRandomOutOfRange", func(b *testing.B) {
+		BenchmarkReadRandomOutOfRange(b, newStore(b))
+	})
 	b.Run("ReadReverse", func(b *testing.B) {
 		BenchmarkReadReverse(b, newStore(b))
 	})
@@ -888,12 +891,29 @@ func BenchmarkReadRandom(b *testing.B, db storage.Store) {
 	doRead(b, db, g, false)
 }
 
+// BenchmarkReadRandomMissing measures looking up keys that were never written
+// but lie between keys that were, which is what a node does when it is asked
+// for a chunk it does not hold.
 func BenchmarkReadRandomMissing(b *testing.B, db storage.Store) {
 	// The store is populated even though every key looked up is absent from
 	// it. A miss in an empty store is a different operation with a different
 	// cost, and it is not the one this benchmark is named for.
 	populate(b, db)
 	g := newRoundKeyGenerator(newRandomMissingKeyGenerator(*datasetSize))
+	resetBenchmark(b)
+	doRead(b, db, g, true)
+}
+
+// BenchmarkReadRandomOutOfRange measures looking up keys below the whole
+// stored key space, which a table rejects on its key range without consulting
+// a bloom filter, an index block or a data block.
+//
+// This is the much cheaper path, and it is what BenchmarkReadRandomMissing
+// used to measure by accident. Both are worth knowing; conflating them
+// produced a 27x engine gap that was very nearly published. See issue #162.
+func BenchmarkReadRandomOutOfRange(b *testing.B, db storage.Store) {
+	populate(b, db)
+	g := newRoundKeyGenerator(newRandomOutOfRangeKeyGenerator(*datasetSize))
 	resetBenchmark(b)
 	doRead(b, db, g, true)
 }

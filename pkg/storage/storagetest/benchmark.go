@@ -46,9 +46,37 @@ var (
 var keyLen = 16
 
 const (
-	hitKeyFormat     = "1%015d"
-	missingKeyFormat = "0%015d"
+	// keyFormat renders a key position as the fixed-width string used as a
+	// key. Every key in a benchmark shares it, so which keys are stored and
+	// which are absent is decided by the position, not by the format.
+	keyFormat = "1%015d"
+
+	// outOfRangeKeyFormat renders keys below the whole stored key space.
+	//
+	// This was what missing keys used to look like, under the name
+	// missingKeyFormat, and it made every missing-key benchmark measure the
+	// wrong thing: a key starting 0 sorts below every stored key, so a table
+	// rejects it on its key range before consulting any bloom filter, index
+	// block or data block. See issue #162. It is kept because rejecting an
+	// out-of-range key is a real and much cheaper path that is worth
+	// measuring, but it is now named for what it is.
+	outOfRangeKeyFormat = "0%015d"
 )
+
+// storedPosition and missingPosition split the key space so that absent keys
+// lie between present ones.
+//
+// A node looking up a chunk it does not hold looks up an address inside its
+// key space: a neighbour's chunk, or something it has evicted. That lookup has
+// to be resolved. Keys below the whole key space are rejected by a range check
+// instead, which is a different and far cheaper operation, and measuring it
+// under the name of a missing-key lookup produced a 27x engine gap that was
+// very nearly published.
+//
+// Stored keys take the even positions, missing keys the odd positions between
+// them, so no missing key can be answered from the key range alone.
+func storedPosition(i int) int  { return 2 * i }
+func missingPosition(i int) int { return 2*i + 1 }
 
 func randomBytes(r *rand.Rand, n int) []byte {
 	b := make([]byte, n)
@@ -116,33 +144,57 @@ func newStartAtEntryGenerator(start int, g entryGenerator) entryGenerator {
 	return &startAtEntryGenerator{start: start, entryGenerator: g}
 }
 
-func newSequentialKeys(size int, start int, keyFormat string) [][]byte {
+// newSequentialKeys builds size keys from consecutive positions, mapped
+// through position. Pass storedPosition for keys the setup writes and
+// missingPosition for keys it deliberately does not.
+func newSequentialKeys(size int, start int, position func(int) int) [][]byte {
 	keys := make([][]byte, size)
 	buffer := make([]byte, size*keyLen)
 	for i := range size {
 		begin, end := i*keyLen, (i+1)*keyLen
 		key := buffer[begin:begin:end]
-		_, _ = fmt.Fprintf(bytes.NewBuffer(key), keyFormat, start+i)
+		_, _ = fmt.Fprintf(bytes.NewBuffer(key), keyFormat, position(start+i))
 		keys[i] = buffer[begin:end:end]
 	}
 	return keys
 }
 
-func newRandomKeys(n int, format string) [][]byte {
+// newRandomKeys builds n keys by drawing positions from [0, bound).
+//
+// bound is separate from n because the missing generator must stay strictly
+// inside the stored range. Stored positions run to 2*(n-1); drawing missing
+// positions from the same bound would put the topmost one at 2*n-1, one above
+// the highest stored key, where it is answered by a range check rather than a
+// lookup. That is the whole defect in issue #162, in miniature.
+func newRandomKeys(n int, bound int, position func(int) int) [][]byte {
 	r := rand.New(rand.NewSource(time.Now().Unix()))
 	keys := make([][]byte, n)
 	buffer := make([]byte, n*keyLen)
 	for i := range n {
 		begin, end := i*keyLen, (i+1)*keyLen
 		key := buffer[begin:begin:end]
-		_, _ = fmt.Fprintf(bytes.NewBuffer(key), format, r.Intn(n))
+		_, _ = fmt.Fprintf(bytes.NewBuffer(key), keyFormat, position(r.Intn(bound)))
 		keys[i] = buffer[begin:end:end]
 	}
 	return keys
 }
 
-func newFullRandomKeys(size int, start int, format string) [][]byte {
-	keys := newSequentialKeys(size, start, format)
+// newOutOfRangeKeys builds keys below the whole stored key space.
+func newOutOfRangeKeys(n int) [][]byte {
+	r := rand.New(rand.NewSource(time.Now().Unix()))
+	keys := make([][]byte, n)
+	buffer := make([]byte, n*keyLen)
+	for i := range n {
+		begin, end := i*keyLen, (i+1)*keyLen
+		key := buffer[begin:begin:end]
+		_, _ = fmt.Fprintf(bytes.NewBuffer(key), outOfRangeKeyFormat, r.Intn(n))
+		keys[i] = buffer[begin:end:end]
+	}
+	return keys
+}
+
+func newFullRandomKeys(size int, start int, position func(int) int) [][]byte {
+	keys := newSequentialKeys(size, start, position)
 	r := rand.New(rand.NewSource(time.Now().Unix()))
 	for i := range size {
 		j := r.Intn(size)
@@ -162,7 +214,7 @@ func newFullRandomEntryGenerator(start, size int) entryGenerator {
 func newSequentialEntryGenerator(start, size int) entryGenerator {
 	r := rand.New(rand.NewSource(time.Now().Unix()))
 	return &pairedEntryGenerator{
-		keyGenerator:         &predefinedKeyGenerator{keys: newSequentialKeys(size, start, hitKeyFormat)},
+		keyGenerator:         &predefinedKeyGenerator{keys: newSequentialKeys(size, start, storedPosition)},
 		randomValueGenerator: makeRandomValueGenerator(r, *compressionRatio, *valueSize),
 	}
 }
@@ -273,19 +325,28 @@ func (g *predefinedKeyGenerator) Key(i int) []byte {
 }
 
 func newRandomKeyGenerator(n int) keyGenerator {
-	return &predefinedKeyGenerator{keys: newRandomKeys(n, hitKeyFormat)}
+	return &predefinedKeyGenerator{keys: newRandomKeys(n, n, storedPosition)}
 }
 
+// newRandomMissingKeyGenerator produces keys that were never written but lie
+// inside the stored key space, so a lookup has to be resolved rather than
+// rejected on the key range.
 func newRandomMissingKeyGenerator(n int) keyGenerator {
-	return &predefinedKeyGenerator{keys: newRandomKeys(n, missingKeyFormat)}
+	return &predefinedKeyGenerator{keys: newRandomKeys(n, maxInt(n-1, 1), missingPosition)}
+}
+
+// newRandomOutOfRangeKeyGenerator produces keys below the whole stored key
+// space, which a table can reject without reading anything.
+func newRandomOutOfRangeKeyGenerator(n int) keyGenerator {
+	return &predefinedKeyGenerator{keys: newOutOfRangeKeys(n)}
 }
 
 func newFullRandomKeyGenerator(start, n int) keyGenerator {
-	return &predefinedKeyGenerator{keys: newFullRandomKeys(n, start, hitKeyFormat)}
+	return &predefinedKeyGenerator{keys: newFullRandomKeys(n, start, storedPosition)}
 }
 
 func newSequentialKeyGenerator(n int) keyGenerator {
-	return &predefinedKeyGenerator{keys: newSequentialKeys(n, 0, hitKeyFormat)}
+	return &predefinedKeyGenerator{keys: newSequentialKeys(n, 0, storedPosition)}
 }
 
 func maxInt(a int, b int) int {
