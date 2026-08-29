@@ -36,3 +36,7 @@ _testmain.go
 # dist/, which is already ignored, but a bare go build is easy to run by
 # accident and a ~70MB blob is easy to sweep in with `git add -A`.
 /bee
+
+# Agent worktrees and local session state. A sync script committed a
+# gitlink from here once; keep the whole directory out.
+.claude/
