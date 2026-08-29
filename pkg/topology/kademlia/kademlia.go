@@ -541,6 +541,23 @@ func (k *Kad) markConnectedPeersSeen() error {
 	return k.addressBook.Seen(peers...)
 }
 
+// connectorWait is why the manage loop stopped waiting for its dials.
+//
+// Three outcomes rather than two, because giving up on a wedged dial and
+// shutting down look identical to a bare timeout but must not be reported the
+// same way. See issues #158 and #167.
+type connectorWait int
+
+const (
+	// dialsFinished means every dial this pass started has returned.
+	dialsFinished connectorWait = iota
+	// dialsTimedOut means at least one dial is still running past
+	// connectorTimeout, so the loop goes round without it.
+	dialsTimedOut
+	// shuttingDown means the node is stopping and the loop should return.
+	shuttingDown
+)
+
 // manage is a forever loop that manages the connection to new peers
 // once they get added or once others leave.
 func (k *Kad) manage() {
@@ -580,7 +597,7 @@ func (k *Kad) manage() {
 		waiterDone    chan struct{}
 		waiterRunning bool
 	)
-	waitBounded := func() bool {
+	waitBounded := func() connectorWait {
 		if !waiterRunning {
 			waiterDone = make(chan struct{})
 			waiterRunning = true
@@ -593,9 +610,13 @@ func (k *Kad) manage() {
 		select {
 		case <-waiterDone:
 			waiterRunning = false
-			return true
+			return dialsFinished
+		case <-k.halt:
+			return shuttingDown
+		case <-k.quit:
+			return shuttingDown
 		case <-time.After(connectorTimeout):
-			return false
+			return dialsTimedOut
 		}
 	}
 	neighbourhoodChan := make(chan *peerConnInfo)
@@ -708,11 +729,20 @@ func (k *Kad) manage() {
 			oldDepth := k.neighborhoodDepth()
 			k.connectBalanced(&wg, balanceChan)
 			k.connectNeighbours(&wg, neighbourhoodChan)
-			if !waitBounded() {
+			switch waitBounded() {
+			case dialsFinished:
+			case dialsTimedOut:
 				k.metrics.ConnectorTimeouts.Inc()
 				k.logger.Warning("kademlia: gave up waiting for dials to finish; "+
 					"continuing so the node keeps looking for peers",
 					"timeout", connectorTimeout)
+			case shuttingDown:
+				// Not a give-up: the node is stopping, so this is neither
+				// worth a warning nor a ConnectorTimeouts increment. Without
+				// this case a wedged dial holds a restart for
+				// connectorTimeout, and a restart is exactly what an operator
+				// reaches for when a node has a wedged dial.
+				return
 			}
 
 			depth := k.neighborhoodDepth()
