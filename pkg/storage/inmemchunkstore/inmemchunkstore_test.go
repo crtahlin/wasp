@@ -7,6 +7,7 @@ package inmemchunkstore_test
 import (
 	"testing"
 
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	inmem "github.com/ethersphere/bee/v2/pkg/storage/inmemchunkstore"
 	"github.com/ethersphere/bee/v2/pkg/storage/storagetest"
 )
@@ -17,6 +18,8 @@ func TestChunkStore(t *testing.T) {
 	storagetest.TestChunkStore(t, inmem.New())
 }
 
-func BenchmarkChunkStore(t *testing.B) {
-	storagetest.RunChunkStoreBenchmarkTests(t, inmem.New())
+func BenchmarkChunkStore(b *testing.B) {
+	storagetest.RunChunkStoreBenchmarkTests(b, func(*testing.B) storage.ChunkStore {
+		return inmem.New()
+	})
 }

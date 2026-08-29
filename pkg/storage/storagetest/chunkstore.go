@@ -158,61 +158,76 @@ func TestChunkStore(t *testing.T, st storage.ChunkStore) {
 	})
 }
 
-func RunChunkStoreBenchmarkTests(b *testing.B, s storage.ChunkStore) {
+// RunChunkStoreBenchmarkTests provides a benchmark suite for a
+// storage.ChunkStore.
+//
+// newStore is a constructor rather than a store, so that each sub-benchmark
+// gets one of its own. Sharing a single store made every number depend on
+// which other sub-benchmarks the -bench selection happened to run first, which
+// is how issue #146 produced a reading that would not reproduce.
+func RunChunkStoreBenchmarkTests(b *testing.B, newStore func(b *testing.B) storage.ChunkStore) {
 	b.Helper()
 
 	b.Run("WriteSequential", func(b *testing.B) {
-		BenchmarkChunkStoreWriteSequential(b, s)
+		BenchmarkChunkStoreWriteSequential(b, newStore(b))
 	})
 	b.Run("WriteRandom", func(b *testing.B) {
-		BenchmarkChunkStoreWriteRandom(b, s)
+		BenchmarkChunkStoreWriteRandom(b, newStore(b))
 	})
 	b.Run("ReadSequential", func(b *testing.B) {
-		BenchmarkChunkStoreReadSequential(b, s)
+		BenchmarkChunkStoreReadSequential(b, newStore(b))
 	})
 	b.Run("ReadRandom", func(b *testing.B) {
-		BenchmarkChunkStoreReadRandom(b, s)
+		BenchmarkChunkStoreReadRandom(b, newStore(b))
 	})
 	b.Run("ReadRandomMissing", func(b *testing.B) {
-		BenchmarkChunkStoreReadRandomMissing(b, s)
+		BenchmarkChunkStoreReadRandomMissing(b, newStore(b))
 	})
 	b.Run("ReadReverse", func(b *testing.B) {
-		BenchmarkChunkStoreReadReverse(b, s)
+		BenchmarkChunkStoreReadReverse(b, newStore(b))
 	})
 	b.Run("ReadRedHot", func(b *testing.B) {
-		BenchmarkChunkStoreReadHot(b, s)
+		BenchmarkChunkStoreReadHot(b, newStore(b))
 	})
 	b.Run("IterateSequential", func(b *testing.B) {
-		BenchmarkChunkStoreIterateSequential(b, s)
+		BenchmarkChunkStoreIterateSequential(b, newStore(b))
 	})
 	b.Run("IterateReverse", func(b *testing.B) {
-		BenchmarkChunkStoreIterateReverse(b, s)
+		BenchmarkChunkStoreIterateReverse(b, newStore(b))
 	})
 	b.Run("DeleteRandom", func(b *testing.B) {
-		BenchmarkChunkStoreDeleteRandom(b, s)
+		BenchmarkChunkStoreDeleteRandom(b, newStore(b))
 	})
 	b.Run("DeleteSequential", func(b *testing.B) {
-		BenchmarkChunkStoreDeleteSequential(b, s)
+		BenchmarkChunkStoreDeleteSequential(b, newStore(b))
 	})
 }
+
+// The generators below are sized from *datasetSize rather than b.N. Before the
+// loop runs, b.N reads as 1, so a generator sized from it holds a single key
+// and every operation would hit the same address.
 
 func BenchmarkChunkStoreWriteSequential(b *testing.B, s storage.Putter) {
 	b.Helper()
 
-	doWriteChunk(b, s, newSequentialEntryGenerator(0, b.N))
+	eb := newEntryBlocks(b, newSequentialEntryGenerator, nil)
+	resetBenchmark(b)
+	doWriteChunk(b, s, eb)
 }
 
 func BenchmarkChunkStoreWriteRandom(b *testing.B, s storage.Putter) {
 	b.Helper()
 
-	doWriteChunk(b, s, newFullRandomEntryGenerator(0, b.N))
+	eb := newEntryBlocks(b, newFullRandomEntryGenerator, nil)
+	resetBenchmark(b)
+	doWriteChunk(b, s, eb)
 }
 
 func BenchmarkChunkStoreReadSequential(b *testing.B, s storage.ChunkStore) {
 	b.Helper()
 
-	g := newSequentialKeyGenerator(b.N)
-	doWriteChunk(b, s, newFullRandomEntryGenerator(0, b.N))
+	populateChunks(b, s)
+	g := newRoundKeyGenerator(newSequentialKeyGenerator(*datasetSize))
 	resetBenchmark(b)
 	doReadChunk(b, s, g, false)
 }
@@ -220,8 +235,8 @@ func BenchmarkChunkStoreReadSequential(b *testing.B, s storage.ChunkStore) {
 func BenchmarkChunkStoreReadRandom(b *testing.B, s storage.ChunkStore) {
 	b.Helper()
 
-	g := newRandomKeyGenerator(b.N)
-	doWriteChunk(b, s, newFullRandomEntryGenerator(0, b.N))
+	populateChunks(b, s)
+	g := newRoundKeyGenerator(newRandomKeyGenerator(*datasetSize))
 	resetBenchmark(b)
 	doReadChunk(b, s, g, false)
 }
@@ -229,7 +244,11 @@ func BenchmarkChunkStoreReadRandom(b *testing.B, s storage.ChunkStore) {
 func BenchmarkChunkStoreReadRandomMissing(b *testing.B, s storage.ChunkStore) {
 	b.Helper()
 
-	g := newRandomMissingKeyGenerator(b.N)
+	// Populated even though every address looked up is absent from it. A miss
+	// in an empty store is a different operation with a different cost, and it
+	// is not the one this benchmark is named for.
+	populateChunks(b, s)
+	g := newRoundKeyGenerator(newRandomMissingKeyGenerator(*datasetSize))
 	resetBenchmark(b)
 	doReadChunk(b, s, g, true)
 }
@@ -237,8 +256,8 @@ func BenchmarkChunkStoreReadRandomMissing(b *testing.B, s storage.ChunkStore) {
 func BenchmarkChunkStoreReadReverse(b *testing.B, db storage.ChunkStore) {
 	b.Helper()
 
-	g := newReversedKeyGenerator(newSequentialKeyGenerator(b.N))
-	doWriteChunk(b, db, newFullRandomEntryGenerator(0, b.N))
+	populateChunks(b, db)
+	g := newRoundKeyGenerator(newReversedKeyGenerator(newSequentialKeyGenerator(*datasetSize)))
 	resetBenchmark(b)
 	doReadChunk(b, db, g, false)
 }
@@ -246,15 +265,18 @@ func BenchmarkChunkStoreReadReverse(b *testing.B, db storage.ChunkStore) {
 func BenchmarkChunkStoreReadHot(b *testing.B, s storage.ChunkStore) {
 	b.Helper()
 
-	k := maxInt((b.N+99)/100, 1)
+	populateChunks(b, s)
+	k := maxInt(*datasetSize/100, 1)
 	g := newRoundKeyGenerator(newRandomKeyGenerator(k))
-	doWriteChunk(b, s, newFullRandomEntryGenerator(0, b.N))
 	resetBenchmark(b)
 	doReadChunk(b, s, g, false)
 }
 
 func BenchmarkChunkStoreIterateSequential(b *testing.B, s storage.ChunkStore) {
 	b.Helper()
+
+	populateChunks(b, s)
+	resetBenchmark(b)
 
 	var counter int
 	_ = s.Iterate(context.Background(), func(c swarm.Chunk) (stop bool, err error) {
@@ -264,6 +286,9 @@ func BenchmarkChunkStoreIterateSequential(b *testing.B, s storage.ChunkStore) {
 		}
 		return false, nil
 	})
+	if counter == 0 {
+		b.Fatal("iterate visited no chunks, so this benchmark timed an empty store")
+	}
 }
 
 func BenchmarkChunkStoreIterateReverse(b *testing.B, s storage.ChunkStore) {
@@ -275,11 +300,19 @@ func BenchmarkChunkStoreIterateReverse(b *testing.B, s storage.ChunkStore) {
 func BenchmarkChunkStoreDeleteRandom(b *testing.B, s storage.ChunkStore) {
 	b.Helper()
 
-	doDeleteChunk(b, s, newFullRandomEntryGenerator(0, b.N))
+	eb := newEntryBlocks(b, newFullRandomEntryGenerator, func(g entryGenerator) {
+		writeChunkDataset(b, s, g)
+	})
+	resetBenchmark(b)
+	doDeleteChunk(b, s, eb)
 }
 
 func BenchmarkChunkStoreDeleteSequential(b *testing.B, s storage.ChunkStore) {
 	b.Helper()
 
-	doDeleteChunk(b, s, newSequentialEntryGenerator(0, b.N))
+	eb := newEntryBlocks(b, newSequentialEntryGenerator, func(g entryGenerator) {
+		writeChunkDataset(b, s, g)
+	})
+	resetBenchmark(b)
+	doDeleteChunk(b, s, eb)
 }

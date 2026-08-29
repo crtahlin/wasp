@@ -402,45 +402,131 @@ func populate(b *testing.B, db storage.Store) {
 }
 
 // chunk
-func doDeleteChunk(b *testing.B, db storage.ChunkStore, g keyGenerator) {
+// doDeleteChunk measures Delete of chunks that are present. eb must have been
+// given a refill that writes each block, or this measures deleting chunks that
+// were never there, which is a different and much cheaper operation.
+func doDeleteChunk(b *testing.B, db storage.ChunkStore, eb *entryBlocks) {
 	b.Helper()
 
-	for i := 0; b.Loop(); i++ {
-		addr := swarm.MustParseHexAddress(string(g.Key(i)))
-		if err := db.Delete(context.Background(), addr); err != nil {
-			b.Fatalf("delete key '%s': %v", string(g.Key(i)), err)
+	for b.Loop() {
+		key, _ := eb.next()
+		if err := db.Delete(context.Background(), chunkAddress(b, key)); err != nil {
+			b.Fatalf("delete key '%s': %v", string(key), err)
 		}
 	}
 }
 
-func doWriteChunk(b *testing.B, db storage.Putter, g entryGenerator) {
+// chunkAddress turns a benchmark key into the address a chunk is stored under.
+//
+// Every path that touches a chunk must build its address this way. They did
+// not: the write path decoded the 16-character key into the first 8 bytes of a
+// 32-byte buffer, while the read and delete paths parsed the same characters
+// into an 8-byte address. No read could ever match a write, so the read
+// benchmarks were timing a miss and reporting it under the name of a hit. See
+// issue #160.
+//
+// The decoded bytes go at the front, leaving the tail zero, because a chunk
+// store partitions on the address prefix. Right-aligning would give every key
+// in the dataset the same 24-byte prefix and put the whole dataset in one bin,
+// which is not what a node's store looks like.
+func chunkAddress(b *testing.B, key []byte) swarm.Address {
 	b.Helper()
 
-	for i := 0; b.Loop(); i++ {
-		buf := make([]byte, swarm.HashSize)
-		if _, err := hex.Decode(buf, g.Key(i)); err != nil {
-			b.Fatalf("decode value: %v", err)
-		}
-		addr := swarm.NewAddress(buf)
-		chunk := swarm.NewChunk(addr, g.Value(i)).WithStamp(postagetesting.MustNewStamp())
+	buf := make([]byte, swarm.HashSize)
+	if _, err := hex.Decode(buf, key); err != nil {
+		b.Fatalf("decode key %q: %v", string(key), err)
+	}
+	return swarm.NewAddress(buf)
+}
+
+// writeChunkDataset writes g's whole dataset. It does not call b.Loop, so it
+// is safe to use as the setup phase of a benchmark that measures something
+// else. Calling b.Loop twice in one benchmark panics.
+func writeChunkDataset(b *testing.B, db storage.Putter, g entryGenerator) {
+	b.Helper()
+
+	for i := range g.NKey() {
+		chunk := swarm.NewChunk(chunkAddress(b, g.Key(i)), g.Value(i)).
+			WithStamp(postagetesting.MustNewStamp())
 		if err := db.Put(context.Background(), chunk); err != nil {
 			b.Fatalf("write key '%s': %v", string(g.Key(i)), err)
 		}
 	}
 }
 
+// populateChunks writes the fixed dataset the chunk read, iterate and delete
+// benchmarks work against. The chunk counterpart of populate.
+func populateChunks(b *testing.B, db storage.Putter) {
+	b.Helper()
+
+	writeChunkDataset(b, db, newFullRandomEntryGenerator(0, *datasetSize))
+}
+
+// doWriteChunk measures Put. It draws from rolling blocks rather than one
+// fixed dataset: a measured loop can run for many more iterations than any
+// dataset prepared before it, and reusing the same keys would make this an
+// overwrite benchmark under the name of a write benchmark.
+func doWriteChunk(b *testing.B, db storage.Putter, eb *entryBlocks) {
+	b.Helper()
+
+	for b.Loop() {
+		key, value := eb.next()
+		chunk := swarm.NewChunk(chunkAddress(b, key), value).
+			WithStamp(postagetesting.MustNewStamp())
+		if err := db.Put(context.Background(), chunk); err != nil {
+			b.Fatalf("write key '%s': %v", string(key), err)
+		}
+	}
+}
+
+// chunkAddresses builds every address g can produce, once.
+//
+// Reads draw from a fixed generator, so the addresses can be prepared before
+// the timer starts. Building them inside the loop put a hex decode and a
+// 32-byte allocation into every reported ns/op, which on a store answering in
+// the low hundreds of nanoseconds is a fifth of the figure. The benchmark is
+// supposed to be measuring the store.
+func chunkAddresses(b *testing.B, g keyGenerator) []swarm.Address {
+	b.Helper()
+
+	addrs := make([]swarm.Address, g.NKey())
+	for i := range addrs {
+		addrs[i] = chunkAddress(b, g.Key(i))
+	}
+	return addrs
+}
+
 func doReadChunk(b *testing.B, db storage.ChunkStore, g keyGenerator, allowNotFound bool) {
 	b.Helper()
 
+	addrs := chunkAddresses(b, g)
+
+	// Outside the timed loop, and before it, so the benchmark cannot report a
+	// number at all unless it is reading what it claims to read. A chunk store
+	// answering not-found is a legitimate answer rather than an error, so
+	// without this a benchmark that looks up addresses nobody stored still
+	// produces a plausible figure. That is exactly what issue #160 was: the
+	// read benchmarks had been timing misses and calling them hits.
+	if !allowNotFound {
+		if _, err := db.Get(context.Background(), addrs[0]); err != nil {
+			b.Fatalf("read benchmark cannot find its own data at key '%s': %v; "+
+				"it would otherwise report the cost of a miss as a hit", string(g.Key(0)), err)
+		}
+	}
+
 	for i := 0; b.Loop(); i++ {
-		key := string(g.Key(i))
-		addr := swarm.MustParseHexAddress(key)
-		_, err := db.Get(context.Background(), addr)
+		// Modulo, because a measured loop runs for more iterations than the
+		// generator has keys. g.Key already wraps, but the prepared slice has
+		// to be indexed explicitly.
+		_, err := db.Get(context.Background(), addrs[i%len(addrs)])
 		switch {
 		case err == nil:
 		case allowNotFound && errors.Is(err, storage.ErrNotFound):
 		default:
-			b.Fatalf("%d: db get key[%s] error: %s\n", b.N, key, err)
+			// Converted here rather than each iteration: this loop reports in
+			// the low hundreds of nanoseconds, and a string conversion per
+			// iteration would be a measurable share of that.
+			b.Fatalf("%d: db get key[%s] error: %s\n", b.N, string(g.Key(i)), err)
 		}
 	}
 }
