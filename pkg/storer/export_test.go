@@ -70,3 +70,15 @@ func (db *DB) ReserveHasLimit() int { return cap(db.reserveHasLimiter) }
 func (db *DB) ReserveScanDuration() *prometheus.HistogramVec {
 	return db.metrics.ReserveScanDuration
 }
+
+// Write-pause edge classification, exposed so its once-per-transition
+// behaviour can be tested without driving a real store to its pause trigger.
+type WritePauseChange = writePauseChange
+
+const (
+	WritePauseUnchanged = writePauseUnchanged
+	WritePauseEntered   = writePauseEntered
+	WritePauseLeft      = writePauseLeft
+)
+
+func WritePauseEdge(prev, cur bool) WritePauseChange { return writePauseEdge(prev, cur) }
