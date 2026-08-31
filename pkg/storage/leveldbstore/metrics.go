@@ -126,3 +126,14 @@ func (c *statsCollector) Collect(ch chan<- prometheus.Metric) {
 func (s *Store) Metrics() []prometheus.Collector {
 	return []prometheus.Collector{newStatsCollector(s.db)}
 }
+
+// Level0Files reports the number of level-0 SST files, the value that gates
+// writes. Both store engines expose this so the storer can watch write-stall
+// risk without knowing which engine it holds. See issue #185.
+func (s *Store) Level0Files() int {
+	stats := new(leveldb.DBStats)
+	if err := s.db.Stats(stats); err != nil || len(stats.LevelTablesCounts) == 0 {
+		return 0
+	}
+	return stats.LevelTablesCounts[0]
+}
