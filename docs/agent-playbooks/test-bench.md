@@ -204,6 +204,57 @@ bench nodes should be unstaked, or staked only with an amount that is acceptable
 to lose. This is not a theoretical caution — it is the main way an experiment
 here could cost money.
 
+## When the index store stops accepting writes
+
+A node can enter a state where the LevelDB index store stops accepting writes and
+does not come back. It is not a crash: the process stays up, `/health` can still
+answer, but sync makes no progress. Issue #176.
+
+**How to recognise it.** The node logs, at warning level:
+
+```
+index store has stopped accepting writes: level 0 has too many files and
+compaction is behind; the node will not make progress until compaction catches up
+```
+
+with a `level_0_files` field. The Prometheus gauge `bee_leveldb_write_paused`
+reads 1, and `bee_leveldb_level_tables{level="0"}` sits at or above the pause
+trigger (12 by default).
+
+**Why it does not recover on its own.** goleveldb blocks the writer when level 0
+reaches `WriteL0PauseTrigger` and waits for compaction, with no timeout. The
+blocked writer holds goleveldb's write lock, and the only call that could force
+compaction to drain level 0 needs that same lock, so it queues behind the stuck
+writer. Nothing in the running process can break the cycle.
+
+**The fix is a restart.** There is no in-process recovery. Restarting reopens the
+store and lets compaction run from a clean state. Be aware that `Store.Close`
+itself writes (#115), so a store already at the pause trigger can make even a
+clean shutdown slow; give it time before killing harder.
+
+**Reaching it is a slow-disk-under-contention concern, not a fast-disk one.** On
+fast NVMe with the machine otherwise idle, the `compaction-l0-trigger` experiment
+needed roughly 2 GB/s of sustained ingest to get here, about 16x a saturated
+1 Gbit/s link — effectively unreachable, and well above the puller's default
+`puller-max-chunks-per-second` (1000/s, roughly 4 MB/s). It becomes reachable when
+compaction throughput collapses: a slow disk, sharky chunk writes competing for
+the same device, or reserve sampling reads stealing seeks (that last is #23). On
+storage roughly 20x slower it can arrive around 24,000 writes/sec, inside line
+rate.
+
+**If a node on slow storage keeps hitting it**, two levers, both cost-both-ways:
+
+- Keep `puller-max-chunks-per-second` conservative, so ingest cannot outrun
+  compaction. The cost is slower reserve filling.
+- Widen the gap between the slowdown and pause triggers with
+  `--db-write-pause-trigger` (and `--db-write-slowdown-trigger`), so goleveldb's
+  own per-write slowdown has more room to work before the hard stop. The default
+  is `8/8/12` (compaction/slowdown/pause), which starts compaction exactly when
+  writes begin slowing and leaves only four files of headroom. Raising the pause
+  trigger buys burst headroom, but more level-0 files means more read amplification
+  on the sampling path. Any non-default value should be measured on the target
+  hardware; on fast disk it changes nothing, so do not set it there.
+
 ## When the node crashes, read the crashing goroutine first
 
 Go dumps every goroutine on a fatal error, so a naive grep over the dump finds

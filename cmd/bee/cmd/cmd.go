@@ -29,6 +29,9 @@ const (
 	optionNameDBBlockCacheCapacity         = "db-block-cache-capacity"
 	optionNameDBWriteBufferSize            = "db-write-buffer-size"
 	optionNameDBDisableSeeksCompaction     = "db-disable-seeks-compaction"
+	optionNameDBCompactionL0Trigger        = "db-compaction-l0-trigger"
+	optionNameDBWriteSlowdownTrigger       = "db-write-slowdown-trigger"
+	optionNameDBWritePauseTrigger          = "db-write-pause-trigger"
 	optionNamePassword                     = "password"
 	optionNamePasswordFile                 = "password-file"
 	optionNameAPIAddr                      = "api-addr"
@@ -330,6 +333,9 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Uint64(optionNameDBBlockCacheCapacity, 32*1024*1024, "size of block cache of the database in bytes")
 	cmd.Flags().Uint64(optionNameDBWriteBufferSize, 32*1024*1024, "size of the database write buffer in bytes")
 	cmd.Flags().Bool(optionNameDBDisableSeeksCompaction, true, "disables db compactions triggered by seeks")
+	cmd.Flags().Int(optionNameDBCompactionL0Trigger, 8, "level-0 SST files at which the index store starts compacting; lower compacts sooner and more often (more write amplification), higher lets level 0 grow (more read amplification on the sampling path); 0 means the goleveldb default of 4")
+	cmd.Flags().Int(optionNameDBWriteSlowdownTrigger, 8, "level-0 SST files at which the index store slows writes by 1ms each to let compaction catch up; 0 means the goleveldb default of 8")
+	cmd.Flags().Int(optionNameDBWritePauseTrigger, 12, "level-0 SST files at which the index store blocks writes until compaction catches up; raising it buys burst headroom before a stall but allows more level-0 files and so more read amplification, lowering it stalls sooner; 0 means the goleveldb default of 12")
 	cmd.Flags().String(optionNamePassword, "", "password for decrypting keys")
 	cmd.Flags().String(optionNamePasswordFile, "", "path to a file that contains password for decrypting keys")
 	cmd.Flags().String(optionNameAPIAddr, "127.0.0.1:1633", "HTTP API listen address")
