@@ -362,20 +362,44 @@ func maxInt(a int, b int) int {
 // far more than the dataset holds, so g must be one that wraps: pass it
 // through newRoundKeyGenerator, outermost, or the reads run off the end of the
 // key set and fall back on its first key for ever after.
+//
+// The per-key lookup id is a string, and building it from the []byte key with
+// string(...) inside the loop put a conversion and an allocation into every
+// reported ns/op. On an in-memory-ish store that was most of the number: it
+// was charged to the engine, and it was charged unequally, since it is a fixed
+// per-iteration cost that compresses the ratio between a fast engine and a slow
+// one. See issue #173. The ids are built once here, before the timer, and one
+// item is reused: Get looks the entry up by item.Id and then unmarshals into
+// the same item, so resetting Id each iteration is all that is needed.
 func doRead(b *testing.B, db storage.Store, g keyGenerator, allowNotFound bool) {
 	b.Helper()
 
-	for i := 0; b.Loop(); i++ {
-		key := g.Key(i)
-		item := &obj1{
-			Id: string(key),
+	ids := make([]string, g.NKey())
+	for i := range ids {
+		ids[i] = string(g.Key(i))
+	}
+
+	// Before the timed loop, so a hit benchmark cannot report a number unless
+	// it is really reading what it claims to. A store answering not-found is a
+	// valid answer rather than an error, so without this a benchmark looking up
+	// absent keys still produces a plausible figure. Closes the same class as
+	// issue #160.
+	if !allowNotFound {
+		if err := db.Get(&obj1{Id: ids[0]}); err != nil {
+			b.Fatalf("read benchmark cannot find its own data at key '%s': %v; "+
+				"it would otherwise report the cost of a miss as a hit", ids[0], err)
 		}
+	}
+
+	item := new(obj1)
+	for i := 0; b.Loop(); i++ {
+		item.Id = ids[i%len(ids)]
 		err := db.Get(item)
 		switch {
 		case err == nil:
 		case allowNotFound && errors.Is(err, storage.ErrNotFound):
 		default:
-			b.Fatalf("%d: db get key[%s] error: %s\n", b.N, key, err)
+			b.Fatalf("%d: db get key[%s] error: %s\n", b.N, item.Id, err)
 		}
 	}
 }
