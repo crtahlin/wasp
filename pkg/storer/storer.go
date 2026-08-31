@@ -252,9 +252,25 @@ const (
 	defaultBlockCacheCapacity     = uint64(32 * 1024 * 1024)
 	defaultWriteBufferSize        = uint64(32 * 1024 * 1024)
 	defaultDisableSeeksCompaction = false
-	defaultCacheCapacity          = uint64(1_000_000)
-	defaultBgCacheWorkers         = 32
-	DefaultReserveCapacity        = 1 << 22 // 4194304 chunks
+
+	// The three goleveldb level-0 triggers for the index store, made explicit
+	// so they can be configured. These are the values the store has always run
+	// with: CompactionL0Trigger was set to 8 in code, and the other two were
+	// left at goleveldb's own defaults (8 and 12). goleveldb reads a trigger of
+	// 0 as "use my default", so these must be the literal current values rather
+	// than 0, or the defaults would silently shift.
+	//
+	// A node stalls when level 0 reaches the pause trigger and compaction is
+	// behind, with no in-process recovery (issue #176). Widening the gap
+	// between slowdown and pause gives goleveldb's own per-write slowdown more
+	// room to work before the hard stop; that is a slow-disk concern and is why
+	// these are exposed, not changed. See docs/agent-playbooks/test-bench.md.
+	defaultCompactionL0Trigger  = 8
+	defaultWriteSlowdownTrigger = 8
+	defaultWritePauseTrigger    = 12
+	defaultCacheCapacity        = uint64(1_000_000)
+	defaultBgCacheWorkers       = 32
+	DefaultReserveCapacity      = 1 << 22 // 4194304 chunks
 
 	indexPath  = "indexstore"
 	sharkyPath = "sharky"
@@ -274,19 +290,29 @@ func initStore(basePath string, opts *Options) (*leveldbstore.Store, error) {
 			return nil, err
 		}
 	}
-	store, _, err := leveldbstore.New(path.Join(basePath, "indexstore"), &opt.Options{
-		OpenFilesCacheCapacity: int(opts.LdbOpenFilesLimit),
-		BlockCacheCapacity:     int(opts.LdbBlockCacheCapacity),
-		WriteBuffer:            int(opts.LdbWriteBufferSize),
-		DisableSeeksCompaction: opts.LdbDisableSeeksCompaction,
-		CompactionL0Trigger:    8,
-		Filter:                 filter.NewBloomFilter(64),
-	})
+	store, _, err := leveldbstore.New(path.Join(basePath, "indexstore"), indexStoreOptions(opts))
 	if err != nil {
 		return nil, fmt.Errorf("failed creating levelDB index store: %w", err)
 	}
 
 	return store, nil
+}
+
+// indexStoreOptions builds the goleveldb options for the index store from the
+// storer Options. Kept separate from initStore so the mapping, including the
+// level-0 triggers and goleveldb's "0 means default" quirk, is unit testable
+// without opening a real database.
+func indexStoreOptions(opts *Options) *opt.Options {
+	return &opt.Options{
+		OpenFilesCacheCapacity: int(opts.LdbOpenFilesLimit),
+		BlockCacheCapacity:     int(opts.LdbBlockCacheCapacity),
+		WriteBuffer:            int(opts.LdbWriteBufferSize),
+		DisableSeeksCompaction: opts.LdbDisableSeeksCompaction,
+		CompactionL0Trigger:    opts.LdbCompactionL0Trigger,
+		WriteL0SlowdownTrigger: opts.LdbWriteSlowdownTrigger,
+		WriteL0PauseTrigger:    opts.LdbWritePauseTrigger,
+		Filter:                 filter.NewBloomFilter(64),
+	}
 }
 
 func initDiskRepository(
@@ -415,8 +441,14 @@ type Options struct {
 	LdbBlockCacheCapacity     uint64
 	LdbWriteBufferSize        uint64
 	LdbDisableSeeksCompaction bool
-	Logger                    log.Logger
-	Tracer                    *tracing.Tracer
+	// The three goleveldb level-0 triggers for the index store, in files. A
+	// value of 0 means goleveldb's own default, which is not the same as the
+	// wasp default; see the default* constants and issue #176.
+	LdbCompactionL0Trigger  int
+	LdbWriteSlowdownTrigger int
+	LdbWritePauseTrigger    int
+	Logger                  log.Logger
+	Tracer                  *tracing.Tracer
 
 	Address           swarm.Address
 	StartupStabilizer stabilization.Subscriber
@@ -463,6 +495,9 @@ func defaultOptions() *Options {
 		LdbBlockCacheCapacity:     defaultBlockCacheCapacity,
 		LdbWriteBufferSize:        defaultWriteBufferSize,
 		LdbDisableSeeksCompaction: defaultDisableSeeksCompaction,
+		LdbCompactionL0Trigger:    defaultCompactionL0Trigger,
+		LdbWriteSlowdownTrigger:   defaultWriteSlowdownTrigger,
+		LdbWritePauseTrigger:      defaultWritePauseTrigger,
 		CacheCapacity:             defaultCacheCapacity,
 		Logger:                    log.Noop,
 		ReserveCapacity:           DefaultReserveCapacity,

@@ -161,6 +161,9 @@ type Options struct {
 	DBDisableSeeksCompaction      bool
 	DBOpenFilesLimit              uint64
 	DBWriteBufferSize             uint64
+	DBCompactionL0Trigger         int
+	DBWriteSlowdownTrigger        int
+	DBWritePauseTrigger           int
 	EnableStorageIncentives       bool
 	EnableWS                      bool
 	AutoTLSDomain                 string
@@ -879,6 +882,9 @@ func NewBee(
 		LdbBlockCacheCapacity:     o.DBBlockCacheCapacity,
 		LdbWriteBufferSize:        o.DBWriteBufferSize,
 		LdbDisableSeeksCompaction: o.DBDisableSeeksCompaction,
+		LdbCompactionL0Trigger:    o.DBCompactionL0Trigger,
+		LdbWriteSlowdownTrigger:   o.DBWriteSlowdownTrigger,
+		LdbWritePauseTrigger:      o.DBWritePauseTrigger,
 		Batchstore:                batchStore,
 		StateStore:                stateStore,
 		RadiusSetter:              kad,
