@@ -311,6 +311,15 @@ func initDiskRepository(
 			ticker := time.NewTicker(15 * time.Second)
 			defer ticker.Stop()
 
+			// Whether the store was paused at the previous tick, so the state
+			// is logged once on each edge rather than every tick. A write pause
+			// is a node-down condition: goleveldb has stopped accepting writes
+			// because level 0 has reached its pause trigger and compaction is
+			// behind, and it does not recover on its own (see issue #176). The
+			// only prior signal was a Prometheus gauge, which helps nobody who
+			// is not already scraping and alerting on it.
+			wasPaused := false
+
 			for {
 				select {
 				case <-ctx.Done():
@@ -323,6 +332,23 @@ func initDiskRepository(
 					case err != nil:
 						logger.Error(err, "snapshot levelDB stats")
 					default:
+						switch writePauseEdge(wasPaused, stats.WritePaused) {
+						case writePauseEntered:
+							level0 := 0
+							if len(stats.LevelTablesCounts) > 0 {
+								level0 = stats.LevelTablesCounts[0]
+							}
+							logger.Warning("index store has stopped accepting writes: "+
+								"level 0 has too many files and compaction is behind; "+
+								"the node will not make progress until compaction catches up",
+								"level_0_files", level0,
+								"write_delays", stats.WriteDelayCount,
+								"write_delay_seconds", stats.WriteDelayDuration.Seconds())
+						case writePauseLeft:
+							logger.Warning("index store is accepting writes again")
+						}
+						wasPaused = stats.WritePaused
+
 						ldbStats.WithLabelValues("write_delay_count").Observe(float64(stats.WriteDelayCount))
 						ldbStats.WithLabelValues("write_delay_duration").Observe(stats.WriteDelayDuration.Seconds())
 						ldbStats.WithLabelValues("alive_snapshots").Observe(float64(stats.AliveSnapshots))
@@ -542,6 +568,28 @@ func acquireSlot(limiter chan struct{}, quit chan struct{}) (func(), error) {
 
 // New returns a newly constructed DB object which implements all the above
 // component stores.
+// writePauseEdge classifies the change in the index store's write-pause state
+// between two consecutive observations, so the state is logged once on each
+// edge rather than on every tick it stays the same.
+type writePauseChange int
+
+const (
+	writePauseUnchanged writePauseChange = iota
+	writePauseEntered
+	writePauseLeft
+)
+
+func writePauseEdge(prev, cur bool) writePauseChange {
+	switch {
+	case cur && !prev:
+		return writePauseEntered
+	case !cur && prev:
+		return writePauseLeft
+	default:
+		return writePauseUnchanged
+	}
+}
+
 func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 	var (
 		err          error
