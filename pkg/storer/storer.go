@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/stabilization"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/transaction"
 
+	"github.com/cockroachdb/pebble"
 	m "github.com/ethersphere/bee/v2/pkg/metrics"
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	"github.com/ethersphere/bee/v2/pkg/pusher"
@@ -31,6 +33,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storage/leveldbstore"
 	"github.com/ethersphere/bee/v2/pkg/storage/migration"
+	"github.com/ethersphere/bee/v2/pkg/storage/pebblestore"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/cache"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/events"
 	pinstore "github.com/ethersphere/bee/v2/pkg/storer/internal/pinning"
@@ -281,21 +284,109 @@ const (
 // reading and hashing were separated, so the default changes nothing.
 func DefaultSamplerReadConcurrency() int { return max(4, runtime.NumCPU()) }
 
-func initStore(basePath string, opts *Options) (*leveldbstore.Store, error) {
-	ldbBasePath := path.Join(basePath, indexPath)
+// Storage-engine names for the index store. goleveldb is the default and only
+// blessed engine; Pebble is opt-in for the storage-engine A/B (issue #185).
+const (
+	EngineLevelDB = "leveldb"
+	EnginePebble  = "pebble"
+)
 
-	if _, err := os.Stat(ldbBasePath); os.IsNotExist(err) {
-		err := os.MkdirAll(ldbBasePath, 0o700)
+func initStore(basePath string, opts *Options) (storage.BatchStore, error) {
+	indexDir := path.Join(basePath, indexPath)
+
+	if _, err := os.Stat(indexDir); os.IsNotExist(err) {
+		err := os.MkdirAll(indexDir, 0o700)
 		if err != nil {
 			return nil, err
 		}
 	}
-	store, _, err := leveldbstore.New(path.Join(basePath, "indexstore"), indexStoreOptions(opts))
+
+	engine, err := resolveEngine(indexDir, opts.StorageEngine)
 	if err != nil {
-		return nil, fmt.Errorf("failed creating levelDB index store: %w", err)
+		return nil, err
 	}
 
-	return store, nil
+	switch engine {
+	case EngineLevelDB:
+		store, _, err := leveldbstore.New(indexDir, indexStoreOptions(opts))
+		if err != nil {
+			return nil, fmt.Errorf("failed creating leveldb index store: %w", err)
+		}
+		return store, nil
+	case EnginePebble:
+		store, err := pebblestore.New(indexDir, pebbleIndexStoreOptions(opts))
+		if err != nil {
+			return nil, fmt.Errorf("failed creating pebble index store: %w", err)
+		}
+		return store, nil
+	default:
+		return nil, fmt.Errorf("unknown storage engine %q: use %q or %q",
+			engine, EngineLevelDB, EnginePebble)
+	}
+}
+
+// resolveEngine decides which engine to open the index store with, and binds a
+// fresh directory to the engine that creates it.
+//
+// goleveldb and Pebble write mutually unreadable on-disk formats, so the engine
+// is a property of the data directory, recorded in a marker file. requested is
+// the operator's --storage-engine value, or empty when they did not set one:
+//
+//   - A directory with a marker uses that engine. An empty request accepts it,
+//     so `bee db …` and a restart need no flag; a request that names a different
+//     engine is refused, because it cannot be honoured without corruption.
+//   - A directory with no marker is fresh (or a goleveldb store from before
+//     engine selection). It binds to the requested engine, defaulting to
+//     goleveldb, and the marker is written. An unmarked directory that already
+//     holds data is goleveldb and may not be bound to Pebble.
+//
+// See issue #185.
+func resolveEngine(indexDir, requested string) (string, error) {
+	markerPath := filepath.Join(indexDir, ".storage-engine")
+
+	existing, err := os.ReadFile(markerPath)
+	switch {
+	case err == nil:
+		marker := strings.TrimSpace(string(existing))
+		if requested != "" && requested != marker {
+			return "", fmt.Errorf("index store at %s was created with the %q engine; "+
+				"refusing to open it with %q because the on-disk formats are not "+
+				"interchangeable — use a fresh data directory to switch engines",
+				indexDir, marker, requested)
+		}
+		return marker, nil
+	case !errors.Is(err, os.ErrNotExist):
+		return "", fmt.Errorf("read storage-engine marker: %w", err)
+	}
+
+	engine := requested
+	if engine == "" {
+		engine = EngineLevelDB
+	}
+	if engine != EngineLevelDB && indexDirHasData(indexDir) {
+		return "", fmt.Errorf("index store at %s holds data but has no engine marker, "+
+			"so it is a goleveldb store from before engine selection; refusing to "+
+			"open it with %q — use a fresh data directory", indexDir, engine)
+	}
+	if err := os.WriteFile(markerPath, []byte(engine+"\n"), 0o644); err != nil {
+		return "", fmt.Errorf("write storage-engine marker: %w", err)
+	}
+	return engine, nil
+}
+
+// indexDirHasData reports whether the index directory already holds store files,
+// ignoring the marker itself.
+func indexDirHasData(indexDir string) bool {
+	entries, err := os.ReadDir(indexDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() != ".storage-engine" {
+			return true
+		}
+	}
+	return false
 }
 
 // indexStoreOptions builds the goleveldb options for the index store from the
@@ -313,6 +404,36 @@ func indexStoreOptions(opts *Options) *opt.Options {
 		WriteL0PauseTrigger:    opts.LdbWritePauseTrigger,
 		Filter:                 filter.NewBloomFilter(64),
 	}
+}
+
+// pebbleIndexStoreOptions maps the same db-* tuning knobs onto pebble.Options,
+// so an operator's configuration applies whichever engine is selected. The
+// mapping is deliberately partial: goleveldb's slowdown trigger has no clean
+// analogue in Pebble's stall model, so it is left to Pebble's default rather
+// than forced onto a field that means something different. A zero knob keeps the
+// engine's own default. See docs/experiments/storage-engine-eval/spec.md.
+//
+// The block cache is created here and handed to Pebble; its one retained
+// reference is released when the process exits, which for a store opened once
+// per node lifetime is not worth threading a closer through for.
+func pebbleIndexStoreOptions(opts *Options) *pebble.Options {
+	o := pebblestore.DefaultOptions()
+	if opts.LdbBlockCacheCapacity > 0 {
+		o.Cache = pebble.NewCache(int64(opts.LdbBlockCacheCapacity))
+	}
+	if opts.LdbWriteBufferSize > 0 {
+		o.MemTableSize = opts.LdbWriteBufferSize
+	}
+	if opts.LdbCompactionL0Trigger > 0 {
+		o.L0CompactionThreshold = opts.LdbCompactionL0Trigger
+	}
+	if opts.LdbWritePauseTrigger > 0 {
+		o.L0StopWritesThreshold = opts.LdbWritePauseTrigger
+	}
+	if opts.LdbOpenFilesLimit > 0 {
+		o.MaxOpenFiles = int(opts.LdbOpenFilesLimit)
+	}
+	return o
 }
 
 func initDiskRepository(
@@ -346,35 +467,45 @@ func initDiskRepository(
 			// is not already scraping and alerting on it.
 			wasPaused := false
 
+			// The write-stall log line is engine-neutral: it reads level-0 file
+			// count through a small interface both stores satisfy, and treats
+			// level 0 at or above the pause trigger as stalled. The richer
+			// per-level histogram below only goleveldb provides, so it is gated
+			// on the concrete leveldb handle. See issue #185.
+			level0Reader, _ := store.(interface{ Level0Files() int })
+			leveldbHandle, isLeveldb := store.(interface{ DB() *leveldb.DB })
+
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
+					if level0Reader != nil {
+						level0 := level0Reader.Level0Files()
+						stalled := opts.LdbWritePauseTrigger > 0 && level0 >= opts.LdbWritePauseTrigger
+						switch writePauseEdge(wasPaused, stalled) {
+						case writePauseEntered:
+							logger.Warning("index store has stopped accepting writes: "+
+								"level 0 has too many files and compaction is behind; "+
+								"the node will not make progress until compaction catches up",
+								"level_0_files", level0,
+								"pause_trigger", opts.LdbWritePauseTrigger)
+						case writePauseLeft:
+							logger.Warning("index store is accepting writes again")
+						}
+						wasPaused = stalled
+					}
+
+					if !isLeveldb {
+						continue
+					}
 					stats := new(leveldb.DBStats)
-					switch err := store.DB().Stats(stats); {
+					switch err := leveldbHandle.DB().Stats(stats); {
 					case errors.Is(err, leveldb.ErrClosed):
 						return
 					case err != nil:
 						logger.Error(err, "snapshot levelDB stats")
 					default:
-						switch writePauseEdge(wasPaused, stats.WritePaused) {
-						case writePauseEntered:
-							level0 := 0
-							if len(stats.LevelTablesCounts) > 0 {
-								level0 = stats.LevelTablesCounts[0]
-							}
-							logger.Warning("index store has stopped accepting writes: "+
-								"level 0 has too many files and compaction is behind; "+
-								"the node will not make progress until compaction catches up",
-								"level_0_files", level0,
-								"write_delays", stats.WriteDelayCount,
-								"write_delay_seconds", stats.WriteDelayDuration.Seconds())
-						case writePauseLeft:
-							logger.Warning("index store is accepting writes again")
-						}
-						wasPaused = stats.WritePaused
-
 						ldbStats.WithLabelValues("write_delay_count").Observe(float64(stats.WriteDelayCount))
 						ldbStats.WithLabelValues("write_delay_duration").Observe(stats.WriteDelayDuration.Seconds())
 						ldbStats.WithLabelValues("alive_snapshots").Observe(float64(stats.AliveSnapshots))
@@ -436,7 +567,10 @@ const lockKeyNewSession string = "new_session"
 // Options provides a container to configure different things in the storer.
 type Options struct {
 	// These are options related to levelDB. Currently, the underlying storage used is levelDB.
-	LdbStats                  atomic.Pointer[prometheus.HistogramVec]
+	LdbStats atomic.Pointer[prometheus.HistogramVec]
+	// StorageEngine selects the index-store engine: "leveldb" (default) or
+	// "pebble". Empty means leveldb. See issue #185.
+	StorageEngine             string
 	LdbOpenFilesLimit         uint64
 	LdbBlockCacheCapacity     uint64
 	LdbWriteBufferSize        uint64
@@ -491,6 +625,7 @@ type Options struct {
 
 func defaultOptions() *Options {
 	return &Options{
+		StorageEngine:             "",
 		LdbOpenFilesLimit:         defaultOpenFilesLimit,
 		LdbBlockCacheCapacity:     defaultBlockCacheCapacity,
 		LdbWriteBufferSize:        defaultWriteBufferSize,

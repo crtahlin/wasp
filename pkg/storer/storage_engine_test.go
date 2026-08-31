@@ -1,0 +1,145 @@
+// Copyright 2026 The Wasp Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package storer
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// TestResolveEngine covers the datadir guard and the marker resolution: an index
+// directory is bound to the engine that created it, because the two on-disk
+// formats are mutually unreadable and a flipped flag would otherwise corrupt.
+// An empty request resolves to the directory's own engine, so a restart or a
+// `bee db` command needs no flag. See issue #185.
+func TestResolveEngine(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fresh dir binds to the requested engine", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		got, err := resolveEngine(dir, EnginePebble)
+		if err != nil || got != EnginePebble {
+			t.Fatalf("fresh pebble: got %q, %v; want pebble, nil", got, err)
+		}
+		marker, _ := os.ReadFile(filepath.Join(dir, ".storage-engine"))
+		if string(marker) != "pebble\n" {
+			t.Fatalf("marker = %q, want \"pebble\\n\"", marker)
+		}
+	})
+
+	t.Run("fresh dir with no request defaults to leveldb", func(t *testing.T) {
+		t.Parallel()
+		if got, err := resolveEngine(t.TempDir(), ""); err != nil || got != EngineLevelDB {
+			t.Fatalf("fresh empty request: got %q, %v; want leveldb, nil", got, err)
+		}
+	})
+
+	t.Run("an empty request resolves to the marker", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if _, err := resolveEngine(dir, EnginePebble); err != nil {
+			t.Fatal(err)
+		}
+		// A restart with no flag must reopen as pebble, not error or default.
+		if got, err := resolveEngine(dir, ""); err != nil || got != EnginePebble {
+			t.Fatalf("reopen with no flag: got %q, %v; want pebble, nil", got, err)
+		}
+	})
+
+	t.Run("a request that contradicts the marker is refused", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if _, err := resolveEngine(dir, EngineLevelDB); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveEngine(dir, EnginePebble); err == nil {
+			t.Fatal("opening a leveldb datadir as pebble should have been refused")
+		}
+	})
+
+	t.Run("unmarked dir with data is leveldb: pebble refused, leveldb allowed", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// Simulate a pre-engine-selection goleveldb datadir: files, no marker.
+		if err := os.WriteFile(filepath.Join(dir, "CURRENT"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveEngine(dir, EnginePebble); err == nil {
+			t.Fatal("an unmarked datadir with data must not be opened as pebble")
+		}
+		if got, err := resolveEngine(dir, ""); err != nil || got != EngineLevelDB {
+			t.Fatalf("unmarked data, no request: got %q, %v; want leveldb, nil", got, err)
+		}
+	})
+}
+
+// TestPebbleIndexStoreOptions checks the db-* tuning knobs reach the equivalent
+// pebble.Options fields, and that a zero knob leaves Pebble's own default.
+func TestPebbleIndexStoreOptions(t *testing.T) {
+	t.Parallel()
+
+	opts := defaultOptions()
+	o := pebbleIndexStoreOptions(opts)
+
+	if o.Cache == nil {
+		t.Error("block cache capacity did not produce a Cache")
+	}
+	if o.MemTableSize != opts.LdbWriteBufferSize {
+		t.Errorf("MemTableSize = %d, want %d", o.MemTableSize, opts.LdbWriteBufferSize)
+	}
+	if o.L0CompactionThreshold != opts.LdbCompactionL0Trigger {
+		t.Errorf("L0CompactionThreshold = %d, want %d", o.L0CompactionThreshold, opts.LdbCompactionL0Trigger)
+	}
+	if o.L0StopWritesThreshold != opts.LdbWritePauseTrigger {
+		t.Errorf("L0StopWritesThreshold = %d, want %d", o.L0StopWritesThreshold, opts.LdbWritePauseTrigger)
+	}
+	if o.MaxOpenFiles != int(opts.LdbOpenFilesLimit) {
+		t.Errorf("MaxOpenFiles = %d, want %d", o.MaxOpenFiles, opts.LdbOpenFilesLimit)
+	}
+
+	// A zero compaction knob must not override Pebble's default with 0.
+	opts.LdbCompactionL0Trigger = 0
+	if got := pebbleIndexStoreOptions(opts).L0CompactionThreshold; got == 0 {
+		t.Error("a zero knob overrode L0CompactionThreshold with 0 instead of keeping the pebble default")
+	}
+}
+
+// TestInitStoreOpensBothEngines is the integration check that the selector
+// actually constructs a working store for each engine, and errors on an unknown
+// one. Each engine opens its own fresh directory.
+func TestInitStoreOpensBothEngines(t *testing.T) {
+	t.Parallel()
+
+	for _, engine := range []string{EngineLevelDB, EnginePebble} {
+		t.Run(engine, func(t *testing.T) {
+			t.Parallel()
+			opts := defaultOptions()
+			opts.StorageEngine = engine
+
+			store, err := initStore(t.TempDir(), opts)
+			if err != nil {
+				t.Fatalf("initStore(%s): %v", engine, err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+
+			// Both engines must expose the neutral level-0 reader the write-stall
+			// watch depends on.
+			if _, ok := store.(interface{ Level0Files() int }); !ok {
+				t.Errorf("%s store does not implement Level0Files()", engine)
+			}
+		})
+	}
+
+	t.Run("unknown engine errors", func(t *testing.T) {
+		t.Parallel()
+		opts := defaultOptions()
+		opts.StorageEngine = "rocksdb"
+		if _, err := initStore(t.TempDir(), opts); err == nil {
+			t.Fatal("an unknown storage engine should have errored")
+		}
+	})
+}

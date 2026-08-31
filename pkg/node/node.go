@@ -159,6 +159,7 @@ type Options struct {
 	DataDir                       string
 	DBBlockCacheCapacity          uint64
 	DBDisableSeeksCompaction      bool
+	StorageEngine                 string
 	DBOpenFilesLimit              uint64
 	DBWriteBufferSize             uint64
 	DBCompactionL0Trigger         int
@@ -878,6 +879,7 @@ func NewBee(
 	lo := &storer.Options{
 		Address:                   swarmAddress,
 		CacheCapacity:             o.CacheCapacity,
+		StorageEngine:             o.StorageEngine,
 		LdbOpenFilesLimit:         o.DBOpenFilesLimit,
 		LdbBlockCacheCapacity:     o.DBBlockCacheCapacity,
 		LdbWriteBufferSize:        o.DBWriteBufferSize,
