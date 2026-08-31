@@ -240,18 +240,26 @@ nfpms:
         dst: /etc/default/bee
         type: config
 
-    # Drop-in replacement for upstream's `bee` package. All three directives are
-    # needed and do different jobs:
-    #   Conflicts — refuse to be co-installed with upstream bee
-    #   Replaces  — permitted to take over files it owns (/usr/bin/bee, the unit
-    #               file, /etc/bee/bee.yaml)
+    # Drop-in replacement for two earlier package names. All three directives
+    # are needed and do different jobs:
+    #   Conflicts — refuse to be co-installed with either
+    #   Replaces  — permitted to take over the files they own (/usr/bin/bee,
+    #               the unit file, /etc/bee/bee.yaml), so dpkg performs a normal
+    #               replacement instead of failing on file conflicts
     #   Provides  — satisfy anything that depends on the name `bee`
     # Conflicts alone blocks the install; Replaces alone allows a silent
     # file-ownership fight; Provides alone does neither.
+    #
+    # `bee` is upstream's package name. `bee-experimental` is this fork's own
+    # earlier name, used by pre-rename test builds (0.1.0-test.N); without it
+    # in Replaces, `dpkg -i` over such an install fails on file conflicts and
+    # the only manual route out includes a purge that runs `userdel -r bee`,
+    # deleting the data directory. See issue #177. It is deliberately NOT added
+    # to Provides: nothing should be able to depend on the old fork name.
     overrides:
       deb:
-        conflicts: [bee]
-        replaces: [bee]
+        conflicts: [bee, bee-experimental]
+        replaces: [bee, bee-experimental]
         provides: [bee]
         dependencies:
           - passwd
@@ -264,8 +272,8 @@ nfpms:
       rpm:
         # RPM has no Replaces; nfpm maps `replaces` onto Obsoletes for the rpm
         # packager. Verify on the first real build with `rpm -qp --obsoletes`.
-        conflicts: [bee]
-        replaces: [bee]
+        conflicts: [bee, bee-experimental]
+        replaces: [bee, bee-experimental]
         provides: [bee]
         dependencies:
           - ca-certificates
