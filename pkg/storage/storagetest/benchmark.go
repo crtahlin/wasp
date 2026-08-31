@@ -471,6 +471,16 @@ func writeDataset(b *testing.B, db storage.Store, g entryGenerator) {
 	}
 }
 
+// resetBenchmark ends the setup phase: collect the garbage the setup produced,
+// then start the clock.
+//
+// The runtime.GC here completes one cycle so the timed loop does not begin
+// mid-collection. It does NOT make a benchmark's result independent of its
+// position in the process: background GC pacing, driven by the heap the setup
+// left live, still makes early runs slower, and the effect is directional. A
+// comparison drawn from two sub-benchmarks of one process is not trustworthy
+// for that reason. Run each condition in its own process. See issue #172 and
+// the microbenchmark section of docs/agent-playbooks/test-bench.md.
 func resetBenchmark(b *testing.B) {
 	b.Helper()
 

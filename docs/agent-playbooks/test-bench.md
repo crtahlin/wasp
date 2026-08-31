@@ -128,6 +128,48 @@ Rules:
 - A restarted node is not a settled node. Peer count recovering from 2 to 79
   changed disk time per chunk by 2.6x on its own.
 
+## Go microbenchmarks drift with position in the process
+
+The three-runs rule above is about live-node noise. Go microbenchmarks — the
+`storagetest` suite, `beebench` — have a second, quieter trap that the spread
+alone does not catch: **the same benchmark reports a different number depending
+on how much ran in the process before it.** It is directional, always making
+later runs look faster, so a before-and-after comparison that puts the "after"
+arm second in the process shows an improvement that is not there.
+
+The cause is garbage-collector pacing, established by measurement, not guessed.
+Running one allocation-free read benchmark six times in a single process, each
+with its own fresh store:
+
+**Table — `inmemchunkstore` ReadRandom, Apple M5 Pro, `-benchtime 3000x -count=6`, one process, ns/op**
+
+| GC setting | run 1 | 2 | 3 | 4 | 5 | 6 | spread |
+|---|---|---|---|---|---|---|---|
+| default | 57.8 | 43.0 | 27.0 | 34.0 | 21.5 | 40.7 | 2.7x |
+| `GOGC=off` | 27.7 | 23.2 | 22.9 | 24.7 | 25.1 | 21.4 | 1.3x |
+
+The loop allocates nothing (`0 allocs/op`), so this is not the benchmark's own
+garbage — it is background GC driven by the heap the setup phase left live,
+stealing cycles from early measured runs and settling as the process continues.
+`GOGC=off` removes it almost entirely. Longer `-benchtime` dampens it (the same
+benchmark at `40000x` spread 1.4x rather than 2.7x) but does not remove it. And
+`runtime.GC()` in `resetBenchmark` does **not** fix it: it completes one cycle,
+it does not change pacing during the timed region.
+
+Rules for microbenchmarks:
+
+- **Each condition gets its own process.** Compare `A` and `B` by running each in
+  a separate `go test -bench` invocation, not as two sub-benchmarks of one run.
+  This is the robust answer and the one to reach for by default.
+- If A and B must share a process, **alternate and interleave** several
+  repetitions of each rather than all of A then all of B, so the drift falls on
+  both equally, and report the spread.
+- For an **allocation-free** microbenchmark, `GOGC=off` flattens the drift and is
+  safe. Do **not** use it for a benchmark that allocates in its loop: there it
+  would hide a real, GC-driven cost that a production node actually pays.
+- A ratio quoted from two sub-benchmarks of a single process is not trustworthy.
+  This is how issue #172 was found, while correcting the numbers in #173.
+
 ## Measuring an experiment
 
 The method, fixed in advance in the experiment's `measurement.md`:
