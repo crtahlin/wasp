@@ -4,6 +4,22 @@ Changes this fork makes to upstream Bee. Upstream's own changes are absorbed as
 single `chore(upstream)` entries — see `.upstream-base` for the release this
 build derives from, and upstream's release notes for what it contains.
 
+## [0.1.2](https://github.com/crtahlin/wasp/releases/tag/v0.1.2) - 2026-08-31
+
+
+### Bug fixes
+- make the chunkstore benchmarks measure hits ([#171](https://github.com/crtahlin/wasp/pull/171))
+- make missing-key lookups reach the store ([#174](https://github.com/crtahlin/wasp/pull/174))
+- let a wedged dial stop holding up shutdown ([#175](https://github.com/crtahlin/wasp/pull/175))
+- let wasp upgrade a bee-experimental install ([#178](https://github.com/crtahlin/wasp/pull/178))
+- stop charging harness overhead to the store reads ([#181](https://github.com/crtahlin/wasp/pull/181))
+
+### Documentation
+- microbenchmarks drift with position in the process ([#182](https://github.com/crtahlin/wasp/pull/182))
+
+### Features
+- log when the index store stops accepting writes ([#180](https://github.com/crtahlin/wasp/pull/180))
+- make the index store's level-0 triggers configurable ([#183](https://github.com/crtahlin/wasp/pull/183))
 ## [0.1.1](https://github.com/crtahlin/wasp/releases/tag/v0.1.1) - 2026-08-29
 
 
