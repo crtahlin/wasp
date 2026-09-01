@@ -73,6 +73,7 @@ func run() error {
 		keep       = flag.Bool("keep", false, "keep the scratch store")
 		doProbe    = flag.Bool("probe", false, "run a concurrent read probe during delete and recovery, measuring node responsiveness")
 		probeGap   = flag.Int("probe-gap-ms", 5, "sleep between probe reads")
+		maxCompact = flag.Int("max-compactions", 0, "pebble MaxConcurrentCompactions; 0 leaves the default")
 	)
 	flag.Parse()
 
@@ -83,7 +84,7 @@ func run() error {
 		return err
 	}
 
-	st, closeStore, err := openStore(*engine, *path, *cacheBytes, *bufBytes, *l0Trigger, *openFiles)
+	st, closeStore, err := openStore(*engine, *path, *cacheBytes, *bufBytes, *l0Trigger, *openFiles, *maxCompact)
 	if err != nil {
 		return err
 	}
@@ -289,7 +290,7 @@ func guardScratchPath(p string) error {
 	return nil
 }
 
-func openStore(engine, path string, cacheBytes, bufBytes, l0Trigger, openFiles int) (storage.BatchStore, func() error, error) {
+func openStore(engine, path string, cacheBytes, bufBytes, l0Trigger, openFiles, maxCompact int) (storage.BatchStore, func() error, error) {
 	switch engine {
 	case "leveldb":
 		o := &opt.Options{
@@ -313,6 +314,9 @@ func openStore(engine, path string, cacheBytes, bufBytes, l0Trigger, openFiles i
 		o.EnsureDefaults()
 		for i := range o.Levels {
 			o.Levels[i].FilterPolicy = bloom.FilterPolicy(10)
+		}
+		if maxCompact > 0 {
+			o.MaxConcurrentCompactions = func() int { return maxCompact }
 		}
 		s, err := pebblestore.New(path, o)
 		if err != nil {
