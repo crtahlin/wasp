@@ -128,3 +128,83 @@ Built and verified on the dev machine first: a locally-built binary runs with
 store-health metrics. Only then deployed to bench-2. The dependency
 (`cockroachdb/pebble`) moves from indirect to direct in `go.mod` when it enters
 the build; noted per the rule that dependency changes are deliberate.
+
+## Using it: selecting an engine and switching
+
+The engine is a property of the data directory, recorded in a `.storage-engine`
+marker inside `localstore/indexstore/`. The two on-disk formats are mutually
+unreadable, so a directory is bound to the engine that created it. This section
+is the operator-facing how-to.
+
+### Starting a new node on Pebble
+
+Pass the flag once, on a fresh data directory:
+
+```bash
+bee start --storage-engine pebble
+```
+
+That creates the index store in Pebble format and writes the marker. From then
+on the directory is a Pebble node.
+
+### Running it afterwards
+
+Do not pass the flag again. An empty `--storage-engine` resolves to the marker,
+so a plain `bee start`, and every `bee db …` command, reopens the directory on
+whatever engine created it. The node is otherwise identical to a goleveldb node:
+same APIs, same sync. The only outward difference is the storage metrics, which
+come out under `bee_pebble_*` instead of `bee_leveldb_*`; the write-stall log
+line works the same on both.
+
+### You cannot switch an existing directory's engine in place
+
+There is no toggle and no conversion. Pointing the wrong engine at an existing
+directory — for example `--storage-engine leveldb` at a Pebble node — is refused
+at start with a clear error, rather than failing obscurely or corrupting. That
+refusal is deliberate: it protects the reserve.
+
+### Switching a node's engine while keeping its identity
+
+You do **not** need a whole new data directory. A node's identity lives outside
+the reserve, in three separate places under the data directory:
+
+- `keys/` — the node's private keys: libp2p identity, swarm overlay key, wallet.
+- `statestore/` — addressbook, postage batches, accounting, chequebook, overlay.
+- `localstore/` — the reserve: chunk data in sharky plus the index store. **Only
+  this is engine-specific, and only this re-syncs.**
+
+So to move a node to the other engine, wipe only the reserve and keep the rest.
+`bee db nuke` is built for exactly this:
+
+```bash
+# stop bee first
+bee db nuke --data-dir <dir>          # wipes the reserve, keeps keys and overlay
+bee start --storage-engine pebble     # fresh localstore, bound to pebble
+```
+
+By default `nuke` removes the `localstore` (reserve) and the kademlia peer cache
+and clears sync-progress state. It does **not** touch `keys/`, and it keeps the
+overlay. After this the node is the same node — same overlay address, libp2p
+identity, wallet, chequebook, postage batches and addressbook — and it re-syncs
+its reserve from scratch on the new engine. Because the overlay is unchanged, it
+re-syncs the same neighbourhood it was already responsible for.
+
+Two cautions:
+
+- **Do not pass `--forget-overlay` to `nuke`.** That flag deliberately discards
+  the overlay and deploys a new chequebook on next boot, which is the opposite of
+  keeping the identity.
+- The re-sync costs time and bandwidth to refill the reserve; the identity
+  survives instantly, the stored chunks are rebuilt over hours.
+
+### Scope
+
+Only the reserve's index store is the leveldb-or-pebble choice. The `statestore`
+stays on goleveldb regardless, so a "Pebble node" is a Pebble reserve index with
+a goleveldb statestore and sharky underneath. That is intentional; the statestore
+is small and is not what the comparison is about.
+
+A node running an older build that upgrades to this one is unaffected: its index
+directory has data but no marker, which is read as goleveldb, and the marker is
+written as `leveldb` on first open. No node changes engine unless someone
+deliberately starts a fresh reserve on Pebble.
