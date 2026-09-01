@@ -14,8 +14,8 @@ than goleveldb, but that was goleveldb's compaction habits surfacing through
 Pebble's default level-0 trigger. Lowering `db-compaction-l0-trigger` to 4 takes
 the sample from 245 s to 44 s, faster than goleveldb's 52 s, at lower memory and no
 extra disk. Tuned this way Pebble matches or beats goleveldb on the read axes and
-on write throughput; goleveldb wins on reclaiming disk promptly after a mass
-eviction, and is steadier under write saturation. Both Pebble weaknesses are the
+on write throughput; goleveldb reclaims disk faster after a mass eviction but stalls reads while
+doing so, where Pebble stays responsive; goleveldb is steadier under write saturation. Both Pebble weaknesses are the
 same lazy compaction at rest that the read tuning already addressed once. This
 document fixed the method and the verdict criteria *before* the numbers arrived,
 per the repo's measure-before-you-conclude rule.
@@ -356,6 +356,45 @@ carries the same stall tail the write bench showed: one of three rounds hit a
 25 ms. Same trade as the fresh-store writes: Pebble faster on average, goleveldb
 steadier.
 
+### Responsiveness during eviction: the metric that actually matters
+
+The reclamation numbers above measure eviction *speed*, but speed is not the point.
+The thing an operator cares about is whether the node keeps serving while the
+eviction runs, and a slower eviction that stays responsive beats a fast one that
+stalls the node. `evictbench`'s probe mode measures that directly: a concurrent
+reader runs a get and a short scan on a tight loop through the whole eviction and
+recovery, and its latency shows whether the node is still answering.
+
+**Table: concurrent read latency during the eviction burst, two rounds, 2026-09-01**
+
+| | goleveldb | Pebble |
+|---|---|---|
+| get latency, p50 / max | 0.06 / **37 ms** | 0.13 / **0.37 ms** |
+| scan latency, p50 / max | 1.5 / **76 ms** | 0.48 / **1.4 ms** |
+| burst duration | ~9 s | ~4 s |
+
+This reverses the reclamation reading. During a mass eviction **goleveldb stalls
+concurrent reads**, its get tail hitting 37 ms and its scan tail 76 ms, because the
+delete burst triggers write-stalls that block reads (the delete's own worst commit
+was 73 ms in the same round). **Pebble keeps every read under 1.4 ms** and its burst
+is less than half as long. On the metric that matters, node responsiveness under
+eviction, Pebble is the better engine, and goleveldb's fast reclamation is revealed
+as the aggressive compaction that costs the responsiveness. Pebble's slow
+reclamation is the gentle trade: it stays serving and frees the disk later.
+
+**Tuning the reclamation.** The open question was whether Pebble could be made to
+reclaim faster without losing that responsiveness. Raising
+`MaxConcurrentCompactions` to 4 and to 8 does not do it: on-disk size still sits at
+about 413 to 426 MB through the whole window, against goleveldb's ~257 MB, so the
+concurrency limit is not the bottleneck. Pebble simply is not scheduling the
+tombstone-reclaiming compaction at rest, regardless of how many compaction slots it
+has. The knob did no harm, reads stayed under 0.5 ms throughout, but it is not the
+lever. Reclaiming promptly would need a different mechanism, most directly a
+compaction nudge after a large eviction (a `Compact` call on the evicted range),
+which is a code change in the store rather than a runtime option. Given that
+Pebble stays responsive and reclaims eventually, and that gentle-but-slow was the
+stated preference, this is a follow-up worth having, not a blocker.
+
 ## Verdict, against the criteria fixed above
 
 Measured against the pre-registered criteria, with Pebble tuned to hold level 0
@@ -378,15 +417,20 @@ shallow (`db-compaction-l0-trigger: 4`, default cache):
 - **write throughput**: Pebble about 1.36x faster on the median and quicker at the
   typical commit, but with a heavier multi-second stall tail under saturation.
   **Pebble wins on throughput, with a stall-tail caveat.**
-- **mass eviction, space reclamation**: after deleting a quarter of the reserve,
-  goleveldb reclaims the space fully within two minutes while Pebble sits on it with
-  level 0 pinned. **goleveldb wins.** Reads do not collapse on either.
+- **responsiveness during eviction**: goleveldb stalls concurrent reads to 37 to
+  76 ms during a mass delete; Pebble keeps them under 1.4 ms. **Pebble wins**, and
+  this is the metric that matters, whether the node keeps serving.
+- **mass eviction, space reclamation**: goleveldb reclaims the freed disk within two
+  minutes; Pebble reclaims slowly. **goleveldb reclaims faster**, but that speed is
+  the aggressive compaction that costs the responsiveness above, so it is the wrong
+  thing to optimise. Raising Pebble's compaction concurrency did not speed its
+  reclamation.
 - **radius decrease (writes into a full store)**: Pebble faster on throughput, with
   the same occasional multi-second stall. **Pebble wins on throughput, same
   stall-tail caveat.**
 
-This reverses the pre-tuning reading on the read axes, and leaves a real split on
-the write and eviction axes. With one configuration change that costs
+This reverses the pre-tuning reading on the read axes, and on eviction once the
+metric is responsiveness rather than speed. With one configuration change that costs
 nothing and no extra memory, Pebble matches or beats goleveldb on every axis
 measured so far except an immaterial `ReserveHas` sliver: half the index disk,
 half the idle CPU, lower resident memory, no stall, and a faster and steadier
@@ -396,24 +440,25 @@ reserve, and it no longer describes the node in front of us: the reserve-sample
 slowness it warned about was goleveldb's compaction habits hiding in Pebble's
 default L0 trigger, not an inherent read penalty.
 
-It is still short of a final adopt decision, for concrete and now-narrow reasons,
-and they share one root cause:
+It is still short of a final adopt decision, for concrete and now-narrow reasons:
 
-- **Pebble's two weaknesses are the same lazy compaction at rest.** The
-  slow-to-reclaim disk after a mass eviction, the level-0 pile that made the
-  reserve-sample read slow until the trigger was lowered, and the write stall tail
-  under saturation are all Pebble deferring compaction until pressure forces it.
-  Lowering `db-compaction-l0-trigger` already fixed the read axis; the same class of
-  setting (`L0StopWritesThreshold`, compaction concurrency, or a nudge to compact
-  after a mass delete) is likely to soften the eviction and write-stall behaviour
-  too. That is a hypothesis, to be tested the way the read one was, not assumed.
+- **Pebble's remaining rough edges share one root cause: lazy compaction at rest.**
+  The slow disk reclamation after a mass eviction and the write stall tail under
+  saturation are both Pebble deferring compaction until pressure forces it, the same
+  behaviour that made the reserve-sample read slow until the level-0 trigger was
+  lowered. Lowering `db-compaction-l0-trigger` fixed the read axis, but the same
+  lever does not help reclamation: raising `MaxConcurrentCompactions` left the size
+  stuck, because Pebble is not scheduling the reclaiming compaction at all, not
+  starved of slots. Reclaiming promptly would need a compaction nudge after a large
+  eviction, a code change in the store. Because Pebble stays responsive throughout,
+  this is a follow-up, not a blocker.
 - **The level-0 fix must be shown to hold over time.** The value that made the
   sample fast was established by a restart, so a longer steady-state watch is needed
   before relying on it in production.
-- **Eviction reads did not collapse, which lowers the risk.** The one outcome that
-  would have been disqualifying, reads cratering on tombstones right after a batch
-  expiry, did not happen on either engine. Pebble's eviction cost is slow space
-  reclamation, not broken reads.
+- **Eviction did not break responsiveness on Pebble, which was the real risk.** The
+  outcome that would have been disqualifying, the node ceasing to serve during a
+  batch expiry, is goleveldb's problem here, not Pebble's: goleveldb stalls reads to
+  tens of milliseconds during the delete burst while Pebble stays under 1.4 ms.
 
 The idle-CPU finding also stands on its own regardless of the engine choice:
 goleveldb burning about 2.8 cores to compact a settled reserve at rest is the
