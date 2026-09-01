@@ -5,8 +5,7 @@ Issue: [#185](https://github.com/crtahlin/wasp/issues/185) · Spec:
 microbenchmark verdict in [#15](https://github.com/crtahlin/wasp/issues/15) once
 this completes.
 
-**Status: steady-state and reserve-sample comparison done (2026-09-01), including
-a tuning retest; write throughput is the one axis still open.** bench-2 filled to
+**Status: full battery done (2026-09-01), steady state, reserve-sample read (with a tuning retest), write throughput, and mass eviction.** bench-2 filled to
 a full radius-9 reserve, matched to bench-1 on the within-radius count. The at-rest
 axes (disk, CPU, memory) and the heaviest read a storer performs (the
 redistribution reserve sample, measured with `rchash`) are recorded below. The
@@ -14,10 +13,12 @@ headline reversed on retest: at Pebble's default tuning the sample ran 4.6x slow
 than goleveldb, but that was goleveldb's compaction habits surfacing through
 Pebble's default level-0 trigger. Lowering `db-compaction-l0-trigger` to 4 takes
 the sample from 245 s to 44 s, faster than goleveldb's 52 s, at lower memory and no
-extra disk. Tuned this way Pebble matches or beats goleveldb on every axis measured
-so far except an immaterial `ReserveHas` sliver; only write throughput remains
-unmeasured. This document fixed the method and the verdict criteria *before* the
-numbers arrived, per the repo's measure-before-you-conclude rule.
+extra disk. Tuned this way Pebble matches or beats goleveldb on the read axes and
+on write throughput; goleveldb wins on reclaiming disk promptly after a mass
+eviction, and is steadier under write saturation. Both Pebble weaknesses are the
+same lazy compaction at rest that the read tuning already addressed once. This
+document fixed the method and the verdict criteria *before* the numbers arrived,
+per the repo's measure-before-you-conclude rule.
 
 ## The two nodes
 
@@ -300,6 +301,61 @@ reach this regime, which is why the fill never stalled. And these are writes int
 a fresh store; writing into an already-full reserve, which is what a radius drop
 does, is a different and untested shape, noted below.
 
+### Mass eviction and radius change (evictbench)
+
+When a large postage batch expires or the storage radius rises, the reserve
+deletes a great many chunks at once, about three index deletes per chunk in
+`removeChunk` plus a sharky slot release. The sharky release is the same code on
+both engines, so it cannot separate them and is argued from the code rather than
+benchmarked; the index deletes and the compaction they trigger are the engine's
+own, and that is what `evictbench` measures. It populates two million chunks,
+reads them, deletes a quarter in the reserve's delete shape (a single large batch
+expiry), reads again while tombstones are thickest, then samples on-disk size and
+read time for about 160 seconds as background compaction runs. Three rounds per
+engine on bench-2.
+
+**Table: mass eviction, delete a quarter of 2M chunks, three rounds, 2026-09-01**
+
+| | goleveldb | Pebble |
+|---|---|---|
+| delete throughput, median | 202k deletes/s | 382k deletes/s |
+| scan before / after delete | ~1990 / ~1960 ms | ~1710 / ~1810 ms |
+| space after delete, over 160 s | drops fully to ~257 MB | sits at ~431 MB, barely moves |
+| level 0 through the window | 0 throughout | pinned at 9–11, then eases |
+
+Three things, consistent across all three rounds:
+
+- **Neither engine's reads collapse from tombstones.** The post-delete scan barely
+  moves on either, so the feared post-eviction read cliff does not appear at this
+  scale. That is the reassuring result.
+- **Pebble deletes faster** (about 1.9x), the delete burst itself is quick on both.
+- **goleveldb reclaims the freed space promptly and fully; Pebble does not.**
+  goleveldb keeps level 0 at 0 and its on-disk size falls steadily to below the
+  pre-delete figure within about two minutes. Pebble holds the freed space: its
+  size stays flat near 431 MB with level 0 pinned at 9 to 11 for roughly two
+  minutes, only beginning to compact at the end of the window. This is the same
+  lazy-compaction-at-rest behaviour that made the reserve-sample read slow before
+  the level-0 trigger was lowered: after a mass eviction Pebble sits on the disk
+  and keeps level 0 high until something nudges it. For a node that just lost a
+  large batch, that means the disk stays occupied and the read-slowing level-0 pile
+  lingers.
+
+(The absolute megabyte figures here are not the disk-footprint comparison: this
+synthetic data does not compress like the real reserve index, and Pebble is
+carrying uncompacted level-0 data, so its raw size runs higher. The
+half-the-size disk result stands on the real-reserve measurement earlier. What is
+meaningful here is the *trend*, whether the size comes back down after the delete,
+and it does not for Pebble within the window.)
+
+**Radius decrease (writes into a full store).** A radius drop makes the node sync a
+new neighbourhood, writing into an already-full reserve rather than a fresh one.
+`evictbench`'s writefull mode adds half a million chunks to the full two million.
+Pebble is faster on throughput (about 123k against 81k chunks per second) but
+carries the same stall tail the write bench showed: one of three rounds hit a
+940 ms commit with level 0 spiking to 65, where goleveldb's worst commit was
+25 ms. Same trade as the fresh-store writes: Pebble faster on average, goleveldb
+steadier.
+
 ## Verdict, against the criteria fixed above
 
 Measured against the pre-registered criteria, with Pebble tuned to hold level 0
@@ -322,8 +378,15 @@ shallow (`db-compaction-l0-trigger: 4`, default cache):
 - **write throughput**: Pebble about 1.36x faster on the median and quicker at the
   typical commit, but with a heavier multi-second stall tail under saturation.
   **Pebble wins on throughput, with a stall-tail caveat.**
+- **mass eviction, space reclamation**: after deleting a quarter of the reserve,
+  goleveldb reclaims the space fully within two minutes while Pebble sits on it with
+  level 0 pinned. **goleveldb wins.** Reads do not collapse on either.
+- **radius decrease (writes into a full store)**: Pebble faster on throughput, with
+  the same occasional multi-second stall. **Pebble wins on throughput, same
+  stall-tail caveat.**
 
-This reverses the pre-tuning reading. With one configuration change that costs
+This reverses the pre-tuning reading on the read axes, and leaves a real split on
+the write and eviction axes. With one configuration change that costs
 nothing and no extra memory, Pebble matches or beats goleveldb on every axis
 measured so far except an immaterial `ReserveHas` sliver: half the index disk,
 half the idle CPU, lower resident memory, no stall, and a faster and steadier
@@ -333,22 +396,24 @@ reserve, and it no longer describes the node in front of us: the reserve-sample
 slowness it warned about was goleveldb's compaction habits hiding in Pebble's
 default L0 trigger, not an inherent read penalty.
 
-It is still short of a final adopt decision, for concrete and now-narrow reasons:
+It is still short of a final adopt decision, for concrete and now-narrow reasons,
+and they share one root cause:
 
-- **Mass eviction is untested, and it is where these engines most diverge.** When a
-  postage batch expires or the radius rises, the reserve deletes millions of index
-  entries at once (about three index deletes per chunk in `removeChunk`, plus a
-  sharky slot release that is the same on both engines). A burst of deletes writes
-  tombstones that slow every read until compaction reclaims them, and the two
-  engines reclaim differently. Given that Pebble's reserve-sample read was already
-  the tuning-sensitive axis, its behaviour just after a mass delete, when tombstones
-  are thickest, is the most important thing still unmeasured. This is the next
-  experiment.
-- **The write stall tail wants a look, and the level-0 fix wants a longer watch.**
-  Pebble's multi-second commit stalls under saturation are tunable
-  (`L0StopWritesThreshold`, compaction concurrency) and worth characterising; and
-  the level-0 fix that made the sample fast was set by a restart, so it should be
-  shown to hold through steady-state operation.
+- **Pebble's two weaknesses are the same lazy compaction at rest.** The
+  slow-to-reclaim disk after a mass eviction, the level-0 pile that made the
+  reserve-sample read slow until the trigger was lowered, and the write stall tail
+  under saturation are all Pebble deferring compaction until pressure forces it.
+  Lowering `db-compaction-l0-trigger` already fixed the read axis; the same class of
+  setting (`L0StopWritesThreshold`, compaction concurrency, or a nudge to compact
+  after a mass delete) is likely to soften the eviction and write-stall behaviour
+  too. That is a hypothesis, to be tested the way the read one was, not assumed.
+- **The level-0 fix must be shown to hold over time.** The value that made the
+  sample fast was established by a restart, so a longer steady-state watch is needed
+  before relying on it in production.
+- **Eviction reads did not collapse, which lowers the risk.** The one outcome that
+  would have been disqualifying, reads cratering on tombstones right after a batch
+  expiry, did not happen on either engine. Pebble's eviction cost is slow space
+  reclamation, not broken reads.
 
 The idle-CPU finding also stands on its own regardless of the engine choice:
 goleveldb burning about 2.8 cores to compact a settled reserve at rest is the
