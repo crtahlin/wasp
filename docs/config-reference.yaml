@@ -1,0 +1,363 @@
+# wasp / Bee — annotated configuration reference
+#
+# Every option this build accepts, grouped and documented. Generated from
+# `bee start --help`, so it matches the flags exactly — no stale or missing
+# options. Each entry shows its help and default; uncomment and change to set.
+# The same names work as CLI flags (--name) and environment variables (BEE_NAME).
+#
+# This fork installs to /etc/bee/bee.yaml, the same path as upstream.
+# Regenerate after adding a flag: `bee start --help` is the source of truth.
+
+# ========================================================================
+# Node identity and data
+# ========================================================================
+
+## cache capacity in chunks, multiply by 4096 to get approximate capacity in
+## bytes
+# cache-capacity: 1000000
+
+## data directory
+# data-dir: "~/.bee"
+
+## password for decrypting keys
+# password: ""
+
+## path to a file that contains password for decrypting keys
+# password-file: ""
+
+# ========================================================================
+# HTTP API and debug
+# ========================================================================
+
+## HTTP API listen address
+# api-addr: "127.0.0.1:1633"
+
+## origins with CORS headers enabled
+# cors-allowed-origins: []
+
+# ========================================================================
+# Networking and peering
+# ========================================================================
+
+## allow to advertise private CIDRs to the public network
+# allow-private-cidrs: false
+
+## autotls certificate authority endpoint
+# autotls-ca-endpoint: "https://acme-v02.api.letsencrypt.org/directory"
+
+## autotls domain
+# autotls-domain: "libp2p.direct"
+
+## autotls registration endpoint
+# autotls-registration-endpoint: "https://registration.libp2p.direct"
+
+## initial nodes to connect to
+# bootnode: []
+
+## cause the node to always accept incoming connections
+# bootnode-mode: false
+
+## cause the node to start in full mode
+# full-node: false
+
+## triggers connect to main net bootnodes.
+# mainnet: true
+
+## NAT exposed address
+# nat-addr: ""
+
+## WSS NAT exposed address
+# nat-wss-addr: ""
+
+## ID of the Swarm network
+# network-id: 1
+
+## P2P listen address
+# p2p-addr: ":1634"
+
+## enable P2P WebSocket transport
+# p2p-ws-enable: false
+
+## p2p wss address
+# p2p-wss-addr: ":1635"
+
+## Enable Secure WebSocket P2P connections
+# p2p-wss-enable: false
+
+## ENS compatible API endpoint for a TLD and with contract address, can be
+## repeated, format [tld:][contract-addr@]url
+# resolver-options: []
+
+## send a welcome message string during handshakes
+# welcome-message: ""
+
+# ========================================================================
+# Blockchain, swap and incentives
+# ========================================================================
+
+## block number cache sync interval in blocks
+# block-sync-interval: 10
+
+## chain block time
+# block-time: 5
+
+## blockchain rpc TCP dial timeout
+# blockchain-rpc-dial-timeout: 30s
+
+## rpc blockchain endpoint; repeat or list several for failover, in priority
+## order
+# blockchain-rpc-endpoint: []
+
+## blockchain rpc idle connection timeout
+# blockchain-rpc-idle-timeout: 1m30s
+
+## blockchain rpc TCP keepalive interval
+# blockchain-rpc-keepalive: 30s
+
+## blockchain rpc TLS handshake timeout
+# blockchain-rpc-tls-timeout: 10s
+
+## bzz token contract address
+# bzz-token-address: ""
+
+## enable chequebook
+# chequebook-enable: true
+
+## minimum chequebook token balance required for verification, in token small
+## units
+# chequebook-min-balance: "11 BZZ) (default "110000000000000000""
+
+## reject full-node hive/handshake records that carry no chequebook address
+# chequebook-verification: false
+
+## postage stamp contract address
+# postage-stamp-address: ""
+
+## price oracle contract address
+# price-oracle-address: ""
+
+## redistribution contract address
+# redistribution-address: ""
+
+## staking contract address
+# staking-address: ""
+
+## enable storage incentives feature
+# storage-incentives-enable: true
+
+## enable swap
+# swap-enable: false
+
+## swap factory addresses
+# swap-factory-address: ""
+
+## initial deposit if deploying a new chequebook
+# swap-initial-deposit: "0"
+
+## skips the gas estimate step for contract transactions
+# transaction-debug-mode: false
+
+## withdrawal target addresses
+# withdrawal-addresses-whitelist: []
+
+# ========================================================================
+# Storage engine and index-store tuning
+#
+# The reserve's index store. storage-engine chooses the engine for a NEW
+# data directory (goleveldb is the default and supported engine; pebble is
+# experimental, see issue #185). The db-* options tune whichever engine is
+# active; the level-0 triggers gate writes under compaction pressure. See
+# docs/agent-playbooks/test-bench.md.
+# ========================================================================
+
+## size of block cache of the database in bytes
+# db-block-cache-capacity: 33554432
+
+## level-0 SST files at which the index store starts compacting; lower
+## compacts sooner and more often (more write amplification), higher lets
+## level 0 grow (more read amplification on the sampling path); 0 means the
+## goleveldb default of 4
+# db-compaction-l0-trigger: 8
+
+## disables db compactions triggered by seeks
+# db-disable-seeks-compaction: true
+
+## number of open files allowed by database
+# db-open-files-limit: 200
+
+## size of the database write buffer in bytes
+# db-write-buffer-size: 33554432
+
+## level-0 SST files at which the index store blocks writes until compaction
+## catches up; raising it buys burst headroom before a stall but allows more
+## level-0 files and so more read amplification, lowering it stalls sooner; 0
+## means the goleveldb default of 12
+# db-write-pause-trigger: 12
+
+## level-0 SST files at which the index store slows writes by 1ms each to let
+## compaction catch up; 0 means the goleveldb default of 8
+# db-write-slowdown-trigger: 8
+
+## index-store engine for a NEW data directory: "leveldb" (default) or
+## "pebble". Experimental; goleveldb is the supported engine. Empty uses the
+## engine the data directory was created with, or goleveldb for a fresh one.
+## The two on-disk formats are not interchangeable, so a directory is bound
+## to its engine. See issue #185.
+# storage-engine: ""
+
+# ========================================================================
+# Reserve and sync
+#
+# The reserve worker and pull-sync. reserve-wakeup-duration and the sync-
+# rate limits are the levers for how much background work a large-reserve
+# node does.
+# ========================================================================
+
+## minimum radius storage threshold
+# minimum-storage-radius: 0
+
+## total inbound sync rate across all peers; 0 uses the default of 1000,
+## roughly 4 MB/s
+# puller-max-chunks-per-second: 0
+
+## per-peer inbound chunk rate this node will serve; 0 uses the default of
+## 250
+# pullsync-max-chunks-per-second: 0
+
+## how often the puller re-decides which peers to sync from; 0 uses the
+## default of 5m
+# pullsync-recalc-interval: 0
+
+## reserve capacity doubling
+# reserve-capacity-doubling: 0
+
+## reserve lookups pullsync may have in flight at once; 0 leaves them
+## unbounded, which is the previous behaviour
+# reserve-has-concurrency: 0
+
+## how long the reserve worker waits between runs; 0 uses the default of 15m
+# reserve-wakeup-duration: 0
+
+## use SIMD BMT hasher; unset means enable it where the CPU supports it
+## (linux/amd64 with AVX2 or AVX-512). Setting it explicitly is strict: true
+## on unsupported hardware refuses to start
+# use-simd-hashing: false
+
+# ========================================================================
+# Logging and tracing
+# ========================================================================
+
+## path to a PEM-encoded CA bundle used to verify the OTLP collector
+## certificate; ignored when --tracing-insecure=true
+# tracing-ca-file: ""
+
+## enable tracing
+# tracing-enable: false
+
+## OTLP collector endpoint to send tracing data (host:port); default port is
+## 4318 for http, 4317 for grpc
+# tracing-endpoint: "127.0.0.1:4318"
+
+## disable TLS for the OTLP exporter (useful for a local collector); when
+## false, set --tracing-ca-file to verify the collector certificate against a
+## private CA
+# tracing-insecure: false
+
+## OTLP exporter transport: http or grpc
+# tracing-protocol: "http"
+
+## head-based sampling ratio in [0,1]; 0 samples nothing, 1 samples
+## everything
+# tracing-sampling-ratio: 1
+
+## service name identifier for tracing
+# tracing-service-name: "bee"
+
+## log verbosity level 0=silent, 1=error, 2=warn, 3=info, 4=debug, 5=trace
+# verbosity: "info"
+
+# ========================================================================
+# Other
+# ========================================================================
+
+## enable forwarded content caching
+# cache-retrieval: true
+
+## config file
+# config: "is $HOME/.bee.yaml"
+
+## gas limit fallback when estimation fails for contract transactions
+# gas-limit-fallback: 500000
+
+## help for start
+# help: false
+
+## connected peers per bin above which the bin is over-saturated and further
+## peers are pruned; 0 uses the default of 18. Raising it consumes other
+## nodes' connection budget, not only your own
+# kademlia-over-saturation-peers: 0
+
+## connected peers per bin below which the bin is not considered saturated; 0
+## uses the default of 8. Raising it consumes other nodes' connection budget,
+## not only your own
+# kademlia-saturation-peers: 0
+
+## light node limit
+# light-node-limit: 100
+
+## log lines that may wait to be written before further lines are dropped; 0
+## writes synchronously, which lets a stalled log reader block the node
+# log-sink-buffer: 4096
+
+## minimum gas tip cap in wei for transactions, 0 means use suggested gas tip
+## cap
+# minimum-gas-tip-cap: 0
+
+## suggester for target neighborhood
+# neighborhood-suggester: "https://api.swarmscan.io/v1/network/neighborhoods/suggestion"
+
+## percentage below the peers payment threshold when we initiate settlement
+# payment-early-percent: 50
+
+## threshold in BZZ where you expect to get paid from your peers
+# payment-threshold: "13500000"
+
+## excess debt above payment threshold in percentages where you disconnect
+## from your peer
+# payment-tolerance-percent: 25
+
+## postage stamp contract start block number
+# postage-stamp-start-block: 0
+
+## enable pprof mutex profile
+# pprof-mutex: false
+
+## enable pprof block profile
+# pprof-profile: false
+
+## forces the node to resync postage contract data
+# resync: false
+
+## chunk loads the reserve sampler keeps in flight; 0 uses the default, which
+## matches the CPU count and preserves previous behaviour
+# sampler-read-concurrency: 0
+
+## chunks the reserve sampler buffers and sorts into disk order before
+## reading; 0 reads in bin order, which is the previous behaviour
+# sampler-sort-window: 0
+
+## skip postage snapshot
+# skip-postage-snapshot: false
+
+## lru memory caching capacity in number of statestore entries
+# statestore-cache-capacity: 100000
+
+## protect nodes from getting kicked out on bootnode
+# static-nodes: []
+
+## neighborhood to target in binary format (ex: 111111001) for mining the
+## initial overlay
+# target-neighborhood: ""
+
+## maximum node warmup duration; proceeds when stable or after this time
+# warmup-time: 5m0s
