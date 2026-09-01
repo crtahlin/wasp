@@ -5,16 +5,19 @@ Issue: [#185](https://github.com/crtahlin/wasp/issues/185) · Spec:
 microbenchmark verdict in [#15](https://github.com/crtahlin/wasp/issues/15) once
 this completes.
 
-**Status: steady-state and reserve-sample comparison done (2026-09-01); write
-throughput is the one axis still open.** bench-2 has filled to a full radius-9
-reserve, matched to bench-1 on the within-radius count. The at-rest axes (disk,
-CPU, memory) and the heaviest read a storer performs (the redistribution reserve
-sample, measured with `rchash`) are recorded below. The result is a trade-off:
-Pebble uses about half the index disk and half the idle CPU, but computes the
-reserve sample about 4.6x slower, which is the read path
-[#15](https://github.com/crtahlin/wasp/issues/15) flagged. Only write throughput
-remains unmeasured. This document fixed the method and the verdict criteria
-*before* the numbers arrived, per the repo's measure-before-you-conclude rule.
+**Status: steady-state and reserve-sample comparison done (2026-09-01), including
+a tuning retest; write throughput is the one axis still open.** bench-2 filled to
+a full radius-9 reserve, matched to bench-1 on the within-radius count. The at-rest
+axes (disk, CPU, memory) and the heaviest read a storer performs (the
+redistribution reserve sample, measured with `rchash`) are recorded below. The
+headline reversed on retest: at Pebble's default tuning the sample ran 4.6x slower
+than goleveldb, but that was goleveldb's compaction habits surfacing through
+Pebble's default level-0 trigger. Lowering `db-compaction-l0-trigger` to 4 takes
+the sample from 245 s to 44 s, faster than goleveldb's 52 s, at lower memory and no
+extra disk. Tuned this way Pebble matches or beats goleveldb on every axis measured
+so far except an immaterial `ReserveHas` sliver; only write throughput remains
+unmeasured. This document fixed the method and the verdict criteria *before* the
+numbers arrived, per the repo's measure-before-you-conclude rule.
 
 ## The two nodes
 
@@ -212,9 +215,52 @@ per-round samples, which is exactly the warm-cache advantage goleveldb's fast ru
 shows. Both levers are already exposed configuration
 ([rule 8](../../../AGENTS.md)): raising `db-block-cache-capacity` well above 64 MB,
 and keeping level 0 shallow at rest (a lower `db-compaction-l0-trigger`, or a
-periodic compaction so a settled reserve does not sit at 19 L0 files). Whether
-either closes the 4.6x gap is a hypothesis to test, not a claim, and it is the
-next experiment on this arm.
+periodic compaction so a settled reserve does not sit at 19 L0 files). This was a
+hypothesis, so it was tested, below.
+
+### Tuning retest: the gap was the tuning, and it is level 0
+
+The two levers were applied to bench-2 and the sample re-run, then the cache
+lever was reverted on its own to see which one mattered. Each change was followed
+by a restart, a wait for level 0 and warm-up to settle, and three fresh rchash
+runs at the same depth and anchor under the same shared-host conditions. The
+reserve was unchanged throughout (about 3.79M within radius), and every run
+returned the same sample hash, so all three configurations did the same work.
+
+**Table: rchash reserve-sample duration and memory across Pebble tunings, 2026-09-01**
+
+| Pebble configuration | level 0 files | median duration | bee RSS |
+|---|---|---|---|
+| default: 64 MB cache, `db-compaction-l0-trigger` 8 | 19 | 245.6 s | ~475 MB |
+| 1 GiB cache, `db-compaction-l0-trigger` 4 | 0 | 49.8 s | ~2.8 GB |
+| 64 MB cache, `db-compaction-l0-trigger` 4 | 0 | 43.8 s | ~364 MB |
+| goleveldb (bench-1), for reference | 5 | 51.8 s | ~505 MB |
+
+Three things fall out of this cleanly:
+
+- **Level 0 was the whole fix.** Lowering the L0 compaction trigger and restarting
+  took level 0 from 19 files to 0, and that alone took the sample from 245.6 s to
+  the mid-40s. The block cache did not matter for this read: at 64 MB the sample is
+  43.8 s, at 1 GiB it is 49.8 s, the same within noise. A reserve scan reads each
+  block once, so a bigger cache has almost nothing to reuse; what it was fighting
+  was the merge across 19 overlapping L0 files, and once those are gone the cache
+  is beside the point.
+- **The fix is memory-cheap, and then some.** With the cache left at its 64 MB
+  default, bee's resident memory is about 364 MB, *below* goleveldb's ~505 MB. The
+  1 GiB cache only added ~2.4 GB of resident memory for no read benefit, so it
+  should not be used for this.
+- **Tuned this way, Pebble beats goleveldb on the sample.** 43.8 s against 51.8 s
+  on the median, and far steadier: Pebble's three runs span 43.6 to 50.8 s where
+  goleveldb's span 29.8 to 79.0 s with page-cache warmth.
+
+The effective configuration is a single knob, `db-compaction-l0-trigger: 4`, at
+the default cache. bench-2 is left on it. One caveat is carried forward honestly:
+the 19 L0 files were fill leftovers that the restart cleared, and the default
+trigger of 8 had plainly not kept them down during the fill. The lower trigger
+should keep level 0 shallow as new files form, but that it holds through
+steady-state operation, rather than only right after a flush, is stated on the
+trigger's semantics, not yet shown over time. A longer level-0 watch is the small
+remaining check on this axis.
 
 ### What still needs a driven-load run
 
@@ -232,45 +278,54 @@ The reserve-sample read is measured above. Two axes remain open at steady state:
 Both need generated load, driven with care against bench-1, the stable control
 holding a real reserve.
 
-## Verdict so far, against the criteria fixed above
+## Verdict, against the criteria fixed above
 
-Measured against the pre-registered criteria:
+Measured against the pre-registered criteria, with Pebble tuned to hold level 0
+shallow (`db-compaction-l0-trigger: 4`, default cache):
 
 - **disk footprint**: Pebble about half the index bytes per chunk. **Pebble wins.**
-- **memory**: comparable. **Tie.**
-- **write stall**: neither node stalled; bench-2 adopted radius 9 immediately and
-  filled to full without a stall. **No stall on either.**
+- **idle CPU**: goleveldb burns about 2.8 cores compacting at rest; Pebble about
+  half. **Pebble wins.**
+- **memory**: with the effective tuning (64 MB cache) Pebble's resident memory is
+  ~364 MB against goleveldb's ~505 MB. **Pebble wins, as long as the block cache
+  is left modest.**
+- **write stall**: neither node stalled; bench-2 filled to full without a stall.
+  **No stall on either.**
 - **light read (`ReserveHas`)**: goleveldb faster by about 20 microseconds,
   immaterial. **Marginal goleveldb edge, not material.**
-- **heavy read (reserve sample)**: goleveldb about 4.6x faster, on the path the
-  redistribution game runs every round. **goleveldb wins, decisively, at the
-  current Pebble tuning.**
-- **write throughput**: **not yet measured**; [#15](https://github.com/crtahlin/wasp/issues/15)'s
-  microbenchmark favoured Pebble 5–8x.
+- **heavy read (reserve sample)**: Pebble 43.8 s against goleveldb 51.8 s once
+  level 0 is kept shallow, and steadier. **Pebble wins.** A 4.6x goleveldb win
+  appears only at Pebble's default L0 tuning, which the retest showed to be a fixable
+  artefact, not the engine's floor.
+- **write throughput**: **still not measured**;
+  [#15](https://github.com/crtahlin/wasp/issues/15)'s microbenchmark favoured
+  Pebble 5–8x.
 
-The real-node picture is a trade-off, not a clean result either way. Pebble uses
-half the index disk and half the idle CPU, and its idle quiet exposes that
-goleveldb burns about 2.8 cores compacting at rest, the very pressure
-([#176](https://github.com/crtahlin/wasp/issues/176)) that began this work. But on
-the reserve sample, the heaviest and most consequential read a storer performs,
-Pebble is about 4.6x slower, and the pre-registered criteria adopt Pebble only if
-it is at least as good on reads. At its current tuning it is not.
+This reverses the pre-tuning reading. With one configuration change that costs
+nothing and no extra memory, Pebble matches or beats goleveldb on every axis
+measured so far except an immaterial `ReserveHas` sliver: half the index disk,
+half the idle CPU, lower resident memory, no stall, and a faster and steadier
+redistribution sample. The [#15](https://github.com/crtahlin/wasp/issues/15)
+microbenchmark verdict was formed before any of this could be tuned against a real
+reserve, and it no longer describes the node in front of us: the reserve-sample
+slowness it warned about was goleveldb's compaction habits hiding in Pebble's
+default L0 trigger, not an inherent read penalty.
 
-So on the evidence in hand, [#15](https://github.com/crtahlin/wasp/issues/15)'s
-"do not adopt Pebble as the default" verdict holds, now with real-node evidence
-rather than a microbenchmark: a node that takes four minutes to prove its reserve
-where goleveldb takes fifty seconds is at a real disadvantage in the round, and
-that outweighs the disk and idle-CPU savings for a node whose job is to store a
-reserve and prove it.
+It is still short of a final adopt decision, for two concrete and now-narrow
+reasons, both pointing toward Pebble rather than away:
 
-Two things keep this from being final. The reserve-sample gap is measured **at the
-default Pebble tuning**, and the level-0 and block-cache evidence above suggests it
-is at least partly a tuning artefact rather than the engine's floor; the tuning
-retest is the next experiment and could change this line. And write throughput,
-where [#15](https://github.com/crtahlin/wasp/issues/15) put Pebble far ahead,
-remains unmeasured. The constructive reading of the idle-CPU finding is not
-"switch engines" but "fix what makes goleveldb burn 2.8 cores at rest", the
-contention work the survey pointed to
+- **Write throughput is unmeasured.** It is the one axis
+  [#15](https://github.com/crtahlin/wasp/issues/15) put firmly in Pebble's favour,
+  so measuring it is more likely to strengthen the case than weaken it, but it
+  should be measured, not assumed. This is the write-load harness named earlier.
+- **The level-0 fix must be shown to hold over time.** The 19 files were cleared by
+  a restart; the lower trigger should keep them down as new files form, but a
+  longer steady-state watch is needed before relying on it in production.
+
+The idle-CPU finding also stands on its own regardless of the engine choice:
+goleveldb burning about 2.8 cores to compact a settled reserve at rest is the
+pressure ([#176](https://github.com/crtahlin/wasp/issues/176)) that began this
+work, and it is worth fixing on the goleveldb path too
 ([#23](https://github.com/crtahlin/wasp/issues/23),
 [#28](https://github.com/crtahlin/wasp/issues/28),
 [#29](https://github.com/crtahlin/wasp/issues/29)).
