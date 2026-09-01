@@ -262,21 +262,43 @@ steady-state operation, rather than only right after a flush, is stated on the
 trigger's semantics, not yet shown over time. A longer level-0 watch is the small
 remaining check on this axis.
 
-### What still needs a driven-load run
+### Write throughput (writebench)
 
-The reserve-sample read is measured above. Two axes remain open at steady state:
+Write throughput is the one axis a live node cannot show: a storer only writes as
+fast as pull-sync feeds it, which is network-bound, so the engine's own write
+ceiling stays hidden, and it is why bench-2 filled without ever stalling. To reach
+the ceiling the network has to be removed. The `writebench` tool in this directory
+does that: it drives the reserve's write shape (four small index entries per
+chunk, committed per chunk) straight through each engine's own `Batch`/`Commit`
+path, with the node's options (64 MB cache and buffer, Pebble level-0 trigger 4).
+It writes to its own throwaway store in a scratch directory, never the node
+datadir, and refuses any path that is non-empty or looks like a datadir. Run on
+bench-2's hardware and disk, two million chunks (eight million index writes) per
+run, six runs per engine to capture the spread, with the bee node left running so
+both engines meet the same background load.
 
-- **Write throughput and `ReservePut` latency**: the axis
-  [#15](https://github.com/crtahlin/wasp/issues/15) cared most about (its
-  microbenchmark put Pebble 5–8x faster on writes). A fair read needs a matched
-  write burst against both engines, or a fresh side-by-side fill race, not the
-  historical fill of one node.
-- **`ReserveGet` under ordinary retrieval load**: organic traffic drove no
-  `ReserveGet` in the window, so per-call retrieval latency at a full reserve is
-  still open, distinct from the bulk sample read above.
+**Table: writebench, 2M chunks per run, six runs per engine, bench-2, 2026-09-01**
 
-Both need generated load, driven with care against bench-1, the stable control
-holding a real reserve.
+| | goleveldb | Pebble |
+|---|---|---|
+| chunks/s, median | 58,700 | 79,700 |
+| chunks/s, min–max | 27,700 – 60,400 | 23,900 – 99,600 |
+| commit latency p50 | 0.012 ms | 0.006 ms |
+| commit latency p99 | 0.030 ms | 0.017 ms |
+| worst commit, any run | 5.5 s (1 of 6 rounds) | 17.4 s (3 of 6 rounds) |
+
+Pebble writes faster on the whole, about 1.36x on the median, and its typical
+commit is quicker (half the p50 and p99). goleveldb is steadier: five of its six
+runs held a worst commit under 50 ms, against Pebble's three runs with
+multi-second stalls. Both engines stall under saturation once compaction falls
+behind the flood, and Pebble stalls harder and more often. The stall tail is the
+cost that pairs with Pebble's higher average.
+
+Two caveats keep this honest. The bench saturates the write path on purpose; a
+live node ingests at sync rates far below 60,000 chunks per second, so it does not
+reach this regime, which is why the fill never stalled. And these are writes into
+a fresh store; writing into an already-full reserve, which is what a radius drop
+does, is a different and untested shape, noted below.
 
 ## Verdict, against the criteria fixed above
 
@@ -297,9 +319,9 @@ shallow (`db-compaction-l0-trigger: 4`, default cache):
   level 0 is kept shallow, and steadier. **Pebble wins.** A 4.6x goleveldb win
   appears only at Pebble's default L0 tuning, which the retest showed to be a fixable
   artefact, not the engine's floor.
-- **write throughput**: **still not measured**;
-  [#15](https://github.com/crtahlin/wasp/issues/15)'s microbenchmark favoured
-  Pebble 5–8x.
+- **write throughput**: Pebble about 1.36x faster on the median and quicker at the
+  typical commit, but with a heavier multi-second stall tail under saturation.
+  **Pebble wins on throughput, with a stall-tail caveat.**
 
 This reverses the pre-tuning reading. With one configuration change that costs
 nothing and no extra memory, Pebble matches or beats goleveldb on every axis
@@ -311,16 +333,22 @@ reserve, and it no longer describes the node in front of us: the reserve-sample
 slowness it warned about was goleveldb's compaction habits hiding in Pebble's
 default L0 trigger, not an inherent read penalty.
 
-It is still short of a final adopt decision, for two concrete and now-narrow
-reasons, both pointing toward Pebble rather than away:
+It is still short of a final adopt decision, for concrete and now-narrow reasons:
 
-- **Write throughput is unmeasured.** It is the one axis
-  [#15](https://github.com/crtahlin/wasp/issues/15) put firmly in Pebble's favour,
-  so measuring it is more likely to strengthen the case than weaken it, but it
-  should be measured, not assumed. This is the write-load harness named earlier.
-- **The level-0 fix must be shown to hold over time.** The 19 files were cleared by
-  a restart; the lower trigger should keep them down as new files form, but a
-  longer steady-state watch is needed before relying on it in production.
+- **Mass eviction is untested, and it is where these engines most diverge.** When a
+  postage batch expires or the radius rises, the reserve deletes millions of index
+  entries at once (about three index deletes per chunk in `removeChunk`, plus a
+  sharky slot release that is the same on both engines). A burst of deletes writes
+  tombstones that slow every read until compaction reclaims them, and the two
+  engines reclaim differently. Given that Pebble's reserve-sample read was already
+  the tuning-sensitive axis, its behaviour just after a mass delete, when tombstones
+  are thickest, is the most important thing still unmeasured. This is the next
+  experiment.
+- **The write stall tail wants a look, and the level-0 fix wants a longer watch.**
+  Pebble's multi-second commit stalls under saturation are tunable
+  (`L0StopWritesThreshold`, compaction concurrency) and worth characterising; and
+  the level-0 fix that made the sample fast was set by a restart, so it should be
+  shown to hold through steady-state operation.
 
 The idle-CPU finding also stands on its own regardless of the engine choice:
 goleveldb burning about 2.8 cores to compact a settled reserve at rest is the
