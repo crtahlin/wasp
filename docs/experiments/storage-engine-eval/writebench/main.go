@@ -194,10 +194,10 @@ func report(engine string, chunks, entries int, elapsed time.Duration, lat []tim
 		idx := int(p * float64(len(lat)-1))
 		return lat[idx]
 	}
-	fmt.Printf("engine=%s chunks=%d entries_per_chunk=%d index_writes=%d\n", engine, chunks, entries, writes)
-	fmt.Printf("elapsed=%.2fs chunks_per_s=%.0f index_writes_per_s=%.0f\n",
+	fmt.Fprintf(os.Stdout, "engine=%s chunks=%d entries_per_chunk=%d index_writes=%d\n", engine, chunks, entries, writes)
+	fmt.Fprintf(os.Stdout, "elapsed=%.2fs chunks_per_s=%.0f index_writes_per_s=%.0f\n",
 		elapsed.Seconds(), float64(chunks)/elapsed.Seconds(), float64(writes)/elapsed.Seconds())
-	fmt.Printf("commit_latency_ms p50=%.3f p99=%.3f max=%.3f commits=%d\n",
+	fmt.Fprintf(os.Stdout, "commit_latency_ms p50=%.3f p99=%.3f max=%.3f commits=%d\n",
 		float64(pct(0.50).Microseconds())/1000, float64(pct(0.99).Microseconds())/1000,
 		float64(pct(1.0).Microseconds())/1000, len(lat))
 }
