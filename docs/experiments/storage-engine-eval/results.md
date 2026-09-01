@@ -5,15 +5,16 @@ Issue: [#185](https://github.com/crtahlin/wasp/issues/185) · Spec:
 microbenchmark verdict in [#15](https://github.com/crtahlin/wasp/issues/15) once
 this completes.
 
-**Status: steady-state comparison done (2026-09-01); the write and
-heavy-read axes still need a driven-load run.** bench-2 has filled to a full
-radius-9 reserve, matched to bench-1 on the within-radius count, and both nodes
-were at rest (pull-sync zero) when measured. The at-rest axes, on-disk
-footprint, CPU, memory, and the read path that organic traffic exercises, are
-measured below. The write-throughput and retrieval-read axes could not be read
-from idle nodes and are named as the remaining step. This document fixed the
-method and the verdict criteria *before* the numbers arrived, per the repo's
-measure-before-you-conclude rule.
+**Status: steady-state and reserve-sample comparison done (2026-09-01); write
+throughput is the one axis still open.** bench-2 has filled to a full radius-9
+reserve, matched to bench-1 on the within-radius count. The at-rest axes (disk,
+CPU, memory) and the heaviest read a storer performs (the redistribution reserve
+sample, measured with `rchash`) are recorded below. The result is a trade-off:
+Pebble uses about half the index disk and half the idle CPU, but computes the
+reserve sample about 4.6x slower, which is the read path
+[#15](https://github.com/crtahlin/wasp/issues/15) flagged. Only write throughput
+remains unmeasured. This document fixed the method and the verdict criteria
+*before* the numbers arrived, per the repo's measure-before-you-conclude rule.
 
 ## The two nodes
 
@@ -169,52 +170,107 @@ a millisecond, so the absolute difference is roughly 20 microseconds per call,
 operationally irrelevant. This is the one read path organic protocol traffic
 drove during the window.
 
-### What idle nodes could not show
+### Reserve-sample read, the redistribution path (rchash)
 
-At rest, `ReserveGet` and `ReservePut` each saw zero operations in the window, and
-no reserve sample ran, so none of the three could be measured from organic
-traffic. Their lifetime cumulative averages are dominated by each node's history,
-bench-2 spent its whole life filling, and are not comparable, so they are
-deliberately not reported here. Measuring them needs generated load:
+The `/rchash` endpoint computes the reserve commitment sample the redistribution
+game runs once per round to prove reserve. It iterates the whole within-radius
+reserve, computes a transformed address for the sampled chunks, and returns the
+sample hash with its inclusion proofs. It is the heaviest read a storer performs,
+and it is the read path [#15](https://github.com/crtahlin/wasp/issues/15) flagged
+as Pebble's weakness. It needs no injected data, so it drives that read directly
+without perturbing either reserve. The two VMs share a host, so runs were taken
+strictly one node at a time, three each, alternating, with a 60-second settle gap.
+Each run used depth 9 and the node's own overlay as the anchor, so it sampled that
+node's entire reserve. Every run returned a valid sample, and each node's hash was
+identical across its three runs, so the timings compare the same deterministic
+work.
+
+**Table: rchash reserve-sample duration at a full radius-9 reserve, 2026-09-01**
+
+| | bench-1 goleveldb | bench-2 Pebble |
+|---|---|---|
+| run 1 / 2 / 3 (s) | 79.0 / 29.8 / 51.8 | 257.3 / 239.3 / 245.6 |
+| median | 51.8 s | 245.6 s |
+| min, max | 29.8, 79.0 s | 239.3, 257.3 s |
+
+**goleveldb computes the sample about 4.6x faster** on the median (51.8 vs 245.6
+seconds). goleveldb's spread is wide, its fastest run a warm page cache and its
+slowest a colder one; Pebble is tight at about 245 seconds regardless, so its cost
+is structural rather than a cache miss. The shared host penalised Pebble, not
+goleveldb: Pebble sampled while goleveldb was spending its ~2.8 idle cores
+compacting, so the true gap on a quiet host is if anything smaller, but not by the
+factor that separates them.
+
+This looks like a tuning problem, not an inherent Pebble limit, and the metrics
+point at a cause. At steady state, with **zero writes**, Pebble was sitting at
+**19 level-0 files with 382 MB of uncompacted debt**, while goleveldb held level 0
+at 5. Level-0 files overlap, so an iterator merges across all of them on every
+step; a reserve scan across 19 overlapping L0 files plus the lower levels does far
+more work per chunk than the same scan on a well-compacted tree. And the block
+cache is 64 MB against a 1.9 GB index, so almost nothing stays hot between the
+per-round samples, which is exactly the warm-cache advantage goleveldb's fast run
+shows. Both levers are already exposed configuration
+([rule 8](../../../AGENTS.md)): raising `db-block-cache-capacity` well above 64 MB,
+and keeping level 0 shallow at rest (a lower `db-compaction-l0-trigger`, or a
+periodic compaction so a settled reserve does not sit at 19 L0 files). Whether
+either closes the 4.6x gap is a hypothesis to test, not a claim, and it is the
+next experiment on this arm.
+
+### What still needs a driven-load run
+
+The reserve-sample read is measured above. Two axes remain open at steady state:
 
 - **Write throughput and `ReservePut` latency**: the axis
   [#15](https://github.com/crtahlin/wasp/issues/15) cared most about (its
   microbenchmark put Pebble 5–8x faster on writes). A fair read needs a matched
   write burst against both engines, or a fresh side-by-side fill race, not the
   historical fill of one node.
-- **`ReserveGet` under load and the reserve-sample read path**: the axis
-  [#15](https://github.com/crtahlin/wasp/issues/15) flagged as Pebble's weakness
-  (reads 1.16–3.47x slower). This needs a driven retrieval workload against
-  locally held chunks.
+- **`ReserveGet` under ordinary retrieval load**: organic traffic drove no
+  `ReserveGet` in the window, so per-call retrieval latency at a full reserve is
+  still open, distinct from the bulk sample read above.
 
-Neither can be read from nodes sitting at pull-sync zero, and driving that load
-against bench-1, the stable control holding a real reserve, should be done with
-care not to perturb it. A small read-load harness is the next step.
+Both need generated load, driven with care against bench-1, the stable control
+holding a real reserve.
 
 ## Verdict so far, against the criteria fixed above
 
 Measured against the pre-registered criteria:
 
-- **disk footprint**: Pebble clearly smaller, about half the index bytes per
-  chunk. **Pebble wins.**
+- **disk footprint**: Pebble about half the index bytes per chunk. **Pebble wins.**
 - **memory**: comparable. **Tie.**
 - **write stall**: neither node stalled; bench-2 adopted radius 9 immediately and
   filled to full without a stall. **No stall on either.**
-- **read latency (Has, the path traffic drove)**: goleveldb marginally faster by
-  ~20 microseconds, operationally irrelevant. **Marginal goleveldb edge, not
-  material.**
-- **write throughput and Get-under-load**: **not yet measured**; needs the load
-  harness above.
+- **light read (`ReserveHas`)**: goleveldb faster by about 20 microseconds,
+  immaterial. **Marginal goleveldb edge, not material.**
+- **heavy read (reserve sample)**: goleveldb about 4.6x faster, on the path the
+  redistribution game runs every round. **goleveldb wins, decisively, at the
+  current Pebble tuning.**
+- **write throughput**: **not yet measured**; [#15](https://github.com/crtahlin/wasp/issues/15)'s
+  microbenchmark favoured Pebble 5–8x.
 
-The at-rest picture favours Pebble on the two axes that separate the engines here,
-it uses roughly half the index disk and, strikingly, less than half the CPU at
-rest, while matching on memory and giving up only an irrelevant sliver of
-`ReserveHas` latency. That is a materially stronger position than the
-[#15](https://github.com/crtahlin/wasp/issues/15) microbenchmark implied.
+The real-node picture is a trade-off, not a clean result either way. Pebble uses
+half the index disk and half the idle CPU, and its idle quiet exposes that
+goleveldb burns about 2.8 cores compacting at rest, the very pressure
+([#176](https://github.com/crtahlin/wasp/issues/176)) that began this work. But on
+the reserve sample, the heaviest and most consequential read a storer performs,
+Pebble is about 4.6x slower, and the pre-registered criteria adopt Pebble only if
+it is at least as good on reads. At its current tuning it is not.
 
-It is **not yet a decision.** The pre-registered criteria require Pebble to be at
-least as good on writes, and the write path is exactly what idle nodes cannot
-show. The honest state is: the static and at-rest axes favour Pebble, clearly on
-disk and CPU; the write-throughput and heavy-read axes remain open and are the
-gate on adopting or holding to [#15](https://github.com/crtahlin/wasp/issues/15)'s
-verdict. The next step is the load harness, not a conclusion.
+So on the evidence in hand, [#15](https://github.com/crtahlin/wasp/issues/15)'s
+"do not adopt Pebble as the default" verdict holds, now with real-node evidence
+rather than a microbenchmark: a node that takes four minutes to prove its reserve
+where goleveldb takes fifty seconds is at a real disadvantage in the round, and
+that outweighs the disk and idle-CPU savings for a node whose job is to store a
+reserve and prove it.
+
+Two things keep this from being final. The reserve-sample gap is measured **at the
+default Pebble tuning**, and the level-0 and block-cache evidence above suggests it
+is at least partly a tuning artefact rather than the engine's floor; the tuning
+retest is the next experiment and could change this line. And write throughput,
+where [#15](https://github.com/crtahlin/wasp/issues/15) put Pebble far ahead,
+remains unmeasured. The constructive reading of the idle-CPU finding is not
+"switch engines" but "fix what makes goleveldb burn 2.8 cores at rest", the
+contention work the survey pointed to
+([#23](https://github.com/crtahlin/wasp/issues/23),
+[#28](https://github.com/crtahlin/wasp/issues/28),
+[#29](https://github.com/crtahlin/wasp/issues/29)).
