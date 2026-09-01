@@ -1,7 +1,7 @@
 openapi: 3.0.3
 
 info:
-  version: 8.2.1
+  version: 8.2.2
   title: Wasp API
   description: "API endpoints for interacting with the Swarm network, supporting file operations, messaging, and node management. Wasp is an unofficial experimental distribution of Bee; it is wire-compatible with stock Bee but its HTTP API may diverge where a defect is fixed. Divergences are listed under each affected endpoint."
 
@@ -65,6 +65,7 @@ paths:
           name: swarm-redundancy-level
           required: false
       requestBody:
+        description: List of grantee public keys to create the ACT grantee list from.
         required: true
         content:
           application/json:
@@ -155,6 +156,7 @@ paths:
           name: swarm-redundancy-level
           required: false
       requestBody:
+        description: Grantees to add to or revoke from the existing ACT grantee list.
         required: true
         content:
           application/json:
@@ -187,6 +189,7 @@ paths:
         - $ref: "SwarmCommon.yaml#/components/parameters/SwarmAct"
         - $ref: "SwarmCommon.yaml#/components/parameters/SwarmActHistoryAddress"
       requestBody:
+        description: Raw bytes to upload.
         content:
           application/octet-stream:
             schema:
@@ -431,12 +434,14 @@ paths:
         - $ref: "SwarmCommon.yaml#/components/parameters/SwarmAct"
         - $ref: "SwarmCommon.yaml#/components/parameters/SwarmActHistoryAddress"
       requestBody:
+        description: File, files, or raw bytes to upload.
         content:
           multipart/form-data:
             schema:
               properties:
                 file:
                   type: array
+                  description: File or files to upload as a collection.
                   items:
                     type: string
                     format: binary
@@ -702,7 +707,7 @@ paths:
 
   "/tags/{id}":
     get:
-      summary: "Get Tag information using Uid"
+      summary: "Get Tag information using UID"
       tags:
         - Tag
       parameters:
@@ -711,7 +716,7 @@ paths:
           schema:
             $ref: "SwarmCommon.yaml#/components/schemas/Uid"
           required: true
-          description: Uid
+          description: UID
       responses:
         "200":
           description: Tag info
@@ -728,7 +733,7 @@ paths:
         default:
           description: Default response
     delete:
-      summary: "Delete Tag information using Uid"
+      summary: "Delete Tag information using UID"
       tags:
         - Tag
       parameters:
@@ -737,7 +742,7 @@ paths:
           schema:
             $ref: "SwarmCommon.yaml#/components/schemas/Uid"
           required: true
-          description: Uid
+          description: UID
       responses:
         "204":
           $ref: "SwarmCommon.yaml#/components/responses/204"
@@ -750,7 +755,7 @@ paths:
         default:
           description: Default response
     patch:
-      summary: "Update Total Count and swarm hash for a tag of an input stream of unknown size using Uid"
+      summary: "Update Total Count and swarm hash for a tag of an input stream of unknown size using UID"
       tags:
         - Tag
       parameters:
@@ -759,7 +764,7 @@ paths:
           schema:
             $ref: "SwarmCommon.yaml#/components/schemas/Uid"
           required: true
-          description: Uid
+          description: UID
       requestBody:
         description: Can contain swarm hash to use for the tag
         required: false
@@ -925,7 +930,7 @@ paths:
           schema:
             $ref: "SwarmCommon.yaml#/components/schemas/PssRecipient"
           required: false
-          description: Recipient publickey
+          description: Recipient public key
         - $ref: "SwarmCommon.yaml#/components/parameters/SwarmPostageBatchId"
       responses:
         "201":
@@ -1662,6 +1667,7 @@ paths:
                       Capacity: { type: integer }
                       LastBinIDs:
                         type: array
+                        description: Highest bin ID synced per proximity-order bin.
                         items: { type: integer }
                       Epoch: { type: integer }
                   ChunkStore:
@@ -1853,6 +1859,7 @@ paths:
       tags:
         - Connectivity
       requestBody:
+        description: Welcome message to advertise to peers.
         content:
           application/json:
             schema:
@@ -2705,12 +2712,12 @@ paths:
 
   "/status/peers":
     get:
-      summary: Get the current status snapshot of this node connected peers.
+      summary: Get the current status snapshot of this node's connected peers.
       tags:
         - Node Status
       responses:
         "200":
-          description: Returns the status snapshot of this node connected peers
+          description: Returns the status snapshot of this node's connected peers
           content:
             application/json:
               schema:
