@@ -32,6 +32,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -68,6 +71,8 @@ func run() error {
 		openFiles  = flag.Int("open-files", 512, "open files limit")
 		seed       = flag.Uint64("seed", 1, "deterministic key seed")
 		keep       = flag.Bool("keep", false, "keep the scratch store")
+		doProbe    = flag.Bool("probe", false, "run a concurrent read probe during delete and recovery, measuring node responsiveness")
+		probeGap   = flag.Int("probe-gap-ms", 5, "sleep between probe reads")
 	)
 	flag.Parse()
 
@@ -125,6 +130,17 @@ func run() error {
 	// Read baseline.
 	readPhase(ctx, st, "baseline", *engine, *chunks, *entries, *evictEvery, *gets, *seed, value)
 
+	// A concurrent read probe measures whether the node keeps serving while the
+	// eviction and its compaction run. The question is responsiveness, not eviction
+	// speed: a slower eviction that leaves the node serving is better than a fast
+	// one that stalls it. cpuMeter tracks the process CPU the compaction burns.
+	var pr *probe
+	var cpu *cpuMeter
+	if *doProbe {
+		pr = startProbe(ctx, st, *chunks, *entries, *evictEvery, *seed, *probeGap)
+		cpu = newCPUMeter()
+	}
+
 	// Mass delete: evict one chunk in evictEvery (a single large batch expiry).
 	t = time.Now()
 	deletes, commits := 0, make([]time.Duration, 0, *chunks / *evictEvery)
@@ -155,14 +171,24 @@ func run() error {
 		"size_bytes": dirSize(*path), "l0": level0(st),
 	})
 
+	if pr != nil {
+		emitProbe("probe:during-delete", *engine, pr.drain(), cpu.sample())
+	}
+
 	// Read immediately after delete, tombstones thickest.
 	readPhase(ctx, st, "post-delete", *engine, *chunks, *entries, *evictEvery, *gets, *seed, value)
 
 	// Watch recovery as background compaction runs.
 	for i := 1; i <= *settleN; i++ {
 		time.Sleep(time.Duration(*settleGap) * time.Second)
+		if pr != nil {
+			emitProbe(fmt.Sprintf("probe:settle_t%ds", i**settleGap), *engine, pr.drain(), cpu.sample())
+		}
 		readPhaseTagged(ctx, st, fmt.Sprintf("settle_t%ds", i**settleGap), *engine, *chunks,
 			*entries, *evictEvery, *gets, *seed, value, dirSize(*path), level0(st))
+	}
+	if pr != nil {
+		pr.close()
 	}
 	return nil
 }
@@ -365,6 +391,145 @@ func mix(x uint64) uint64 {
 	x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9
 	x = (x ^ (x >> 27)) * 0x94D049BB133111EB
 	return x ^ (x >> 31)
+}
+
+// probe is a concurrent reader that runs while the eviction and its compaction
+// proceed, so its latency shows whether the node keeps serving. Each iteration
+// does one get and one short bounded scan, the shape of serving a request.
+type probe struct {
+	mu      sync.Mutex
+	samples []probeSample
+	stop    chan struct{}
+	done    chan struct{}
+}
+
+type probeSample struct{ get, scan time.Duration }
+
+func startProbe(_ context.Context, st storage.BatchStore, chunks, entries, evictEvery int, seed uint64, gapMS int) *probe {
+	_ = entries
+	p := &probe{stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(p.done)
+		x := seed ^ 0xABCDEF
+		ns := nsName(0)
+		for {
+			select {
+			case <-p.stop:
+				return
+			default:
+			}
+			x += 0x9E3779B97F4A7C15
+			c := int(mix(x) % uint64(chunks))
+			if evictEvery > 0 && c%evictEvery == 0 {
+				c++
+			}
+			gt := time.Now()
+			_ = st.Get(&kvItem{ns: ns, id: detID(seed, uint64(c), 0)})
+			gd := time.Since(gt)
+
+			n := 0
+			st0 := time.Now()
+			_ = st.Iterate(storage.Query{
+				Factory:      func() storage.Item { return &kvItem{ns: ns} },
+				ItemProperty: storage.QueryItemID,
+			}, func(storage.Result) (bool, error) {
+				n++
+				return n >= 1000, nil
+			})
+			sd := time.Since(st0)
+
+			p.mu.Lock()
+			p.samples = append(p.samples, probeSample{gd, sd})
+			p.mu.Unlock()
+			if gapMS > 0 {
+				time.Sleep(time.Duration(gapMS) * time.Millisecond)
+			}
+		}
+	}()
+	return p
+}
+
+func (p *probe) drain() []probeSample {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	s := p.samples
+	p.samples = nil
+	return s
+}
+
+func (p *probe) close() {
+	close(p.stop)
+	<-p.done
+}
+
+func emitProbe(phase, engine string, s []probeSample, cpuPct float64) {
+	gets := make([]time.Duration, len(s))
+	scans := make([]time.Duration, len(s))
+	for i, x := range s {
+		gets[i], scans[i] = x.get, x.scan
+	}
+	gp50, gp99, gmx := pcts(gets)
+	sp50, sp99, smx := pcts(scans)
+	emit(phase, engine, "evict", map[string]any{
+		"samples":    len(s),
+		"get_p50_ms": gp50, "get_p99_ms": gp99, "get_max_ms": gmx,
+		"scan_p50_ms": sp50, "scan_p99_ms": sp99, "scan_max_ms": smx,
+		"cpu_pct": round(cpuPct, 0),
+	})
+}
+
+// cpuMeter reads process CPU from /proc/self/stat between samples. 100 percent is
+// one core. It returns -1 off Linux, so the harness still runs elsewhere.
+type cpuMeter struct {
+	lastTicks int64
+	lastTime  time.Time
+}
+
+func newCPUMeter() *cpuMeter {
+	m := &cpuMeter{lastTime: time.Now()}
+	m.lastTicks, _ = procCPUTicks()
+	return m
+}
+
+func (m *cpuMeter) sample() float64 {
+	if m == nil {
+		return -1
+	}
+	now := time.Now()
+	ticks, ok := procCPUTicks()
+	if !ok {
+		return -1
+	}
+	dt := now.Sub(m.lastTime).Seconds()
+	dticks := float64(ticks - m.lastTicks)
+	m.lastTicks, m.lastTime = ticks, now
+	if dt <= 0 {
+		return -1
+	}
+	// Linux _SC_CLK_TCK is 100 on the bench.
+	return dticks / 100 / dt * 100
+}
+
+func procCPUTicks() (int64, bool) {
+	data, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		return 0, false
+	}
+	s := string(data)
+	rp := strings.LastIndex(s, ")")
+	if rp < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(s[rp+1:])
+	if len(fields) < 13 {
+		return 0, false
+	}
+	utime, err1 := strconv.ParseInt(fields[11], 10, 64)
+	stime, err2 := strconv.ParseInt(fields[12], 10, 64)
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	return utime + stime, true
 }
 
 type kvItem struct {
