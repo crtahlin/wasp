@@ -24,15 +24,15 @@ header = """
 
 Changes this fork makes to upstream Bee. Upstream's own changes are absorbed as
 single `chore(upstream)` entries — see `.upstream-base` for the release this
-build derives from, and upstream's release notes for what it contains.\n
+build derives from, and upstream's release notes for what it contains.
 """
 body = """
-{% set repo = "https://github.com/crtahlin/wasp" -%}
+{% set repo = "https://github.com/crtahlin/wasp" %}
 {% if version -%}
 ## [{{ version | trim_start_matches(pat="v") }}]({{ repo }}/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
 {% else -%}
 ## Unreleased
-{% endif %}
+{% endif -%}
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | upper_first }}
 {% for commit in commits %}\

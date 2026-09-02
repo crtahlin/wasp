@@ -10,8 +10,6 @@ starting at `v0.1.0`, and reports the upstream base separately:
 
 ```
 $ bee version
-0.2.0-a1b2c3d4
-$ bee version --verbose        # or the startup log line
 wasp 0.2.0-a1b2c3d4 (upstream bee v2.8.1)
 ```
 
