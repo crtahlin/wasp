@@ -593,6 +593,12 @@ type Options struct {
 
 	ReserveCapacity       int
 	ReserveWakeUpDuration time.Duration
+	// ReserveBatchSweepInterval is how often the reserve reconciles chunks
+	// against the batches they claim, evicting any whose batch has vanished.
+	// Zero runs it on every reserve wake-up, which is the previous behaviour.
+	// A longer interval keeps the frequent wake-up scan to the cheap
+	// within-radius count. See issue #28.
+	ReserveBatchSweepInterval time.Duration
 	// SamplerReadConcurrency is how many chunk loads the reserve sampler keeps
 	// in flight. Zero means the default, which preserves the previous behaviour
 	// of one pool sized to the core count.
@@ -689,6 +695,7 @@ type DB struct {
 type reserveOpts struct {
 	startupStabilizer  stabilization.Subscriber
 	wakeupDuration     time.Duration
+	batchSweepInterval time.Duration
 	minEvictCount      uint64
 	cacheMinEvictCount uint64
 	minimumRadius      uint8
@@ -852,6 +859,7 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 		reserveOptions: reserveOpts{
 			startupStabilizer:      opts.StartupStabilizer,
 			wakeupDuration:         opts.ReserveWakeUpDuration,
+			batchSweepInterval:     opts.ReserveBatchSweepInterval,
 			minEvictCount:          opts.ReserveMinEvictCount,
 			cacheMinEvictCount:     opts.CacheMinEvictCount,
 			minimumRadius:          uint8(opts.MinimumStorageRadius),

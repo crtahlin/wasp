@@ -438,6 +438,7 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		PullerMaxChunksPerSecond:      c.config.GetInt(optionNamePullerMaxChunksPerSecond),
 		PullerRecalcPeersDur:          c.config.GetDuration(optionNamePullSyncRecalcInterval),
 		ReserveWakeUpDuration:         c.config.GetDuration(optionNameReserveWakeUpDuration),
+		ReserveBatchSweepInterval:     c.config.GetDuration(optionNameReserveBatchSweepInterval),
 		WhitelistedWithdrawalAddress:  c.config.GetStringSlice(optionNameWhitelistedWithdrawalAddress),
 	})
 
