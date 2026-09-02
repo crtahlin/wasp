@@ -395,6 +395,50 @@ which is a code change in the store rather than a runtime option. Given that
 Pebble stays responsive and reclaims eventually, and that gentle-but-slow was the
 stated preference, this is a follow-up worth having, not a blocker.
 
+### Reads under sync load (read-under-write)
+
+A Swarm node does most of its work while syncing, and mainnet activity will grow,
+so the question is whether one engine's reads degrade more than the other's while
+the node ingests. `evictbench`'s readwrite mode tests it directly: it sustains a
+write load at a fixed rate (the shape of active sync) and times a full index scan
+(the reserve-sample read) against it. A fixed rate keeps the two engines under
+matched load, so any difference is the engine's own read-under-write behaviour.
+This is the pure index store, no sharky, so it is not confounded by the cache
+effect below.
+
+**Table: index-scan latency under a sustained matched write load, bench-2, 2026-09-02**
+
+| write rate | goleveldb scan, start to end | Pebble scan, start to end | goleveldb CPU | Pebble CPU |
+|---|---|---|---|---|
+| 5,000 /s (moderate sync) | 1790 to 1857 ms | 1420 to 1770 ms | 17 to 30% | 14 to 23% |
+| 20,000 /s (heavy catch-up) | 2250 to 4360 ms | 1560 to 3010 ms | up to 72% | up to 48% |
+
+Both engines wrote the same number of chunks. At moderate sync they are comparable,
+Pebble a little ahead. Under heavy sync **Pebble's scan degrades noticeably less**
+(it ends near 3.0 s against goleveldb's 4.0 to 4.4 s) at **lower CPU**. Pebble's
+level 0 climbs higher under writes (6 to 16 against 0 to 3), as its deferred
+compaction predicts, but that does not slow its reads: it organises level 0 into
+sublevels and iterates them efficiently. The mechanism is the familiar one:
+goleveldb's eager compaction competes with the concurrent read for CPU, so under
+write load goleveldb is the engine that degrades more, not Pebble. Reads under sync
+favour Pebble.
+
+### Why the reserve sample is cache-sensitive (a shared, engine-independent limit)
+
+A power loss took both nodes down and gave an unplanned but useful test. On the
+cold-booted nodes the reserve sample ran about 2.5x slower on both engines (Pebble
+141 s, goleveldb 115 s, against the warm 44 s and 52 s), and it stayed slow at true
+steady state with pull-sync at zero and level 0 shallow. The cause is not the
+engine. The reserve here is 17.8 GB (16 GB sharky plus 1.8 GB index) against 16 GB
+of RAM, and the sample reads every chunk, so once the reserve outgrows memory the
+uncached part comes from disk as random 4 KB reads, which measured 113 MiB/s
+against 538 MiB/s sequential. A long-running node keeps that working set warm; a
+freshly booted one does not, so both engines slow until the cache refills. Because
+sharky is the same on both engines, this is a shared limit, not a differentiator,
+and it is the large-reserve regime caveat 4 flagged. It is worth stating plainly:
+the reserve-sample read time is dominated by cache state whenever the reserve
+exceeds RAM, for either engine, and single warm-node sample numbers understate it.
+
 ## Verdict, against the criteria fixed above
 
 Measured against the pre-registered criteria, with Pebble tuned to hold level 0
@@ -428,6 +472,13 @@ shallow (`db-compaction-l0-trigger: 4`, default cache):
 - **radius decrease (writes into a full store)**: Pebble faster on throughput, with
   the same occasional multi-second stall. **Pebble wins on throughput, same
   stall-tail caveat.**
+- **reads under sync load**: at matched write rates, Pebble's index-scan degrades
+  less under heavy sync (ending near 3.0 s against goleveldb's 4.0 to 4.4 s) at
+  lower CPU. **Pebble wins.** The hypothesis that Pebble would be worse while
+  syncing was tested and did not hold.
+- **reserve sample when the reserve exceeds RAM**: dominated by random-read cache
+  state, the same on both engines. **Not a differentiator**, but a real limit on
+  either engine that single warm-node numbers understate.
 
 This reverses the pre-tuning reading on the read axes, and on eviction once the
 metric is responsiveness rather than speed. With one configuration change that costs
