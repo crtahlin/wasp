@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -74,6 +75,9 @@ func run() error {
 		doProbe    = flag.Bool("probe", false, "run a concurrent read probe during delete and recovery, measuring node responsiveness")
 		probeGap   = flag.Int("probe-gap-ms", 5, "sleep between probe reads")
 		maxCompact = flag.Int("max-compactions", 0, "pebble MaxConcurrentCompactions; 0 leaves the default")
+		writeRate  = flag.Int("write-rate", 0, "readwrite mode: sustained write rate in chunks/s; 0 is unbounded")
+		durationS  = flag.Int("duration-s", 120, "readwrite mode: how long to sustain the write load")
+		scanEveryS = flag.Int("scan-every-s", 10, "readwrite mode: seconds between full-scan samples")
 	)
 	flag.Parse()
 
@@ -125,6 +129,36 @@ func run() error {
 			"commit_p50_ms": p50, "commit_p99_ms": p99, "commit_max_ms": mx,
 			"size_bytes": dirSize(*path), "l0": level0(st),
 		})
+		return nil
+	}
+
+	// readwrite: sustain a write load (the shape of active sync) and time a full
+	// scan (the reserve-sample read) against it, so we can see whether one engine's
+	// read degrades more than the other's while the node is ingesting.
+	if *mode == "readwrite" {
+		w := startWriter(ctx, st, *chunks, *entries, *seed, value, *writeRate)
+		cpu := newCPUMeter()
+		// baseline scan with no write load yet is the populate scan above; sample
+		// under load from here.
+		deadline := *durationS
+		for elapsed := *scanEveryS; elapsed <= deadline; elapsed += *scanEveryS {
+			time.Sleep(time.Duration(*scanEveryS) * time.Second)
+			scanStart := time.Now()
+			scanned := 0
+			for e := 0; e < *entries; e++ {
+				ns := nsName(e)
+				_ = st.Iterate(storage.Query{
+					Factory:      func() storage.Item { return &kvItem{ns: ns} },
+					ItemProperty: storage.QueryItemID,
+				}, func(storage.Result) (bool, error) { scanned++; return false, nil })
+			}
+			emit("readwrite", *engine, *mode, map[string]any{
+				"t_s": elapsed, "scan_ms": round(float64(time.Since(scanStart).Milliseconds()), 0),
+				"writes_done": w.count(), "write_rate_target": *writeRate,
+				"l0": level0(st), "cpu_pct": round(cpu.sample(), 0), "size_bytes": dirSize(*path),
+			})
+		}
+		w.close()
 		return nil
 	}
 
@@ -464,6 +498,55 @@ func (p *probe) drain() []probeSample {
 func (p *probe) close() {
 	close(p.stop)
 	<-p.done
+}
+
+// writer sustains a background write load, the shape of active sync ingest, so a
+// concurrent scan can be timed against it. It rate-limits to the target chunks/s
+// when rate > 0, and runs flat out otherwise.
+type writer struct {
+	n    int64
+	stop chan struct{}
+	done chan struct{}
+}
+
+func startWriter(_ context.Context, st storage.BatchStore, chunks, entries int, seed uint64, value []byte, rate int) *writer {
+	w := &writer{stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(w.done)
+		const batch = 200
+		c := chunks
+		for {
+			select {
+			case <-w.stop:
+				return
+			default:
+			}
+			start := time.Now()
+			for i := 0; i < batch; i++ {
+				b := st.Batch(context.Background())
+				for e := 0; e < entries; e++ {
+					_ = b.Put(&kvItem{ns: nsName(e), id: detID(seed, uint64(c), uint64(e)), val: value})
+				}
+				_ = b.Commit()
+				c++
+				atomic.AddInt64(&w.n, 1)
+			}
+			if rate > 0 {
+				want := time.Duration(float64(batch) / float64(rate) * float64(time.Second))
+				if el := time.Since(start); el < want {
+					time.Sleep(want - el)
+				}
+			}
+		}
+	}()
+	return w
+}
+
+func (w *writer) count() int64 { return atomic.LoadInt64(&w.n) }
+
+func (w *writer) close() {
+	close(w.stop)
+	<-w.done
 }
 
 func emitProbe(phase, engine string, s []probeSample, cpuPct float64) {
