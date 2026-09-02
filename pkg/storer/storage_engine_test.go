@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ethersphere/bee/v2/pkg/storage/pebblestore"
 )
 
 // TestResolveEngine covers the datadir guard and the marker resolution: an index
@@ -31,10 +33,11 @@ func TestResolveEngine(t *testing.T) {
 		}
 	})
 
-	t.Run("fresh dir with no request defaults to leveldb", func(t *testing.T) {
+	t.Run("fresh dir with no request defaults to pebble", func(t *testing.T) {
 		t.Parallel()
-		if got, err := resolveEngine(t.TempDir(), ""); err != nil || got != EngineLevelDB {
-			t.Fatalf("fresh empty request: got %q, %v; want leveldb, nil", got, err)
+		// #185 adopted pebble as the default for a brand new data directory.
+		if got, err := resolveEngine(t.TempDir(), ""); err != nil || got != EnginePebble {
+			t.Fatalf("fresh empty request: got %q, %v; want pebble, nil", got, err)
 		}
 	})
 
@@ -91,14 +94,22 @@ func TestPebbleIndexStoreOptions(t *testing.T) {
 	if o.MemTableSize != opts.LdbWriteBufferSize {
 		t.Errorf("MemTableSize = %d, want %d", o.MemTableSize, opts.LdbWriteBufferSize)
 	}
-	if o.L0CompactionThreshold != opts.LdbCompactionL0Trigger {
-		t.Errorf("L0CompactionThreshold = %d, want %d", o.L0CompactionThreshold, opts.LdbCompactionL0Trigger)
+	// At the shared default trigger, pebble keeps its own shallow-L0 default
+	// (#185) rather than taking the goleveldb-oriented default value.
+	if want := pebblestore.DefaultOptions().L0CompactionThreshold; o.L0CompactionThreshold != want {
+		t.Errorf("L0CompactionThreshold = %d, want the pebble default %d", o.L0CompactionThreshold, want)
 	}
 	if o.L0StopWritesThreshold != opts.LdbWritePauseTrigger {
 		t.Errorf("L0StopWritesThreshold = %d, want %d", o.L0StopWritesThreshold, opts.LdbWritePauseTrigger)
 	}
 	if o.MaxOpenFiles != int(opts.LdbOpenFilesLimit) {
 		t.Errorf("MaxOpenFiles = %d, want %d", o.MaxOpenFiles, opts.LdbOpenFilesLimit)
+	}
+
+	// An explicit, non-default compaction trigger overrides the pebble default.
+	opts.LdbCompactionL0Trigger = 6
+	if got := pebbleIndexStoreOptions(opts).L0CompactionThreshold; got != 6 {
+		t.Errorf("explicit L0 trigger not honoured: L0CompactionThreshold = %d, want 6", got)
 	}
 
 	// A zero compaction knob must not override Pebble's default with 0.

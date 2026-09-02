@@ -164,10 +164,10 @@
 # Storage engine and index-store tuning
 #
 # The reserve's index store. storage-engine chooses the engine for a NEW
-# data directory (goleveldb is the default and supported engine; pebble is
-# experimental, see issue #185). The db-* options tune whichever engine is
-# active; the level-0 triggers gate writes under compaction pressure. See
-# docs/agent-playbooks/test-bench.md.
+# data directory (pebble is the default since issue #185; goleveldb stays
+# selectable with "leveldb", and an existing goleveldb store keeps goleveldb).
+# The db-* options tune whichever engine is active; the level-0 triggers gate
+# writes under compaction pressure. See docs/agent-playbooks/test-bench.md.
 # ========================================================================
 
 ## size of block cache of the database in bytes
