@@ -2,6 +2,10 @@
 
 Issue: [#8](https://github.com/crtahlin/wasp/issues/8)
 
+Status: parked, pending [#9](https://github.com/crtahlin/wasp/issues/9). See the
+history section for why. This document is the optimization's design and its
+corrected record, not a merged change.
+
 ## Problem
 
 `shard.process()` (`pkg/sharky/shard.go:99`) is one goroutine per shard running a
@@ -20,156 +24,82 @@ this isolates software overhead from disk):
 | 256 | 438,739 | 4,474,478 |
 
 Sharky peaks at concurrency **4** and is then flat to 256. `pread` over the same
-files scales 6.3x. Under 8 concurrent writers Sharky collapses to 80,000–122,000
-ops/s while `pread` holds 2.6M, the worst case being exactly the condition the
-sampler runs in.
-
-Sampling is where this bites. With SIMD hashing enabled, disk is **78–89%** of
-reserve-sample time (three matched runs, #13).
+files scales 6.3x.
 
 ## Hypothesis
 
 The per-shard goroutine exists to serialise **free-slot allocation for writes**,
 not to make reads safe. Reads can bypass the actor entirely.
 
-Two facts support this:
-
 - `shard.read` does nothing but `sh.file.ReadAt(r.buf, sh.offset(r.slot))`.
   `ReadAt` compiles to `pread`, which neither uses nor mutates the shared file
   offset and is safe for concurrent use on the same descriptor.
-- The shard data file is a plain `*os.File` (`dirFS.Open` → `os.OpenFile`), and
-  the only `Seek` call in the package is in `slots.go`, on the **slots file**,
-  a different descriptor. Nothing repositions the shard file.
+- The shard data file is a plain `*os.File`, and nothing repositions it.
 
-## What the first attempt revealed, and the cause it missed
+## History, and the correction that matters
 
-This design was implemented and merged once (#63) and reverted (#66) because it
-crashed bench-1 with Go runtime heap corruption:
+This has a misattribution in its record, and the correction has to travel with the
+design so it is not repeated a third time.
 
-    fatal error: s.allocCount != s.nelems && freeIndex == s.nelems
+**First attempt.** The change was implemented and merged ([#63](https://github.com/crtahlin/wasp/issues/63))
+and then reverted ([#66](https://github.com/crtahlin/wasp/issues/66)) on the belief
+that it crashed bench-1 with Go runtime heap corruption
+(`fatal error: s.allocCount != s.nelems`).
 
-The node restarted four to five times in minutes. The race detector passed,
-including goleak, and the harness showed the expected speedup; none of it caught
-this, because the corruption only appeared on a live node doing millions of chunk
-reads per sample, a regime the unit tests do not reach. The lesson recorded in #66
-is that `-race` passing is not evidence of concurrency correctness for a change of
-this kind.
+**That diagnosis was wrong.** The crash was **SIMD memory corruption**
+([#92](https://github.com/crtahlin/wasp/issues/92)): the SIMD assembly stub ran
+foreign code on the goroutine stack and passed Go pointers to it, corrupting memory
+that then failed wherever it was next touched — "nine distinct runtime assertions
+across seven subsystems," the allocator among them. The `allocCount` assertion the
+revert pinned on this change was one of those, and the corruption is layout
+sensitive, which is why it was easy to blame the nearest concurrency change. After
+the SIMD fix, the concurrent-reads change was re-measured end to end and showed
+**no measurable node-level change** (1.2% either side of the baseline, inside the
+noise).
 
-The cause the original design missed is the read and close lifecycle. When reads
-ran inside the actor, the actor returned on `sh.quit` before `Store.Close` closed
-the shard file, so a read could never be in flight while the descriptor was
-closed. A direct read from the calling goroutine has no such guarantee: `Close`
-can close the file, and the OS can reuse the descriptor, while a `ReadAt` is still
-running against it. That is a use-after-close, exactly the unsynchronised access
-the allocator asserted on. A secondary suspect is buffer ownership, whether a
-buffer reaching `Store.Read` outlives its read under the new timing.
+**A second attempt was made and reverted too.** A re-approach added a per-shard
+`RWMutex` read-and-close guard, presented as the fix for a use-after-close that had
+crashed the node. That premise inherited the same misattribution: the node crash
+was SIMD, not a read/close race. On the real `*os.File` backend, Go's own file
+descriptor accounting already serialises `Close` against an in-flight `ReadAt` and
+returns a clean error after close, so there is no use-after-close to fix there. The
+guard was defensive and backend-generic, not a crash fix, and the change was
+reverted to restore this parked state rather than keep it on a false justification.
 
-## Design
+## Why it stays parked
 
-`Store.Read` calls `sh.read(...)` directly from the calling goroutine rather than
-handing work to the actor over `sh.reads` and awaiting `sh.errc`, so reads on a
-shard run concurrently instead of queueing behind it. Writes are unchanged: they
-keep the actor, because slot allocation genuinely must be serialised.
+The harness gain is real and large, but it **does not translate to a node**, for a
+reason the design cannot remove on its own: the sampler offers only `NumCPU`
+concurrent reads ([#9](https://github.com/crtahlin/wasp/issues/9)), which is at or
+below Sharky's current ceiling. Raising the ceiling while the caller offers no more
+concurrency measures nothing. The two must land and be measured together, or the
+result is a false negative. Until [#9](https://github.com/crtahlin/wasp/issues/9)
+provides the offered concurrency and a matched before-and-after on the bench shows a
+node-level effect, this is a 10x microbenchmark gain that moves nothing real, and it
+is not worth adding read/write concurrency to core storage for that.
 
-The correctness the first attempt lacked is added explicitly. Each shard carries a
-lifecycle guard, a `sync.RWMutex`. A direct read takes the read lock for the
-duration of its `ReadAt`; `close` takes the write lock before closing the file.
-Many readers share the read lock, so reads stay concurrent with each other, but
-`close` cannot close the descriptor while any read is in flight, which is the
-guarantee the actor used to provide implicitly. The `sh.quit` and `s.quit` signals
-still stop new reads from starting; the lock only bounds the ones already running.
+## The genuine correctness item, if this is ever reinstated
 
-Buffer ownership is kept caller-scoped: `Store.Read` is synchronous, the caller
-owns `buf` until it returns, and the read holds the buffer only for that window,
-so no buffer outlives its read.
-
-Deliberately **not** in scope:
-
-- Replacing the write actor with a mutex or atomic free list. Possible later, but
-  it changes allocation behaviour and this change should not.
-- Changing `sharkyNoOfShards` (#31). The data says shard count is not the binding
-  constraint, Sharky saturates at concurrency 4, far below the 32 shards it
-  already has, and that change carries an on-disk migration.
+One real defect surfaces only once reads are concurrent, and any re-attempt must
+carry it: the in-memory backend used by the ephemeral store
+(`afero.NewMemMapFs()`) implements `ReadAt` by seeking a shared offset, so it is not
+safe for concurrent use, unlike a real `*os.File`. Concurrent reads over it race and
+can return wrong bytes; the race detector reports it in the `pkg/storer` sampler
+tests. It needs a serialising wrapper on that backend. It is only needed because of
+concurrent reads, so it belongs with them and not before.
 
 ## Protocol impact
 
-**None.** No on-disk format change, so no migration. No wire change; nothing in
-`.github/protocol-freeze.lock` is touched. `Location` encoding is untouched, so
-existing `retrievalIdx` entries stay valid.
+None. No on-disk format change, no wire change, nothing in
+`.github/protocol-freeze.lock`.
 
-The risk is not protocol, it is **data**: a read returning wrong bytes would
-corrupt chunks silently. Mitigated by `pread` semantics above and by the existing
-`pkg/sharky` test suite, which must pass unchanged.
+## If reinstated: the gates
 
-## Constraints from the existing code
-
-- `pkg/sharky/main_test.go` runs `goleak.VerifyTestMain`. The actor must still
-  terminate cleanly when it handles only writes; a shutdown path that waits on
-  `sh.reads` will hang or leak.
-- `Store.Read` contains a `select` that **deliberately ignores context
-  cancellation**, commented as required to avoid a deadlock (upstream issue
-  #2932): the result must be drained from `errc` or the shard stalls. Removing
-  reads from that protocol should eliminate the hazard rather than move it, but
-  that must be demonstrated by the existing tests rather than assumed.
-- `Store.Read` currently returns `ErrQuitting` on shutdown. That behaviour must
-  survive, since callers distinguish it.
-
-## Measurement
-
-**In the harness first, because the node cannot resolve this.**
-
-Three matched runs on bench-1 showed disk time per chunk varies **2.23x**
-(113.69–253.72 µs) with identical code and identical peer count, while CPU time
-varies 1%. A 2x improvement to the disk half would sit *inside* that noise band,
-so a node-level before-and-after cannot demonstrate this change.
-
-1. **Primary**: `beebench` `TestReadConcurrencyWarm` and `TestReadConcurrencyContended`,
-   which produced the table above. Success is Sharky scaling with concurrency
-   instead of flattening at 4. Target: within a small factor of the `pread`
-   column rather than 9% of it.
-2. **Secondary**: `TestBigCorpusConcurrency`, device-bound, for a figure that
-   reflects real disk rather than software overhead. Expect a **smaller**
-   improvement here, the briefing's own warm figures (3.0–5.0x) overstated its
-   device-bound result (1.79x), and the same will apply.
-3. **Node-level**: only as a sanity check that nothing regressed, not as proof.
-   Requires the disk quiesced, see #23, which is a measurement prerequisite as
-   well as an optimization.
-
-**A negative result** looks like: the harness shows no improvement because the
-bottleneck is elsewhere in the read path, the LevelDB lookup preceding the
-Sharky read, for instance. That would redirect effort to `retrievalIdx` rather
-than invalidating the approach.
-
-**This change alone will not speed up sampling.** The sampler offers only
-`NumCPU` concurrent reads (#9), which is below Sharky's *current* ceiling of 4.
-Raising the ceiling without raising the offered concurrency measures nothing.
-The two must land together for a node-level effect; they are separable only in
-the harness, which drives concurrency directly.
-
-## Rollout and the soak gate
-
-No configuration, no migration, no persisted state, and reverting the commit fully
-restores previous behaviour. But #66 is explicit that a change of this class must
-not be merged on the strength of `-race` and the harness alone, because that is
-exactly what was done the first time and it still crashed a real node. Before this
-merges:
-
-1. `-race` across `pkg/sharky` and `pkg/storer`, including goleak. Necessary, and
-   proven by #66 to be not sufficient.
-2. A stress test that opens and closes a store repeatedly while reads are in
-   flight, to exercise the read and close race the guard exists for. This is the
-   specific interleaving the first attempt crashed on and the unit tests missed.
-3. A real-node soak on a bench node under real load, including a shutdown while a
-   sample is running, held long enough to have crashed the first attempt (it
-   restarted within minutes). This means deploying, so it needs the operator, and
-   it is the gate the first attempt skipped.
-
-## Upstream portability
-
-Self-contained within `pkg/sharky`, no format change, and it addresses a
-limitation upstream can measure for themselves with the same harness. A strong
-upstream candidate if it works, but it touches core storage in a project that is
-conservative there for good reason, so it should carry the harness numbers and
-real-node evidence when offered.
+1. Land with [#9](https://github.com/crtahlin/wasp/issues/9) and show a node-level
+   before-and-after on the bench, three matched runs per condition, or it stays out.
+2. Include the in-memory-backend wrapper above.
+3. A real-node run remains sensible defence, but note that it can only show the code
+   is stable, not that the guard earns its place — the unguarded post-SIMD code was
+   stable too. The node-level *measurement* is the gate, not the absence of a crash.
 
 Generated with help of AI.

@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sync"
 )
 
 // LocationSize is the size of the byte representation of Location
@@ -59,14 +58,7 @@ func LocationFromBinary(buf []byte) (Location, error) {
 
 // sharkyFile defines the minimal interface that is required for a file type for it to
 // be usable in sharky. This allows us to have different implementations of file types
-// that can continue using the sharky logic.
-//
-// ReadAt must be safe for concurrent use on the same file: Store.Read issues reads
-// directly from the calling goroutine, so several ReadAt calls on one shard file run
-// at once (#8). A real *os.File satisfies this because ReadAt compiles to pread, which
-// ignores the file offset. A backend whose ReadAt mutates a shared offset (the afero
-// in-memory file is one) must be wrapped to serialise it; see memSharkyFile in the
-// storer package.
+// that can continue using the sharky logic
 type sharkyFile interface {
 	io.ReadWriteCloser
 	io.ReaderAt
@@ -88,32 +80,23 @@ type entry struct {
 	err error    // signal for end of operation
 }
 
-// read models the input to a read operation (the output is an error)
+// read models the input to read operation (the output is an error)
 type read struct {
+	ctx  context.Context
 	buf  []byte // variable size read buffer
 	slot uint32 // slot to read from
 }
 
 // shard models a shard writing to a file with periodic offsets due to fixed maxDataSize
 type shard struct {
+	reads       chan read     // channel for reads
+	errc        chan error    // result for reads
 	writes      chan write    // channel for writes
 	index       uint8         // index of the shard
 	maxDataSize int           // max size of blobs
 	file        sharkyFile    // the file handle the shard is writing data to
 	slots       *slots        // component keeping track of freed slots
 	quit        chan struct{} // channel to signal quitting
-
-	// closeMu is the read-and-close lifecycle guard. Reads run directly in the
-	// caller's goroutine (see Store.Read) rather than through the write actor,
-	// so several reads on one shard proceed concurrently. A read holds the read
-	// lock for the length of its ReadAt; close takes the write lock before
-	// closing the file. Many readers share the read lock, so reads stay
-	// concurrent, but close cannot close the descriptor while a read is in
-	// flight, which is the guarantee the actor used to provide implicitly. This
-	// is the correctness the first attempt lacked: it crashed a real node with a
-	// use-after-close (#8, #66).
-	closeMu sync.RWMutex
-	closed  bool // set true under closeMu once the file is closed
 }
 
 // forever loop processing
@@ -132,7 +115,26 @@ func (sh *shard) process() {
 
 	for {
 		select {
-		// only enabled if there is a free slot previously popped
+		case op := <-sh.reads:
+			select {
+			case sh.errc <- sh.read(op):
+			case <-op.ctx.Done():
+				// since the goroutine in the Read method can quit
+				// on shutdown, we need to make sure that we can actually
+				// write to the channel, since a shutdown is possible in
+				// theory between after the point that the context is cancelled
+				select {
+				case sh.errc <- op.ctx.Err():
+				case <-sh.quit:
+					// since the Read method respects the quit channel
+					// we can safely quit here without writing to the channel
+					return
+				}
+			case <-sh.quit:
+				return
+			}
+
+			// only enabled if there is a free slot previously popped
 		case op := <-writes:
 			op.res <- sh.write(op.buf, slot)
 			free = sh.slots.out // re-enable popping a free slot next time we can write
@@ -161,14 +163,6 @@ func (sh *shard) close() error {
 	if err := sh.slots.file.Close(); err != nil {
 		return err
 	}
-	// Take the lifecycle write lock so no direct read is running against the
-	// shard file when it is closed. Readers hold the read lock for the length of
-	// their ReadAt, so this blocks until they finish and blocks new ones from
-	// starting; the closed flag then makes any later read return ErrQuitting
-	// rather than touch a closed descriptor (#8, #66).
-	sh.closeMu.Lock()
-	defer sh.closeMu.Unlock()
-	sh.closed = true
 	return sh.file.Close()
 }
 
