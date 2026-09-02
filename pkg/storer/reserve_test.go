@@ -979,6 +979,48 @@ func TestCountWithinRadiusBatchLookups(t *testing.T) {
 	t.Logf("%d lookups for %d chunks", calls, total)
 }
 
+// TestBatchSweepSplitPreservesCount guards the split in #28. The frequent
+// wake-up uses the cheap within-radius count while the batch reconciliation
+// runs on its own interval; the cheap count must equal the count the combined
+// scan sets, or /status and the radius decision would drift from what the
+// reconciliation pass would report.
+func TestBatchSweepSplitPreservesCount(t *testing.T) {
+	t.Parallel()
+
+	baseAddr := swarm.RandAddress(t)
+	opts := dbTestOps(baseAddr, 1000, nil, nil, time.Second)
+	opts.ValidStamp = func(ch swarm.Chunk) (swarm.Chunk, error) { return ch, nil }
+
+	st, err := diskStorer(t, opts)()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	putter := st.ReservePutter()
+	for po := range 4 {
+		for range 10 {
+			ch := chunk.GenerateValidRandomChunkAt(t, baseAddr, po).WithBatch(3, 2, false)
+			if err := putter.Put(context.Background(), ch); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	combined, err := st.CountWithinRadius(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cheap, err := st.CountChunksWithinRadius()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cheap != combined {
+		t.Errorf("cheap within-radius count is %d, combined scan counts %d; "+
+			"the #28 split must not change the number the wake-up acts on",
+			cheap, combined)
+	}
+}
+
 // TestDebugInfoAgreesWithStatus pins the two paths to one number.
 //
 // Reserve size within radius was computed twice and independently: once by

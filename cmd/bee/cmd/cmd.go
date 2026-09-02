@@ -52,6 +52,7 @@ const (
 	optionNamePullerMaxChunksPerSecond     = "puller-max-chunks-per-second"
 	optionNamePullSyncRecalcInterval       = "pullsync-recalc-interval"
 	optionNameReserveWakeUpDuration        = "reserve-wakeup-duration"
+	optionNameReserveBatchSweepInterval    = "reserve-batch-sweep-interval"
 	optionCORSAllowedOrigins               = "cors-allowed-origins"
 	optionNameTracingEnabled               = "tracing-enable"
 	optionNameTracingEndpoint              = "tracing-endpoint"
@@ -365,6 +366,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(optionNamePullSyncMaxChunksPerSecond, 0, "per-peer inbound chunk rate this node will serve; 0 uses the default of 250")
 	cmd.Flags().Duration(optionNamePullSyncRecalcInterval, 0, "how often the puller re-decides which peers to sync from; 0 uses the default of 5m")
 	cmd.Flags().Duration(optionNameReserveWakeUpDuration, 0, "how long the reserve worker waits between runs; 0 uses the default of 15m")
+	cmd.Flags().Duration(optionNameReserveBatchSweepInterval, 0, "how often the reserve reconciles chunks against their batches and evicts orphans; 0 runs it on every wake-up (the default). A longer interval keeps the frequent wake-up scan to the cheap within-radius count; it delays repairing the divergence case the sweep exists for, bounded by the interval")
 	cmd.Flags().Int(optionNamePullerMaxChunksPerSecond, 0, "total inbound sync rate across all peers; 0 uses the default of 1000, roughly 4 MB/s")
 	cmd.Flags().Int(optionNameSamplerReadConcurrency, 0, "chunk loads the reserve sampler keeps in flight; 0 uses the default, which matches the CPU count and preserves previous behaviour")
 	cmd.Flags().Int(optionNameSamplerSortWindow, 0, "chunks the reserve sampler buffers and sorts into disk order before reading; 0 reads in bin order, which is the previous behaviour")

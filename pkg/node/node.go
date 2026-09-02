@@ -217,6 +217,7 @@ type Options struct {
 	PullerMaxChunksPerSecond      int
 	PullerRecalcPeersDur          time.Duration
 	ReserveWakeUpDuration         time.Duration
+	ReserveBatchSweepInterval     time.Duration
 	WhitelistedWithdrawalAddress  []string
 }
 
@@ -910,6 +911,7 @@ func NewBee(
 		if o.ReserveWakeUpDuration > 0 {
 			lo.ReserveWakeUpDuration = o.ReserveWakeUpDuration
 		}
+		lo.ReserveBatchSweepInterval = o.ReserveBatchSweepInterval
 		lo.ReserveMinEvictCount = reserveMinEvictCount
 		lo.RadiusSetter = kad
 		lo.ReserveCapacityDoubling = o.ReserveCapacityDoubling

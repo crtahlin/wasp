@@ -185,6 +185,33 @@ func (db *DB) countWithinRadius(ctx context.Context) (int, error) {
 	return count, err
 }
 
+// reserveWakeupScan returns the within-radius reserve count for the radius
+// decision the wake-up makes. It runs the combined pass, which also reconciles
+// every chunk against the batch it claims and evicts any whose batch has
+// vanished, when a reconciliation sweep is due; otherwise it runs the cheap
+// within-radius count that starts at the storage radius.
+//
+// A sweep is due on every wake-up when batchSweepInterval is zero, which is the
+// previous behaviour, and once per interval otherwise. Splitting the two jobs
+// this way lets the frequent wake-up pay only for the count while the
+// reconciliation, a net that finds nothing on a healthy node, runs on its own
+// cadence. See issue #28 and docs/experiments/expired-batch-sweep/spec.md.
+func (db *DB) reserveWakeupScan(ctx context.Context, lastSweep *time.Time) (int, error) {
+	interval := db.reserveOptions.batchSweepInterval
+	if interval == 0 || time.Since(*lastSweep) >= interval {
+		*lastSweep = time.Now()
+		return db.countWithinRadius(ctx)
+	}
+
+	count, err := db.countChunksWithinRadius()
+	if err != nil {
+		return 0, err
+	}
+	db.metrics.ReserveSizeWithinRadius.Set(float64(count))
+	reserveSizeWithinRadius.Store(uint64(count))
+	return count, nil
+}
+
 func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 	defer db.inFlight.Done()
 
@@ -198,6 +225,7 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 	defer thresholdTicker.Stop()
 
 	_, _ = db.countWithinRadius(ctx)
+	lastSweep := time.Now()
 
 	if !db.reserve.IsWithinCapacity() {
 		db.events.Trigger(reserveOverCapacity)
@@ -234,7 +262,7 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 		case <-thresholdTicker.C:
 
 			radius := db.reserve.Radius()
-			count, err := db.countWithinRadius(ctx)
+			count, err := db.reserveWakeupScan(ctx, &lastSweep)
 			if err != nil {
 				db.logger.Warning("reserve worker count within radius", "error", err)
 				continue

@@ -238,6 +238,12 @@
 ## how long the reserve worker waits between runs; 0 uses the default of 15m
 # reserve-wakeup-duration: 0
 
+## how often the reserve reconciles chunks against their batches and evicts
+## orphans; 0 runs it on every wake-up (the default). A longer interval keeps the
+## frequent wake-up scan to the cheap within-radius count; it delays repairing the
+## divergence case the sweep exists for, bounded by the interval
+# reserve-batch-sweep-interval: 0
+
 ## use SIMD BMT hasher; unset means enable it where the CPU supports it
 ## (linux/amd64 with AVX2 or AVX-512). Setting it explicitly is strict: true
 ## on unsupported hardware refuses to start

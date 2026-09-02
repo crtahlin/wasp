@@ -45,6 +45,12 @@ func (db *DB) CountWithinRadius(ctx context.Context) (int, error) {
 	return db.countWithinRadius(ctx)
 }
 
+// CountChunksWithinRadius exposes the cheap within-radius count the frequent
+// wake-up uses, so a test can assert it agrees with the combined scan. See #28.
+func (db *DB) CountChunksWithinRadius() (int, error) {
+	return db.countChunksWithinRadius()
+}
+
 // MaxSamplerSortWindow exposes the read-ordering window cap so a test can
 // assert an oversized setting is clamped to it rather than honoured.
 const MaxSamplerSortWindow = maxSamplerSortWindow
