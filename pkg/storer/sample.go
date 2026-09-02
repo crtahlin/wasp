@@ -189,6 +189,12 @@ func (db *DB) ReserveSample(
 	consensusTime uint64,
 	minBatchBalance *big.Int,
 ) (Sample, error) {
+	// Signal that a sample is running so the puller pauses pulling and leaves the
+	// store quiet. Cleared on every return, including error and cancellation, so
+	// a failed sample never leaves pulling paused. See issue #23.
+	db.samplingInProgress.Store(true)
+	defer db.samplingInProgress.Store(false)
+
 	g, ctx := errgroup.WithContext(ctx)
 
 	allStats := &SampleStats{}

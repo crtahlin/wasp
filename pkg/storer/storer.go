@@ -170,6 +170,9 @@ type RadiusChecker interface {
 	StorageRadius() uint8
 	CommittedDepth() uint8
 	CapacityDoubling() uint8
+	// IsSampling reports whether a reserve sample is running, so a caller can
+	// hold back work that would contend with it. See issue #23.
+	IsSampling() bool
 }
 
 // LocalStore is a read-only ChunkStore. It can be used to check if chunk is known
@@ -688,6 +691,10 @@ type DB struct {
 	// reserveHasLimiter bounds concurrent ReserveHas lookups. Nil when
 	// unbounded, which is the default.
 	reserveHasLimiter chan struct{}
+
+	// samplingInProgress is set while ReserveSample runs, so the puller can
+	// pause pulling and leave the store quiet for the sample. See issue #23.
+	samplingInProgress atomic.Bool
 
 	pinIntegrity *PinIntegrity
 }
