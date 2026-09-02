@@ -532,6 +532,12 @@ func (db *DB) ReserveIterateChunks(cb func(swarm.Chunk) (bool, error)) error {
 	return db.reserve.IterateChunks(0, cb)
 }
 
+// IsSampling reports whether a reserve sample is currently running. The puller
+// reads it to pause pulling during sampling. See issue #23.
+func (db *DB) IsSampling() bool {
+	return db.samplingInProgress.Load()
+}
+
 func (db *DB) StorageRadius() uint8 {
 	if db.reserve == nil {
 		return 0

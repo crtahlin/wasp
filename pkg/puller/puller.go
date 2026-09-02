@@ -362,6 +362,26 @@ func (p *Puller) syncPeer(ctx context.Context, peer *syncPeer, storageRadius uin
 
 // syncPeerBin will start historical and live syncing for the peer for a particular bin.
 // Must be called under syncPeer lock.
+// samplingPauseCheckInterval is how often a paused sync worker re-checks whether
+// the reserve sample has finished. The sample runs for seconds to minutes, so a
+// coarse poll keeps the pause cheap.
+const samplingPauseCheckInterval = 250 * time.Millisecond
+
+// waitWhileSampling blocks a sync worker while a reserve sample is running, so
+// pulling does not contend with the sample. It returns the context error if the
+// worker is cancelled while waiting, and nil once sampling has finished. See
+// issue #23.
+func (p *Puller) waitWhileSampling(ctx context.Context) error {
+	for p.radius.IsSampling() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(samplingPauseCheckInterval):
+		}
+	}
+	return nil
+}
+
 func (p *Puller) syncPeerBin(parentCtx context.Context, peer *syncPeer, bin uint8, cursor uint64) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	peer.setBinCancel(cancel, bin)
@@ -395,6 +415,14 @@ func (p *Puller) syncPeerBin(parentCtx context.Context, peer *syncPeer, bin uint
 				p.logger.Debug("syncWorker context cancelled", "peer_address", address, "bin", bin)
 				return
 			default:
+			}
+
+			// Pause pulling while the reserve sample runs, so the sample meets a
+			// quiet store. This holds back only historical pulling; pushsync and
+			// retrieval are separate protocols and keep working, so uploads are
+			// not stalled. See issue #23.
+			if p.waitWhileSampling(ctx) != nil {
+				return
 			}
 
 			p.metrics.SyncWorkerIterCounter.Inc()

@@ -8,6 +8,7 @@ import (
 	"context"
 	"math/big"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storer"
@@ -114,6 +115,7 @@ type ReserveStore struct {
 	radius           uint8
 	reservesize      int
 	capacityDoubling int
+	sampling         atomic.Bool
 
 	subResponses []chunksResponse
 	putHook      func(swarm.Chunk) error
@@ -134,7 +136,12 @@ func NewReserve(opts ...Option) *ReserveStore {
 
 func (s *ReserveStore) EvictBatch(ctx context.Context, batchID []byte) error { return nil }
 func (s *ReserveStore) IsWithinStorageRadius(addr swarm.Address) bool        { return true }
-func (s *ReserveStore) IsFullySynced() bool                                  { return true }
+func (s *ReserveStore) IsSampling() bool                                     { return s.sampling.Load() }
+
+// SetSampling toggles the sampling-in-progress signal so a test can assert the
+// puller pauses while it is set. See issue #23.
+func (s *ReserveStore) SetSampling(v bool)  { s.sampling.Store(v) }
+func (s *ReserveStore) IsFullySynced() bool { return true }
 func (s *ReserveStore) StorageRadius() uint8 {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()

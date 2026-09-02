@@ -143,6 +143,53 @@ func TestReserveSampler(t *testing.T) {
 	})
 }
 
+// TestReserveSampleClearsSamplingFlag guards the property in #23 that a sample
+// clears the sampling-in-progress signal on every exit. If a failed or cancelled
+// sample left it set, the puller would stay paused and stop pulling for good.
+func TestReserveSampleClearsSamplingFlag(t *testing.T) {
+	t.Parallel()
+
+	baseAddr := swarm.RandAddress(t)
+	st, err := diskStorer(t, dbTestOps(baseAddr, 1000, nil, nil, time.Second))()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	timeVar := uint64(time.Now().UnixNano())
+	putter := st.ReservePutter()
+	for po := range 6 {
+		for range 10 {
+			ch := chunk.GenerateValidRandomChunkAt(t, baseAddr, po).WithBatch(3, 2, false)
+			ch = ch.WithStamp(postagetesting.MustNewStampWithTimestamp(timeVar - 1))
+			if err := putter.Put(context.Background(), ch); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	if st.IsSampling() {
+		t.Fatal("sampling flag set before any sample ran")
+	}
+
+	radius := uint8(5)
+	anchor := swarm.RandAddressAt(t, baseAddr, int(radius)).Bytes()
+
+	if _, err := st.ReserveSample(context.Background(), anchor, radius, timeVar, nil); err != nil {
+		t.Fatal(err)
+	}
+	if st.IsSampling() {
+		t.Error("sampling flag still set after a completed sample")
+	}
+
+	// A cancelled sample must still clear the flag, or the puller stays paused.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = st.ReserveSample(ctx, anchor, radius, timeVar, nil)
+	if st.IsSampling() {
+		t.Error("sampling flag still set after a cancelled sample; the puller would stay paused")
+	}
+}
+
 func TestReserveSamplerSisterNeighborhood(t *testing.T) {
 	t.Parallel()
 

@@ -231,6 +231,7 @@ func (m *mockStorer) CapacityDoubling() uint8 {
 }
 
 func (m *mockStorer) IsWithinStorageRadius(_ swarm.Address) bool { return true }
+func (m *mockStorer) IsSampling() bool                           { return false }
 
 func (m *mockStorer) DebugInfo(_ context.Context) (storer.Info, error) {
 	return m.debugInfo, nil
