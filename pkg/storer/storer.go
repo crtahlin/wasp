@@ -196,7 +196,37 @@ type memFS struct {
 }
 
 func (m *memFS) Open(path string) (fs.File, error) {
-	return m.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := m.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	return &memSharkyFile{File: f}, nil
+}
+
+// memSharkyFile makes an afero in-memory file safe for the concurrent reads that
+// sharky now issues (#8). afero's MemMapFs implements ReadAt and WriteAt by seeking
+// a shared file offset (spf13/afero mem/file.go), so two ReadAt calls on one file
+// race on that offset and can return the wrong bytes. The disk backend has no such
+// problem: a real *os.File does ReadAt as pread and WriteAt as pwrite, which ignore
+// the file offset and are safe for concurrent use, which is the premise the
+// concurrent-read change relies on. This wrapper restores that property for the
+// in-memory backend by serialising the offset-based calls. It is used only for the
+// ephemeral in-memory store, so the serialisation costs nothing in production.
+type memSharkyFile struct {
+	afero.File
+	mu sync.Mutex
+}
+
+func (f *memSharkyFile) ReadAt(b []byte, off int64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.File.ReadAt(b, off)
+}
+
+func (f *memSharkyFile) WriteAt(b []byte, off int64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.File.WriteAt(b, off)
 }
 
 type dirFS struct {
