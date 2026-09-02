@@ -5,6 +5,14 @@ Issue: [#185](https://github.com/crtahlin/wasp/issues/185) · Spec:
 microbenchmark verdict in [#15](https://github.com/crtahlin/wasp/issues/15) once
 this completes.
 
+**Decision (2026-09-02): adopt Pebble as the default index engine for a fresh
+data directory, with goleveldb kept selectable.** On the evidence below, Pebble
+tuned to hold level 0 shallow matches or beats goleveldb on every axis a running
+node cares about, so a new node defaults to Pebble (`db-compaction-l0-trigger`
+defaults to 4 for it, its fast configuration). goleveldb stays available with
+`--storage-engine leveldb`, and an existing goleveldb store keeps goleveldb, so no
+running node is migrated. See issue [#185](https://github.com/crtahlin/wasp/issues/185).
+
 **Status: full battery done (2026-09-01), steady state, reserve-sample read (with a tuning retest), write throughput, and mass eviction.** bench-2 filled to
 a full radius-9 reserve, matched to bench-1 on the within-radius count. The at-rest
 axes (disk, CPU, memory) and the heaviest read a storer performs (the

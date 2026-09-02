@@ -331,7 +331,7 @@ func (c *command) setHomeDir() (err error) {
 func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().String(optionNameDataDir, filepath.Join(c.homeDir, ".bee"), "data directory")
 	cmd.Flags().Uint64(optionNameCacheCapacity, 1_000_000, fmt.Sprintf("cache capacity in chunks, multiply by %d to get approximate capacity in bytes", swarm.ChunkSize))
-	cmd.Flags().String(optionNameStorageEngine, "", "index-store engine for a NEW data directory: \"leveldb\" (default) or \"pebble\". Experimental; goleveldb is the supported engine. Empty uses the engine the data directory was created with, or goleveldb for a fresh one. The two on-disk formats are not interchangeable, so a directory is bound to its engine. See issue #185.")
+	cmd.Flags().String(optionNameStorageEngine, "", "index-store engine for a NEW data directory: \"pebble\" (default) or \"leveldb\". Empty uses the engine the data directory was created with, and pebble for a fresh one. An existing goleveldb store keeps goleveldb. The two on-disk formats are not interchangeable, so a directory is bound to its engine. See issue #185.")
 	cmd.Flags().Uint64(optionNameDBOpenFilesLimit, 200, "number of open files allowed by database")
 	cmd.Flags().Uint64(optionNameDBBlockCacheCapacity, 32*1024*1024, "size of block cache of the database in bytes")
 	cmd.Flags().Uint64(optionNameDBWriteBufferSize, 32*1024*1024, "size of the database write buffer in bytes")

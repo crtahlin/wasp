@@ -364,7 +364,15 @@ func resolveEngine(indexDir, requested string) (string, error) {
 
 	engine := requested
 	if engine == "" {
-		engine = EngineLevelDB
+		// A fresh data directory defaults to pebble, the engine adopted in #185. An
+		// existing goleveldb store from before engine markers keeps goleveldb, so an
+		// upgrade never fails to open its own data; only a brand new store gets the
+		// new default.
+		if indexDirHasData(indexDir) {
+			engine = EngineLevelDB
+		} else {
+			engine = EnginePebble
+		}
 	}
 	if engine != EngineLevelDB && indexDirHasData(indexDir) {
 		return "", fmt.Errorf("index store at %s holds data but has no engine marker, "+
@@ -427,7 +435,11 @@ func pebbleIndexStoreOptions(opts *Options) *pebble.Options {
 	if opts.LdbWriteBufferSize > 0 {
 		o.MemTableSize = opts.LdbWriteBufferSize
 	}
-	if opts.LdbCompactionL0Trigger > 0 {
+	// Honour an explicit db-compaction-l0-trigger, but do not let its goleveldb
+	// oriented default clobber pebble's own shallow-L0 default, which is what makes
+	// the reserve-sample read fast (#185). Only an operator value that differs from
+	// the shared default overrides it.
+	if opts.LdbCompactionL0Trigger > 0 && opts.LdbCompactionL0Trigger != defaultCompactionL0Trigger {
 		o.L0CompactionThreshold = opts.LdbCompactionL0Trigger
 	}
 	if opts.LdbWritePauseTrigger > 0 {
@@ -571,8 +583,9 @@ const lockKeyNewSession string = "new_session"
 type Options struct {
 	// These are options related to levelDB. Currently, the underlying storage used is levelDB.
 	LdbStats atomic.Pointer[prometheus.HistogramVec]
-	// StorageEngine selects the index-store engine: "leveldb" (default) or
-	// "pebble". Empty means leveldb. See issue #185.
+	// StorageEngine selects the index-store engine: "pebble" (default) or
+	// "leveldb". Empty defaults a fresh data directory to pebble; an existing
+	// store keeps the engine it was created with. See issue #185.
 	StorageEngine             string
 	LdbOpenFilesLimit         uint64
 	LdbBlockCacheCapacity     uint64

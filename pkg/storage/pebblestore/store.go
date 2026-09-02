@@ -4,12 +4,13 @@
 
 // Package pebblestore implements storage.Store over cockroachdb/pebble.
 //
-// It exists to answer whether Pebble can replace goleveldb, which has had no
-// commit since July 2022 and carries an unfixed race in compTriggerWait. See
-// issue #15 and docs/experiments/pebble-evaluation/spec.md.
-//
-// It is wired to nothing. A store that has never run on a node has not been
-// evaluated for running on a node, and this one has not.
+// It replaces goleveldb, which has had no commit since July 2022 and carries an
+// unfixed race in compTriggerWait. The real-reserve A/B in
+// docs/experiments/storage-engine-eval/results.md found Pebble better on every
+// axis a running node cares about once level 0 is kept shallow, so it is now the
+// default index engine for a fresh data directory. goleveldb stays selectable
+// with --storage-engine leveldb, and an existing goleveldb store keeps goleveldb.
+// See issues #15 and #185.
 package pebblestore
 
 import (
@@ -47,8 +48,10 @@ func (f filters) matchAny(k string, v []byte) bool {
 	return false
 }
 
-var _ storage.Store = (*Store)(nil)
-var _ storage.BatchStore = (*Store)(nil)
+var (
+	_ storage.Store      = (*Store)(nil)
+	_ storage.BatchStore = (*Store)(nil)
+)
 
 type Store struct {
 	db   *pebble.DB
@@ -90,6 +93,12 @@ func DefaultOptions() *pebble.Options {
 	for i := range opts.Levels {
 		opts.Levels[i].FilterPolicy = bloom.FilterPolicy(10)
 	}
+	// Keep level 0 shallow. Under a full reserve, Pebble left at a higher trigger
+	// lets level 0 pile up and the reserve-sample read merges across it, which
+	// measured 245s against goleveldb's 52s; at this trigger the same sample runs
+	// in about 44s, faster than goleveldb. See
+	// docs/experiments/storage-engine-eval/results.md.
+	opts.L0CompactionThreshold = 4
 	return opts
 }
 
