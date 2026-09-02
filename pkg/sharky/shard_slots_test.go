@@ -83,13 +83,8 @@ func readFromLocation(t *testing.T, shard *shard, loc Location) []byte {
 	t.Helper()
 	buf := make([]byte, loc.Length)
 
-	select {
-	case shard.reads <- read{ctx: context.Background(), buf: buf[:loc.Length], slot: loc.Slot}:
-		if err := <-shard.errc; err != nil {
-			t.Fatal("read", err)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("timeout reading")
+	if err := shard.read(read{buf: buf[:loc.Length], slot: loc.Slot}); err != nil {
+		t.Fatal("read", err)
 	}
 
 	return buf
@@ -137,8 +132,6 @@ func newShard(t *testing.T) *shard {
 
 	quit := make(chan struct{})
 	shard := &shard{
-		reads:       make(chan read),
-		errc:        make(chan error),
 		writes:      make(chan write),
 		index:       uint8(index),
 		maxDataSize: 1,
