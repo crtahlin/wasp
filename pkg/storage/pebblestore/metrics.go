@@ -33,6 +33,7 @@ type statsCollector struct {
 	levelSize      *prometheus.Desc
 	compactions    *prometheus.Desc
 	compactionDebt *prometheus.Desc
+	writeBytes     *prometheus.Desc
 }
 
 func newStatsCollector(store *Store) *statsCollector {
@@ -59,6 +60,14 @@ func newStatsCollector(store *Store) *statsCollector {
 				"shape. A growing value means compaction is falling behind the write rate, "+
 				"which is what precedes a stall.",
 			nil, nil),
+		writeBytes: prometheus.NewDesc(fq("write_bytes_total"),
+			"Cumulative bytes physically written by the engine, split by cause: "+
+				"flushed (memtable to level 0) and compacted (rewrites between levels). "+
+				"Their sum against the logical bytes stored is the write amplification. "+
+				"On a node whose reserve has stopped growing, a rising compacted total is "+
+				"cold data being rewritten by churn elsewhere in the keyspace — the effect "+
+				"the index-store split targets. See issues #14 and #217.",
+			[]string{"cause"}, nil),
 	}
 }
 
@@ -67,6 +76,7 @@ func (c *statsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.levelSize
 	ch <- c.compactions
 	ch <- c.compactionDebt
+	ch <- c.writeBytes
 }
 
 func (c *statsCollector) Collect(ch chan<- prometheus.Metric) {
@@ -97,6 +107,22 @@ func (c *statsCollector) Collect(ch chan<- prometheus.Metric) {
 
 	ch <- prometheus.MustNewConstMetric(c.compactionDebt, prometheus.GaugeValue,
 		float64(stats.Compact.EstimatedDebt))
+
+	// Physical write, split by cause. BytesFlushed is the memtable-to-L0 write and
+	// lands on level 0; BytesCompacted is the between-levels rewrite and is
+	// reported per destination level, so both are summed across levels to get the
+	// engine totals. Together over logical bytes stored, this is the write
+	// amplification #14/#217 turn on.
+	var flushed, compacted uint64
+	for level := range stats.Levels {
+		l := &stats.Levels[level]
+		flushed += l.BytesFlushed
+		compacted += l.BytesCompacted
+	}
+	ch <- prometheus.MustNewConstMetric(c.writeBytes, prometheus.CounterValue,
+		float64(flushed), "flushed")
+	ch <- prometheus.MustNewConstMetric(c.writeBytes, prometheus.CounterValue,
+		float64(compacted), "compacted")
 }
 
 // Metrics returns the collectors this store exposes, satisfying the same
