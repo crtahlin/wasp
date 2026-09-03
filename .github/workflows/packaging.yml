@@ -1,0 +1,43 @@
+name: Packaging
+
+# Guards issue #177 cheaply. The distribution was renamed bee-experimental ->
+# wasp, and a package that drops the old names from Conflicts/Replaces cannot
+# take over an existing install's files: dpkg refuses the upgrade, and the only
+# manual route out purges the data directory. That break is invisible to every
+# other check because it only shows on a host that already has the old package.
+#
+# This asserts the relationships directly in .goreleaser.yml, in under a second.
+# The thorough built-artifact test (packaging/test-deb-upgrade.sh) belongs in
+# the release pipeline, where the debs already exist: building the full release
+# with goreleaser just to inspect a control field was measured at 25+ minutes,
+# which is not worth running on every packaging change. See issue #179.
+
+on:
+  pull_request:
+    paths:
+      - '.goreleaser.yml'
+      - 'packaging/**'
+      - '.github/workflows/packaging.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.goreleaser.yml'
+      - 'packaging/**'
+      - '.github/workflows/packaging.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-relationships:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Check deb/rpm Conflicts and Replaces
+        run: python3 packaging/check-package-relationships.py
