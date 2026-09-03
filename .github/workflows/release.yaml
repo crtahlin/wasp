@@ -72,3 +72,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BEE_API_VERSION: ${{ env.BEE_API_VERSION }}
           UPSTREAM_BASE: ${{ env.UPSTREAM_BASE }}
+
+      - name: Verify the deb upgrades cleanly
+        # Runs the real dpkg upgrade test against the built deb, as post-publish
+        # detection. goreleaser OSS cannot gate between build and publish, so
+        # this runs after the release is out: a failure turns this job red as a
+        # clear do-not-use signal rather than blocking the publish. The per-PR
+        # source guard (packaging/check-package-relationships.py) catches the
+        # #177 Conflicts/Replaces drift earlier; this is the artifact-level
+        # backstop that also exercises a real dpkg upgrade in a container. The
+        # runner has docker, so both halves of the script run. See #210.
+        run: |
+          deb=$(ls dist/*_amd64.deb | head -1)
+          echo "verifying upgrade against: $deb"
+          packaging/test-deb-upgrade.sh "$deb"
