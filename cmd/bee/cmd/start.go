@@ -408,6 +408,7 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		PriceOracleAddress:            c.config.GetString(optionNamePriceOracleAddress),
 		RedistributionContractAddress: c.config.GetString(optionNameRedistributionAddress),
 		ReserveCapacityDoubling:       c.config.GetInt(optionReserveCapacityDoubling),
+		MaxReserveCapacityDoubling:    c.config.GetInt(optionMaxReserveCapacityDoubling),
 		ResolverConnectionCfgs:        resolverCfgs,
 		Resync:                        c.config.GetBool(optionNameResync),
 		RetrievalCaching:              c.config.GetBool(optionNameRetrievalCaching),

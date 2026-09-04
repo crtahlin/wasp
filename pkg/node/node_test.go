@@ -183,3 +183,64 @@ func TestShutdownRegistersPushSyncAndRetrieval(t *testing.T) {
 		}
 	}
 }
+
+// TestShallowReceiptToleranceFor covers the issue #62 arithmetic: the tolerance
+// is clamped at zero in signed arithmetic, so a doubling greater than the network
+// maximum can never wrap it to a large uint8 and disable the shallow-receipt check.
+func TestShallowReceiptToleranceFor(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		maxAllowed, doubling int
+		want                 uint8
+	}{
+		{1, 0, 1}, // stock non-doubling node
+		{1, 1, 0}, // stock node at the cap
+		{10, 3, 7},
+		{10, 10, 0},
+		{1, 4, 0}, // previously wrapped to 253; must clamp to 0
+	} {
+		if got := node.ShallowReceiptToleranceFor(tc.maxAllowed, tc.doubling); got != tc.want {
+			t.Errorf("ShallowReceiptToleranceFor(%d, %d) = %d, want %d", tc.maxAllowed, tc.doubling, got, tc.want)
+		}
+	}
+}
+
+// TestEffectiveMaxDoubling covers the issue #62 flag: the configured maximum is
+// clamped to the compiled-in floor of 1, and the requested doubling is validated
+// against the effective maximum.
+func TestEffectiveMaxDoubling(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		requested, cfg int
+		wantMax        int
+		wantErr        bool
+	}{
+		{"stock default", 0, 1, 1, false},
+		{"at stock cap", 1, 1, 1, false},
+		{"unset config keeps floor", 0, 0, 1, false},
+		{"config below floor keeps floor", 0, 0, 1, false},
+		{"raised cap allows higher", 5, 10, 10, false},
+		{"over stock cap rejected", 2, 1, 0, true},
+		{"over raised cap rejected", 11, 10, 0, true},
+		{"negative rejected", -1, 10, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := node.EffectiveMaxDoubling(tc.requested, tc.cfg)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("EffectiveMaxDoubling(%d, %d) = %d, nil; want error", tc.requested, tc.cfg, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EffectiveMaxDoubling(%d, %d) unexpected error: %v", tc.requested, tc.cfg, err)
+			}
+			if got != tc.wantMax {
+				t.Fatalf("EffectiveMaxDoubling(%d, %d) = %d, want %d", tc.requested, tc.cfg, got, tc.wantMax)
+			}
+		})
+	}
+}

@@ -100,6 +100,7 @@ const (
 	optionNameTransactionDebugMode         = "transaction-debug-mode"
 	optionMinimumStorageRadius             = "minimum-storage-radius"
 	optionReserveCapacityDoubling          = "reserve-capacity-doubling"
+	optionMaxReserveCapacityDoubling       = "max-reserve-capacity-doubling"
 	optionSkipPostageSnapshot              = "skip-postage-snapshot"
 	optionNameMinimumGasTipCap             = "minimum-gas-tip-cap"
 	optionNameGasLimitFallback             = "gas-limit-fallback"
@@ -416,6 +417,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool(optionNameTransactionDebugMode, false, "skips the gas estimate step for contract transactions")
 	cmd.Flags().Uint(optionMinimumStorageRadius, 0, "minimum radius storage threshold")
 	cmd.Flags().Int(optionReserveCapacityDoubling, 0, "reserve capacity doubling")
+	cmd.Flags().Int(optionMaxReserveCapacityDoubling, 1, "maximum allowed value for reserve-capacity-doubling. Raising it lets a node hold a larger reserve if it has the disk and the sync-rate headroom to fill and sample it in time; set too high the reserve cannot be sampled within a redistribution round and the node is frozen. Lowering it below 1 has no effect. See the reserve-capacity-doubling operator guide.")
 	cmd.Flags().Bool(optionSkipPostageSnapshot, false, "skip postage snapshot")
 	cmd.Flags().Uint64(optionNameMinimumGasTipCap, 0, "minimum gas tip cap in wei for transactions, 0 means use suggested gas tip cap")
 	cmd.Flags().Uint64(optionNameGasLimitFallback, 500_000, "gas limit fallback when estimation fails for contract transactions")

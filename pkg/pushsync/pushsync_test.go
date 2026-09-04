@@ -223,13 +223,13 @@ func TestShallowReceipt(t *testing.T) {
 
 	// peer is the node responding to the chunk receipt message
 	// mock should return ErrWantSelf since there's no one to forward to
-	psPeer, _ := createPushSyncNodeWithRadius(t, closestPeer, defaultPrices, nil, nil, defaultSigner(chunk), highPO, 0, mock.WithClosestPeerErr(topology.ErrWantSelf))
+	psPeer, _ := createPushSyncNodeWithRadius(t, closestPeer, defaultPrices, nil, nil, defaultSigner(chunk), highPO, 0, 0, mock.WithClosestPeerErr(topology.ErrWantSelf))
 
 	recorder := streamtest.New(streamtest.WithProtocols(psPeer.Protocol()), streamtest.WithBaseAddr(pivotNode))
 
 	// pivot node needs the streamer since the chunk is intercepted by
 	// the chunk worker, then gets sent by opening a new stream
-	psPivot, _ := createPushSyncNodeWithRadius(t, pivotNode, defaultPrices, recorder, nil, defaultSigner(chunk), highPO, 0, mock.WithClosestPeer(closestPeer))
+	psPivot, _ := createPushSyncNodeWithRadius(t, pivotNode, defaultPrices, recorder, nil, defaultSigner(chunk), highPO, 0, 0, mock.WithClosestPeer(closestPeer))
 
 	// Trigger the sending of chunk to the closest node
 	receipt, err := psPivot.PushChunkToClosest(context.Background(), chunk)
@@ -282,13 +282,13 @@ func TestShallowReceiptTolerance(t *testing.T) {
 
 	// peer is the node responding to the chunk receipt message
 	// mock should return ErrWantSelf since there's no one to forward to
-	psPeer, _ := createPushSyncNodeWithRadius(t, closestPeer, defaultPrices, nil, nil, signer, uint8(storerRadius), 0, mock.WithClosestPeerErr(topology.ErrWantSelf))
+	psPeer, _ := createPushSyncNodeWithRadius(t, closestPeer, defaultPrices, nil, nil, signer, uint8(storerRadius), 0, 0, mock.WithClosestPeerErr(topology.ErrWantSelf))
 
 	recorder := streamtest.New(streamtest.WithProtocols(psPeer.Protocol()), streamtest.WithBaseAddr(pivotNode))
 
 	// pivot node needs the streamer since the chunk is intercepted by
 	// the chunk worker, then gets sent by opening a new stream
-	psPivot, _ := createPushSyncNodeWithRadius(t, pivotNode, defaultPrices, recorder, nil, nil, uint8(pivotRadius), pivotTolerance, mock.WithClosestPeer(closestPeer))
+	psPivot, _ := createPushSyncNodeWithRadius(t, pivotNode, defaultPrices, recorder, nil, nil, uint8(pivotRadius), pivotTolerance, 0, mock.WithClosestPeer(closestPeer))
 
 	// Trigger the sending of chunk to the closest node
 	receipt, err := psPivot.PushChunkToClosest(context.Background(), chunk)
@@ -307,6 +307,67 @@ func TestShallowReceiptTolerance(t *testing.T) {
 
 	// this intercepts the incoming receipt message
 	waitOnRecordAndTest(t, closestPeer, recorder, chunk.Address(), nil)
+}
+
+// TestStoreGateCommittedDepth checks the issue #62 change: the receive handler
+// gates its direct-store decision on committed depth (radius + capacity doubling),
+// not the lowered storage radius. A chunk whose proximity to the node falls at or
+// above the radius but below the committed depth is stored directly when the node
+// does no doubling, and forwarded to a genuinely closer peer once the node doubles.
+func TestStoreGateCommittedDepth(t *testing.T) {
+	t.Parallel()
+
+	// storerNode base is all zeros; forwardTarget shares the top bits so it is
+	// proximity 2 from storerNode. A chunk generated close to forwardTarget is
+	// therefore proximity 2 from storerNode and much closer to forwardTarget.
+	storerNode := swarm.MustParseHexAddress("0000000000000000000000000000000000000000000000000000000000000000")
+	forwardTarget := swarm.MustParseHexAddress("2000000000000000000000000000000000000000000000000000000000000000")
+	origin := swarm.MustParseHexAddress("f000000000000000000000000000000000000000000000000000000000000000")
+
+	chunk := testingc.GenerateValidRandomChunkAt(t, forwardTarget, 4)
+
+	for _, tc := range []struct {
+		name       string
+		doubling   uint8
+		wantStored bool
+	}{
+		// radius 1, proximity 2: at doubling 0 committed depth is 1, so 2 >= 1 and
+		// the node stores. At doubling 2 committed depth is 3, so 2 < 3 and it
+		// forwards instead.
+		{"no doubling stores within radius", 0, true},
+		{"doubling forwards below committed depth", 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Terminal target: stores whatever it is asked to keep.
+			psTarget, targetStorer := createPushSyncNodeWithRadius(t, forwardTarget, defaultPrices, nil, nil, defaultSigner(chunk), 0, 0, 0, mock.WithClosestPeerErr(topology.ErrWantSelf))
+			targetRecorder := streamtest.New(streamtest.WithProtocols(psTarget.Protocol()), streamtest.WithBaseAddr(storerNode))
+
+			// Node under test: radius 1, the doubling of this case, forwards to the target.
+			psStorer, storerStorer := createPushSyncNodeWithRadius(t, storerNode, defaultPrices, targetRecorder, nil, defaultSigner(chunk), 1, 0, tc.doubling, mock.WithClosestPeer(forwardTarget))
+			storerRecorder := streamtest.New(streamtest.WithProtocols(psStorer.Protocol()), streamtest.WithBaseAddr(origin))
+
+			// Origin pushes the chunk to the node under test.
+			psOrigin, _ := createPushSyncNodeWithRadius(t, origin, defaultPrices, storerRecorder, nil, defaultSigner(chunk), 0, 0, 0, mock.WithClosestPeer(storerNode))
+
+			// The store-versus-forward decision is made in the node's handler
+			// before the receipt travels back, so the storer state is the ground
+			// truth. The origin's own receipt check is ignored here: it derives the
+			// storer overlay from the receipt signature, and the test signer uses a
+			// throwaway key unrelated to the fixed node address, which would make
+			// that check meaningless. The store gate is what this test exercises.
+			_, _ = psOrigin.PushChunkToClosest(context.Background(), chunk)
+
+			if got := storerStorer.hasChunk(t, chunk.Address()); got != tc.wantStored {
+				t.Fatalf("node-under-test stored = %v, want %v (doubling %d)", got, tc.wantStored, tc.doubling)
+			}
+			// When the node forwards, the target must have received and stored it.
+			if !tc.wantStored && !targetStorer.hasChunk(t, chunk.Address()) {
+				t.Fatal("expected the forward target to store the chunk")
+			}
+		})
+	}
 }
 
 // TestPushChunkToClosest tests the sending of chunk to closest peer from the origination source perspective.
@@ -1011,6 +1072,7 @@ func createPushSyncNodeWithRadius(
 	signer crypto.Signer,
 	radius uint8,
 	shallowReceiptTolerance uint8,
+	capacityDoubling uint8,
 	mockOpts ...mock.Option,
 ) (*pushsync.PushSync, *testStorer) {
 	t.Helper()
@@ -1033,7 +1095,7 @@ func createPushSyncNodeWithRadius(
 
 	radiusFunc := func() (uint8, error) { return radius, nil }
 
-	ps := pushsync.New(addr, 1, blockHash.Bytes(), recorderDisconnecter, storer, radiusFunc, mockTopology, true, unwrap, func(*soc.SOC) {}, validStamp, log.Noop, accountingmock.NewAccounting(), mockPricer, signer, nil, stabilmock.NewSubscriber(true), shallowReceiptTolerance)
+	ps := pushsync.New(addr, 1, blockHash.Bytes(), recorderDisconnecter, storer, radiusFunc, mockTopology, true, unwrap, func(*soc.SOC) {}, validStamp, log.Noop, accountingmock.NewAccounting(), mockPricer, signer, nil, stabilmock.NewSubscriber(true), shallowReceiptTolerance, capacityDoubling)
 	t.Cleanup(func() { ps.Close() })
 
 	return ps, storer
@@ -1074,7 +1136,7 @@ func createPushSyncNodeWithAccounting(
 
 	radiusFunc := func() (uint8, error) { return 0, nil }
 
-	ps := pushsync.New(addr, 1, blockHash.Bytes(), recorderDisconnecter, storer, radiusFunc, mockTopology, true, unwrap, gsocListener, validStamp, logger, acct, mockPricer, signer, nil, stabilmock.NewSubscriber(true), 0)
+	ps := pushsync.New(addr, 1, blockHash.Bytes(), recorderDisconnecter, storer, radiusFunc, mockTopology, true, unwrap, gsocListener, validStamp, logger, acct, mockPricer, signer, nil, stabilmock.NewSubscriber(true), 0, 0)
 	t.Cleanup(func() { ps.Close() })
 
 	return ps, storer

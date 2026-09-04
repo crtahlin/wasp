@@ -100,6 +100,7 @@ type PushSync struct {
 	stabilizer     stabilization.Subscriber
 
 	shallowReceiptTolerance uint8
+	capacityDoubling        uint8
 	overDraftRefreshLimiter *rate.Limiter
 }
 
@@ -129,6 +130,7 @@ func New(
 	tracer *tracing.Tracer,
 	stabilizer stabilization.Subscriber,
 	shallowReceiptTolerance uint8,
+	capacityDoubling uint8,
 ) *PushSync {
 	ps := &PushSync{
 		address:                 address,
@@ -150,6 +152,7 @@ func New(
 		errSkip:                 skippeers.NewList(time.Minute),
 		stabilizer:              stabilizer,
 		shallowReceiptTolerance: shallowReceiptTolerance,
+		capacityDoubling:        capacityDoubling,
 		overDraftRefreshLimiter: rate.NewLimiter(rate.Every(time.Second), 1),
 	}
 
@@ -299,7 +302,16 @@ func (ps *PushSync) handler(ctx context.Context, p p2p.Peer, stream p2p.Stream) 
 		return debit.Apply()
 	}
 
-	if ps.topologyDriver.IsReachable() && swarm.Proximity(ps.address.Bytes(), chunkAddress.Bytes()) >= rad {
+	// Gate the direct-store decision on committed depth, not the lowered storage
+	// radius. A node using reserve capacity doubling stores down to radius
+	// r_net - doubling, but committedDepth == radius + doubling == r_net, so it
+	// only accepts and issues a receipt for a chunk at or below the network
+	// radius. That keeps every receipt it returns acceptable to a stock uploader
+	// at any doubling factor. For a node with doubling 0 this is unchanged, since
+	// committedDepth == radius. The extended reserve still fills, by pullsync,
+	// which has no receipts. See issue #62.
+	committedDepth := rad + ps.capacityDoubling
+	if ps.topologyDriver.IsReachable() && swarm.Proximity(ps.address.Bytes(), chunkAddress.Bytes()) >= committedDepth {
 		stored, reason = true, "is within AOR"
 		return store(ctx)
 	}
