@@ -7,8 +7,10 @@ package node
 import "io"
 
 var (
-	ValidatePublicAddress = validatePublicAddress
-	UseEmbeddedSnapshot   = useEmbeddedSnapshot
+	ValidatePublicAddress      = validatePublicAddress
+	UseEmbeddedSnapshot        = useEmbeddedSnapshot
+	ShallowReceiptToleranceFor = shallowReceiptToleranceFor
+	EffectiveMaxDoubling       = effectiveMaxDoubling
 )
 
 // NewTestBeeWithClosers builds a Bee with only the push-sync and retrieval

@@ -187,6 +187,7 @@ type Options struct {
 	PriceOracleAddress            string
 	RedistributionContractAddress string
 	ReserveCapacityDoubling       int
+	MaxReserveCapacityDoubling    int
 	ResolverConnectionCfgs        []multiresolver.ConnectionConfig
 	Resync                        bool
 	RetrievalCaching              bool
@@ -241,6 +242,37 @@ const (
 	cacheMinEvictCount           = 10_000
 	maxAllowedDoubling           = 1
 )
+
+// shallowReceiptToleranceFor returns how many proximity orders shallower than the
+// storage radius a push-sync receipt may be and still be accepted, given the
+// network's maximum doubling and this node's own capacity doubling. It is computed
+// in signed arithmetic and clamped at zero so that raising the doubling cap can
+// never make the difference negative and wrap it to a large uint8, which would
+// silently disable the shallow-receipt check. See issue #62.
+func shallowReceiptToleranceFor(maxAllowedDoubling, capacityDoubling int) uint8 {
+	t := maxAllowedDoubling - capacityDoubling
+	if t < 0 {
+		return 0
+	}
+	return uint8(t)
+}
+
+// effectiveMaxDoubling clamps the configured maximum doubling to the compiled-in
+// floor and validates the requested reserve capacity doubling against it. The
+// floor is the stock value, so a node can always double once as stock bee does;
+// a configured maximum below the floor, including the unset zero when Options is
+// built directly, keeps the floor. The operator raises the maximum with
+// --max-reserve-capacity-doubling. See issues #17 and #62.
+func effectiveMaxDoubling(requested, configuredMax int) (int, error) {
+	maxDoubling := configuredMax
+	if maxDoubling < maxAllowedDoubling {
+		maxDoubling = maxAllowedDoubling
+	}
+	if requested < 0 || requested > maxDoubling {
+		return 0, fmt.Errorf("config reserve capacity doubling has to be between default: 0 and maximum: %d", maxDoubling)
+	}
+	return maxDoubling, nil
+}
 
 // tracingEnvironment maps a network id to the deployment.environment trace
 // attribute. Unknown ids are reported as "private".
@@ -322,10 +354,11 @@ func NewBee(
 		return nil, fmt.Errorf("reserve capacity doubling is only allowed for full nodes")
 	}
 
-	if o.ReserveCapacityDoubling < 0 || o.ReserveCapacityDoubling > maxAllowedDoubling {
-		return nil, fmt.Errorf("config reserve capacity doubling has to be between default: 0 and maximum: %d", maxAllowedDoubling)
+	maxDoubling, err := effectiveMaxDoubling(o.ReserveCapacityDoubling, o.MaxReserveCapacityDoubling)
+	if err != nil {
+		return nil, err
 	}
-	shallowReceiptTolerance := maxAllowedDoubling - o.ReserveCapacityDoubling
+	shallowReceiptTolerance := shallowReceiptToleranceFor(maxDoubling, o.ReserveCapacityDoubling)
 
 	reserveCapacity := (1 << o.ReserveCapacityDoubling) * storer.DefaultReserveCapacity
 
@@ -1203,7 +1236,7 @@ func NewBee(
 		}
 	}
 
-	pushSyncProtocol := pushsync.New(swarmAddress, networkID, nonce, p2ps, localStore, waitNetworkRFunc, kad, o.FullNodeMode && !o.BootnodeMode, pssService.TryUnwrap, gsocService.Handle, validStamp, logger, acc, pricer, signer, tracer, detector, uint8(shallowReceiptTolerance))
+	pushSyncProtocol := pushsync.New(swarmAddress, networkID, nonce, p2ps, localStore, waitNetworkRFunc, kad, o.FullNodeMode && !o.BootnodeMode, pssService.TryUnwrap, gsocService.Handle, validStamp, logger, acc, pricer, signer, tracer, detector, shallowReceiptTolerance, uint8(o.ReserveCapacityDoubling))
 	b.pushSyncCloser = pushSyncProtocol
 
 	// set the pushSyncer in the PSS
