@@ -1,6 +1,16 @@
 # Raise the reserve capacity doubling limit
 
-Issue: [#17](https://github.com/crtahlin/wasp/issues/17)
+Issues: [#17](https://github.com/crtahlin/wasp/issues/17) (measure raising it),
+[#62](https://github.com/crtahlin/wasp/issues/62) (expose the limit as
+configuration), [#219](https://github.com/crtahlin/wasp/issues/219) (expose the
+redistribution sync-rate eligibility threshold).
+
+The core of this spec, the pushsync receipt analysis below, was written for
+[#17](https://github.com/crtahlin/wasp/issues/17) and is unchanged. Three sections
+were added afterwards for the wider cluster: what an operator has to tune alongside
+the limit, a second participation blocker in redistribution eligibility, and the
+reward-versus-freeze economics that set a practical ceiling. They do not alter the
+receipt analysis; they surround it.
 
 ## The question this answers
 
@@ -138,6 +148,102 @@ So the change is three things, not one:
    wrap.
 3. Only then raise the cap, as configuration with the current value as default.
 
+## Filling and sampling a larger reserve: what to tweak
+
+Raising the cap only permits a larger reserve. Filling it and then sampling it
+fast enough are separate problems, and they are the ones an operator actually
+feels. Reserve fill is bounded by the sync rate, not the disk: at the roughly 825
+chunks per second measured in
+[#26](https://github.com/crtahlin/wasp/issues/26), a default reserve takes about 85
+minutes to fill, and each doubling adds roughly that again. An operator who raises the cap without also raising the sync rates gets
+a reserve that fills proportionally slower and may never complete a sample in time.
+
+Most of the knobs that address this are already configuration in wasp, each with
+the stock value as its default and each gated on its own measurement, so an
+operator raising the cap already has the dials to manage the result:
+
+| Knob | Flag | Default | Issue |
+|---|---|---|---|
+| Per-peer pull-sync rate | `--pullsync-rate-limit` | 250 chunks/s | [#25](https://github.com/crtahlin/wasp/issues/25) |
+| Global puller rate | `--puller-rate-limit` | 1000 chunks/s | [#26](https://github.com/crtahlin/wasp/issues/26) |
+| Pull-sync peer recalculation interval | `--pullsync-recalc-interval` | 5 min | [#58](https://github.com/crtahlin/wasp/issues/58), [#59](https://github.com/crtahlin/wasp/issues/59) |
+| Concurrent `ReserveHas` checks | `--reserve-has-concurrency` | 0 (unbounded) | [#20](https://github.com/crtahlin/wasp/issues/20) |
+| Reserve wake-up (eviction scan) interval | `--reserve-wakeup-duration` | 15 min | [#58](https://github.com/crtahlin/wasp/issues/58) |
+| Level 0 compaction trigger (goleveldb) | `--db-compaction-l0-trigger` | 8 | [#24](https://github.com/crtahlin/wasp/issues/24) |
+
+Pausing pull-sync while a sample runs, so replication does not contend with the
+sampler, is already in wasp and unconditional
+([#23](https://github.com/crtahlin/wasp/issues/23)). So the sync and sampling
+levers exist; this cluster adds only the cap itself, the receipt correctness above,
+and the eligibility gate below.
+
+## The other participation blocker: redistribution eligibility (#219)
+
+The receipt analysis above lets a doubled node stay a well-behaved storer. A second
+change is needed before it can earn, and it is unrelated to receipts.
+
+A node only enters the redistribution draw once it considers itself fully synced.
+The gate is (`pkg/node/node.go:1372`):
+
+```go
+return localStore.ReserveSize() >= reserveThreshold &&
+    pullerService.SyncRate() == 0 &&
+    detector.IsStabilized()
+```
+
+The `SyncRate() == 0` term is the problem for a doubled node. Covering `2^d`
+neighborhoods means proportionally more chunk offers, so the sync rate rarely
+settles to exactly zero. The node fills its reserve but never reports fully synced,
+so it never plays. That is the negative result
+[#17](https://github.com/crtahlin/wasp/issues/17) anticipated arriving by a
+different route: the capacity is worthless because the node cannot participate.
+
+Expose this as configuration with the current behavior as the default
+([#219](https://github.com/crtahlin/wasp/issues/219)):
+
+- Add `--redistribution-sync-rate-threshold` in chunks per second.
+- **Default 0**, special-cased to keep the exact current gate `SyncRate() == 0`, so
+  behavior is unchanged unless set.
+- A positive value `t` switches the gate to `SyncRate() < (t * 2^d)`, scaling by
+  the doubling since that is the axis the offer rate grows on.
+
+This is the most consequential knob in the set, for the reason the next section
+gives.
+
+## The economics: correlated freezing and a sweet spot
+
+Everything above keeps a doubled node correct and able to play. Whether it should
+double, and by how much, is an economic question with a real ceiling, and it
+belongs in the operator documentation.
+
+The redistribution game penalizes a node that commits to a round but fails to
+reveal a valid sample in time. That penalty freezes the node out of earning for a
+number of rounds. (This is the redistribution freeze, a game-level penalty, and is
+a different thing from the wire-compatibility freeze check in the Protocol impact
+section below.)
+
+A node with doubling `d` is one machine with one reserve covering `2^d`
+neighborhoods. Each round, whichever of its neighborhoods is drawn, it must sample
+that one reserve inside the round window. Because all `2^d` neighborhoods run off
+the same reserve, a single overlong sample makes the node miss the round for every
+one of them at once. The failures are correlated, not independent: they share one
+cause, the time to sample one growing reserve. This is the shape of "when one
+freezes, all freeze."
+
+That sets a ceiling on how far raising `d` pays. Each extra doubling adds win
+chances but also enlarges the reserve, which lengthens sampling, which raises the
+chance of missing the window on any round. Because a miss loses the whole round
+across all neighborhoods at once, past some point the growing chance of a
+correlated freeze outweighs the extra win chances and expected earnings fall. There
+is no single correct value: it depends on the machine's disk speed, its sync rate,
+and the round timing on the network. The `--redistribution-sync-rate-threshold`
+knob sits right on this tradeoff, since a wider "synced enough" band lets the node
+commit while still syncing and so raises the chance of revealing an incomplete
+sample.
+
+Finding roughly where sampling starts to overrun the window on real hardware is the
+economic half of the measurement below.
+
 ## Protocol impact
 
 No wire change. `protocolName`, `protocolVersion` and the message types are
@@ -149,6 +255,13 @@ stock peer sees strictly more acceptable receipts than before, never fewer.
 
 The node's advertised `StorageRadius` in a receipt is unchanged, still the
 lowered radius, which only ever makes the uploader's second test more lenient.
+
+The redistribution eligibility change ([#219](https://github.com/crtahlin/wasp/issues/219))
+is observable on-chain through when a node commits, but its default preserves the
+current strict gate exactly, so a node behaves as today unless an operator opts in.
+A node that opts in and sets the threshold too high can commit an incomplete sample
+and be frozen; that is the operator's risk, stated in the documentation. None of
+the three changes alter `.github/protocol-freeze.lock`.
 
 ## Measurement
 
@@ -167,10 +280,24 @@ A negative result is that reserve fill slows measurably, meaning the extended
 area depends on pushsync arrivals more than this spec claims. That would be a
 reason to keep the cap where it is.
 
-**None of this can be measured on bench-1 as it stands.** It needs a node with
-doubling greater than 1, which needs the cap raised, and a node whose reserve is
-filling, which bench-1's is not. The measurement is the same prerequisite that
-stopped work on [#23](https://github.com/crtahlin/wasp/issues/23).
+Alongside the receipt checks above, the economic half measures whether the node can
+actually play at each doubling level:
+
+- **Sample duration against the round window.** For each doubling level from 0
+  upward, once the reserve is full, observe at least three redistribution rounds
+  (rule 7) and record how long the sample takes against the commit window, and
+  whether commit and reveal land in time. Stop raising the level where sampling
+  first begins to overrun the window on this hardware. That level, less a margin, is
+  the practical ceiling to document.
+- **Fill time and peak memory** at each level, so the operator documentation can
+  state what a given doubling costs to reach and hold.
+
+**What the node needs.** The measurement requires a node with enough disk for a
+doubled reserve, running the default engine, and building that reserve from an empty
+data directory. A node whose reserve is already full on another engine is not a
+substitute: the doubled reserve has to fill from empty on the engine under test. The
+reachable doubling levels on any given machine are set by its disk headroom and its
+sync rate, so those are reported with the result rather than fixed here.
 
 ## Rollout and rollback
 
@@ -180,3 +307,43 @@ does on merge. Rollback is setting it back to 1.
 The pushsync gate change is not configurable and applies to every node,
 including those with doubling 0 — for which it is a no-op, since
 `committedDepth == radius` when `d == 0`.
+
+## Documentation to add or update
+
+The operator-facing documentation is a first-class deliverable, not an afterthought.
+Doubling is easy to turn on and easy to get wrong, and the failure mode is losing
+redistribution earnings, so the risks have to be written down where an operator
+setting the flag will read them.
+
+- **A new operator guide**, `docs/reserve-capacity-doubling.md`, covering: what
+  doubling does and how it changes storage radius and committed depth; that fill is
+  bounded by sync rate, not disk; the full list of knobs to raise alongside it (the
+  table above) and what each costs; the correlated-freeze reasoning and that there
+  is a sweet spot beyond which raising the level loses money; and the ceiling found
+  by the measurement on real hardware.
+- **Each new flag's help text and the annotated config**
+  ([#37](https://github.com/crtahlin/wasp/issues/37)) states what raising and what
+  lowering it costs, per [AGENTS.md](../../../AGENTS.md) rule 8. For
+  `--max-reserve-capacity-doubling`: raising needs disk and sync-rate headroom and
+  risks freezing; lowering shrinks earning potential. For
+  `--redistribution-sync-rate-threshold`: raising trades sample completeness for
+  participation and is the direct freeze lever; lowering is safer but a doubled node
+  may never qualify.
+- **A short note in the push-sync or protocol-compatibility documentation** that a
+  doubled node gates its pushsync store decision on committed depth and issues no
+  receipt shallower than the network radius, so its receipts stay acceptable to
+  stock uploaders at any doubling level.
+
+## Order of work
+
+1. This extended spec merged.
+2. [#62](https://github.com/crtahlin/wasp/issues/62): the pushsync store gate on
+   committed depth, the signed tolerance arithmetic, then the doubling limit as a
+   flag with default 1. Behavior unchanged on merge.
+3. [#219](https://github.com/crtahlin/wasp/issues/219): the redistribution
+   sync-rate threshold as a flag with default 0. Behavior unchanged on merge.
+4. [#17](https://github.com/crtahlin/wasp/issues/17): run the measurement on the
+   chosen machine, find the ceiling, record it.
+5. Only then, if the measurement supports it, consider whether any default should
+   move. Until then every default preserves current behavior.
+6. Documentation lands with the flags it describes.
