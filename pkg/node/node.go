@@ -132,94 +132,95 @@ type Bee struct {
 }
 
 type Options struct {
-	Addr                          string
-	AllowPrivateCIDRs             bool
-	APIAddr                       string
-	EnableWSS                     bool
-	WSSAddr                       string
-	AutoTLSStorageDir             string
-	BlockchainRpcEndpoints        []string
-	BlockchainRpcDialTimeout      time.Duration
-	BlockchainRpcTLSTimeout       time.Duration
-	BlockchainRpcIdleTimeout      time.Duration
-	BlockchainRpcKeepalive        time.Duration
-	BzzTokenAddress               common.Address
-	BlockProfile                  bool
-	BlockTime                     time.Duration
-	BlockSyncInterval             uint64
-	BootnodeMode                  bool
-	Bootnodes                     []string
-	CacheCapacity                 uint64
-	AutoTLSCAEndpoint             string
-	ChainID                       int64
-	ChequebookEnable              bool
-	ChequebookVerification        bool
-	ChequebookMinBalance          string
-	CORSAllowedOrigins            []string
-	DataDir                       string
-	DBBlockCacheCapacity          uint64
-	DBDisableSeeksCompaction      bool
-	StorageEngine                 string
-	DBOpenFilesLimit              uint64
-	DBWriteBufferSize             uint64
-	DBCompactionL0Trigger         int
-	DBWriteSlowdownTrigger        int
-	DBWritePauseTrigger           int
-	EnableStorageIncentives       bool
-	EnableWS                      bool
-	AutoTLSDomain                 string
-	AutoTLSRegistrationEndpoint   string
-	FullNodeMode                  bool
-	LightNodeLimit                int
-	GasLimitFallback              uint64
-	Logger                        log.Logger
-	MinimumGasTipCap              uint64
-	MinimumStorageRadius          uint
-	MutexProfile                  bool
-	NATAddr                       string
-	NATWSSAddr                    string
-	NeighborhoodSuggester         string
-	PaymentEarly                  int64
-	PaymentThreshold              string
-	PaymentTolerance              int64
-	PostageContractAddress        string
-	PostageContractStartBlock     uint64
-	PriceOracleAddress            string
-	RedistributionContractAddress string
-	ReserveCapacityDoubling       int
-	MaxReserveCapacityDoubling    int
-	ResolverConnectionCfgs        []multiresolver.ConnectionConfig
-	Resync                        bool
-	RetrievalCaching              bool
-	SkipPostageSnapshot           bool
-	StakingContractAddress        string
-	StatestoreCacheCapacity       uint64
-	StaticNodes                   []swarm.Address
-	SwapEnable                    bool
-	SwapFactoryAddress            string
-	SwapInitialDeposit            string
-	TargetNeighborhood            string
-	TracingEnabled                bool
-	TracingEndpoint               string
-	TracingInsecure               bool
-	TracingCAFile                 string
-	TracingProtocol               string
-	TracingSamplingRatio          float64
-	TracingServiceName            string
-	TrxDebugMode                  bool
-	WarmupTime                    time.Duration
-	WelcomeMessage                string
-	SamplerReadConcurrency        int
-	SamplerSortWindow             int
-	ReserveHasConcurrency         int
-	KademliaSaturationPeers       int
-	KademliaOverSaturationPeers   int
-	PullSyncMaxChunksPerSecond    int
-	PullerMaxChunksPerSecond      int
-	PullerRecalcPeersDur          time.Duration
-	ReserveWakeUpDuration         time.Duration
-	ReserveBatchSweepInterval     time.Duration
-	WhitelistedWithdrawalAddress  []string
+	Addr                            string
+	AllowPrivateCIDRs               bool
+	APIAddr                         string
+	EnableWSS                       bool
+	WSSAddr                         string
+	AutoTLSStorageDir               string
+	BlockchainRpcEndpoints          []string
+	BlockchainRpcDialTimeout        time.Duration
+	BlockchainRpcTLSTimeout         time.Duration
+	BlockchainRpcIdleTimeout        time.Duration
+	BlockchainRpcKeepalive          time.Duration
+	BzzTokenAddress                 common.Address
+	BlockProfile                    bool
+	BlockTime                       time.Duration
+	BlockSyncInterval               uint64
+	BootnodeMode                    bool
+	Bootnodes                       []string
+	CacheCapacity                   uint64
+	AutoTLSCAEndpoint               string
+	ChainID                         int64
+	ChequebookEnable                bool
+	ChequebookVerification          bool
+	ChequebookMinBalance            string
+	CORSAllowedOrigins              []string
+	DataDir                         string
+	DBBlockCacheCapacity            uint64
+	DBDisableSeeksCompaction        bool
+	StorageEngine                   string
+	DBOpenFilesLimit                uint64
+	DBWriteBufferSize               uint64
+	DBCompactionL0Trigger           int
+	DBWriteSlowdownTrigger          int
+	DBWritePauseTrigger             int
+	EnableStorageIncentives         bool
+	EnableWS                        bool
+	AutoTLSDomain                   string
+	AutoTLSRegistrationEndpoint     string
+	FullNodeMode                    bool
+	LightNodeLimit                  int
+	GasLimitFallback                uint64
+	Logger                          log.Logger
+	MinimumGasTipCap                uint64
+	MinimumStorageRadius            uint
+	MutexProfile                    bool
+	NATAddr                         string
+	NATWSSAddr                      string
+	NeighborhoodSuggester           string
+	PaymentEarly                    int64
+	PaymentThreshold                string
+	PaymentTolerance                int64
+	PostageContractAddress          string
+	PostageContractStartBlock       uint64
+	PriceOracleAddress              string
+	RedistributionContractAddress   string
+	ReserveCapacityDoubling         int
+	MaxReserveCapacityDoubling      int
+	RedistributionSyncRateThreshold int
+	ResolverConnectionCfgs          []multiresolver.ConnectionConfig
+	Resync                          bool
+	RetrievalCaching                bool
+	SkipPostageSnapshot             bool
+	StakingContractAddress          string
+	StatestoreCacheCapacity         uint64
+	StaticNodes                     []swarm.Address
+	SwapEnable                      bool
+	SwapFactoryAddress              string
+	SwapInitialDeposit              string
+	TargetNeighborhood              string
+	TracingEnabled                  bool
+	TracingEndpoint                 string
+	TracingInsecure                 bool
+	TracingCAFile                   string
+	TracingProtocol                 string
+	TracingSamplingRatio            float64
+	TracingServiceName              string
+	TrxDebugMode                    bool
+	WarmupTime                      time.Duration
+	WelcomeMessage                  string
+	SamplerReadConcurrency          int
+	SamplerSortWindow               int
+	ReserveHasConcurrency           int
+	KademliaSaturationPeers         int
+	KademliaOverSaturationPeers     int
+	PullSyncMaxChunksPerSecond      int
+	PullerMaxChunksPerSecond        int
+	PullerRecalcPeersDur            time.Duration
+	ReserveWakeUpDuration           time.Duration
+	ReserveBatchSweepInterval       time.Duration
+	WhitelistedWithdrawalAddress    []string
 }
 
 const (
@@ -272,6 +273,21 @@ func effectiveMaxDoubling(requested, configuredMax int) (int, error) {
 		return 0, fmt.Errorf("config reserve capacity doubling has to be between default: 0 and maximum: %d", maxDoubling)
 	}
 	return maxDoubling, nil
+}
+
+// syncedWithinThreshold reports whether the pull-sync rate is low enough for the
+// node to consider itself fully synced, given the operator's configured threshold
+// and this node's capacity doubling. A threshold of zero keeps the stock behavior
+// exactly, requiring a rate of zero. A positive threshold is scaled by 2^doubling,
+// since a node covering 2^doubling neighborhoods receives proportionally more
+// chunk offers and its rate settles proportionally higher. Raising the threshold
+// lets a large node participate in redistribution while still syncing, at the cost
+// of committing an incomplete sample and being frozen. See issues #17 and #219.
+func syncedWithinThreshold(rate float64, threshold, capacityDoubling int) bool {
+	if threshold <= 0 {
+		return rate == 0
+	}
+	return rate < float64(threshold)*float64(uint64(1)<<uint(capacityDoubling))
 }
 
 // tracingEnvironment maps a network id to the deployment.environment trace
@@ -1362,7 +1378,7 @@ func NewBee(
 
 			reserveThreshold := reserveCapacity >> 1
 			isFullySynced := func() bool {
-				return pullerService.SyncRate() == 0 && saludService.IsHealthy() && localStore.ReserveSize() >= reserveThreshold
+				return syncedWithinThreshold(pullerService.SyncRate(), o.RedistributionSyncRateThreshold, o.ReserveCapacityDoubling) && saludService.IsHealthy() && localStore.ReserveSize() >= reserveThreshold
 			}
 
 			syncCheckTicker := time.NewTicker(2 * time.Second)
@@ -1402,7 +1418,7 @@ func NewBee(
 			isFullySynced := func() bool {
 				reserveThreshold := reserveCapacity * 5 / 10
 				logger.Debug("Sync status check evaluated", "stabilized", detector.IsStabilized())
-				return localStore.ReserveSize() >= reserveThreshold && pullerService.SyncRate() == 0 && detector.IsStabilized()
+				return localStore.ReserveSize() >= reserveThreshold && syncedWithinThreshold(pullerService.SyncRate(), o.RedistributionSyncRateThreshold, o.ReserveCapacityDoubling) && detector.IsStabilized()
 			}
 
 			agent, err = storageincentives.New(
