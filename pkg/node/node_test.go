@@ -244,3 +244,32 @@ func TestEffectiveMaxDoubling(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncedWithinThreshold covers the issue #219 redistribution eligibility
+// gate: a zero threshold keeps the strict "rate must be zero" behaviour, and a
+// positive threshold is scaled by 2^doubling.
+func TestSyncedWithinThreshold(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name             string
+		rate             float64
+		threshold, doubl int
+		want             bool
+	}{
+		{"default strict, rate zero", 0, 0, 0, true},
+		{"default strict, rate nonzero", 0.5, 0, 0, false},
+		{"negative treated as strict", 0.5, -1, 5, false},
+		{"threshold 1 doubling 0 under", 0.5, 1, 0, true},
+		{"threshold 1 doubling 0 at limit", 1, 1, 0, false},
+		{"threshold 2 doubling 3 under", 15, 2, 3, true}, // 2*8=16
+		{"threshold 2 doubling 3 at limit", 16, 2, 3, false},
+		{"threshold 2 doubling 3 over", 17, 2, 3, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := node.SyncedWithinThreshold(tc.rate, tc.threshold, tc.doubl); got != tc.want {
+				t.Fatalf("SyncedWithinThreshold(%v, %d, %d) = %v, want %v", tc.rate, tc.threshold, tc.doubl, got, tc.want)
+			}
+		})
+	}
+}

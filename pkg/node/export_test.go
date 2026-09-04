@@ -11,6 +11,7 @@ var (
 	UseEmbeddedSnapshot        = useEmbeddedSnapshot
 	ShallowReceiptToleranceFor = shallowReceiptToleranceFor
 	EffectiveMaxDoubling       = effectiveMaxDoubling
+	SyncedWithinThreshold      = syncedWithinThreshold
 )
 
 // NewTestBeeWithClosers builds a Bee with only the push-sync and retrieval
