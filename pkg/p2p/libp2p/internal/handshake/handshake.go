@@ -26,6 +26,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 )
 
 // loggerName is the tree path name of the logger for this package.
@@ -89,7 +90,20 @@ type Service struct {
 	hostAddresser         Addresser
 	now                   func() time.Time
 	addrCache             addressCache // session-stable signed address, keyed by chequebook + underlays
+
+	// advMu guards the pinned advertised underlay set. Keeping the set steady across
+	// handshakes is what stops the signed address churning on a NAT node. See #221.
+	advMu      sync.Mutex
+	advertised []ma.Multiaddr // pinned advertised underlay set; nil until a public address is seen
+	advStale   int            // consecutive handshakes whose observation lacked the pinned public IP
 }
+
+// advertisedUnderlayRepinThreshold is how many consecutive handshakes must observe
+// a public IP other than the pinned one before the node adopts it. It is the
+// hysteresis that separates a genuine public-IP change from a transient or hostile
+// single observation. Small on purpose; kept a constant until measurement shows it
+// needs to be a config option (rule 8). See #221.
+const advertisedUnderlayRepinThreshold = 3
 
 // Info contains the information received from the handshake.
 type Info struct {
@@ -174,6 +188,82 @@ func (s *Service) signedAddress(underlays []ma.Multiaddr) (*bzz.Address, error) 
 		s.metrics.AddressMinted.Inc()
 		return addr, nil
 	})
+}
+
+// stabilizeUnderlays keeps the advertised underlay set steady across handshakes so
+// the signed address is minted once and stays byte-stable, instead of being rebuilt
+// from each peer's observation of this node and re-minted every handshake (issue
+// #221). It follows a genuine change of the node's public IP but ignores transient
+// noise.
+//
+// Comparison is by IP, not the whole address: NAT commonly remaps the source port
+// per connection, so peers observe the same public IP with different ports, and
+// comparing whole addresses would treat every remapped port as a change and churn.
+//
+// A configured nat-addr already yields a constant set, so this adopts it once and
+// never changes it: a no-op.
+func (s *Service) stabilizeUnderlays(computed []ma.Multiaddr) []ma.Multiaddr {
+	s.advMu.Lock()
+	defer s.advMu.Unlock()
+
+	computedIPs := publicIPs(computed)
+
+	// Nothing pinned yet: adopt the first set carrying a public address so the node
+	// advertises a routable address as soon as one is observed. Until then advertise
+	// the computed set so discovery still works.
+	if s.advertised == nil {
+		if len(computedIPs) > 0 {
+			s.advertised = slices.Clone(computed)
+			s.advStale = 0
+			return s.advertised
+		}
+		return computed
+	}
+
+	// A single handshake that observed no public address must not drop the pin.
+	if len(computedIPs) == 0 {
+		return s.advertised
+	}
+
+	// The pinned public IP is still observed: unchanged, stay stable.
+	if sharesKey(publicIPs(s.advertised), computedIPs) {
+		s.advStale = 0
+		return s.advertised
+	}
+
+	// The pinned public IP was not observed: a possible change. Only re-pin after a
+	// sustained run, so a transient or hostile observation does not churn.
+	s.advStale++
+	if s.advStale >= advertisedUnderlayRepinThreshold {
+		s.advertised = slices.Clone(computed)
+		s.advStale = 0
+	}
+	return s.advertised
+}
+
+// publicIPs returns the set of global-scope IP strings among the underlays. The
+// port is deliberately dropped so NAT source-port remapping does not read as a
+// change of address.
+func publicIPs(underlays []ma.Multiaddr) map[string]struct{} {
+	ips := make(map[string]struct{})
+	for _, a := range underlays {
+		if !manet.IsPublicAddr(a) {
+			continue
+		}
+		if ip, err := manet.ToIP(a); err == nil {
+			ips[ip.String()] = struct{}{}
+		}
+	}
+	return ips
+}
+
+func sharesKey(a, b map[string]struct{}) bool {
+	for k := range a {
+		if _, ok := b[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) SetPicker(n p2p.Picker) {
@@ -272,7 +362,7 @@ func (s *Service) Handshake(ctx context.Context, stream p2p.Stream, peerMultiadd
 		s.metrics.AdvertisableUnderlaysTruncated.Inc()
 	}
 
-	bzzAddress, err := s.signedAddress(advertisableUnderlays)
+	bzzAddress, err := s.signedAddress(s.stabilizeUnderlays(advertisableUnderlays))
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +468,7 @@ func (s *Service) Handle(ctx context.Context, stream p2p.Stream, peerMultiaddrs 
 		s.metrics.AdvertisableUnderlaysTruncated.Inc()
 	}
 
-	bzzAddress, err := s.signedAddress(advertisableUnderlays)
+	bzzAddress, err := s.signedAddress(s.stabilizeUnderlays(advertisableUnderlays))
 	if err != nil {
 		return nil, err
 	}
