@@ -26,6 +26,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 )
 
 // loggerName is the tree path name of the logger for this package.
@@ -89,6 +90,10 @@ type Service struct {
 	hostAddresser         Addresser
 	now                   func() time.Time
 	addrCache             addressCache // session-stable signed address, keyed by chequebook + underlays
+	// stableUnderlays pins the advertised underlay set once a public address has
+	// been seen, so the signed address stays byte-stable across handshakes instead
+	// of being recomputed from each peer's observation. See issue #221.
+	stableUnderlays atomic.Pointer[[]ma.Multiaddr]
 }
 
 // Info contains the information received from the handshake.
@@ -174,6 +179,41 @@ func (s *Service) signedAddress(underlays []ma.Multiaddr) (*bzz.Address, error) 
 		s.metrics.AddressMinted.Inc()
 		return addr, nil
 	})
+}
+
+// stabilizeUnderlays keeps the advertised underlay set steady across handshakes.
+// The set is otherwise recomputed from each peer's observation of this node, which
+// on a node behind NAT differs per peer and makes the signed address churn: it is
+// re-minted and re-advertised on every handshake (issue #221). Once a computed set
+// containing a public address is seen, that set is pinned and reused, so the signed
+// address is minted once and stays byte-stable. Until a public address appears the
+// freshly computed set is used, so discovery still works; a configured nat-addr
+// already makes the input stable and is unaffected.
+//
+// This pins the first public set seen. A refinement is to adopt the address by
+// consensus across peers and to re-pin if the pinned address stops being observed,
+// so a changed public IP is picked up live. See issue #221.
+func (s *Service) stabilizeUnderlays(computed []ma.Multiaddr) []ma.Multiaddr {
+	if pinned := s.stableUnderlays.Load(); pinned != nil {
+		return *pinned
+	}
+	if containsPublicAddr(computed) {
+		cp := slices.Clone(computed)
+		s.stableUnderlays.CompareAndSwap(nil, &cp)
+		if pinned := s.stableUnderlays.Load(); pinned != nil {
+			return *pinned
+		}
+	}
+	return computed
+}
+
+func containsPublicAddr(underlays []ma.Multiaddr) bool {
+	for _, a := range underlays {
+		if manet.IsPublicAddr(a) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) SetPicker(n p2p.Picker) {
@@ -272,7 +312,7 @@ func (s *Service) Handshake(ctx context.Context, stream p2p.Stream, peerMultiadd
 		s.metrics.AdvertisableUnderlaysTruncated.Inc()
 	}
 
-	bzzAddress, err := s.signedAddress(advertisableUnderlays)
+	bzzAddress, err := s.signedAddress(s.stabilizeUnderlays(advertisableUnderlays))
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +418,7 @@ func (s *Service) Handle(ctx context.Context, stream p2p.Stream, peerMultiaddrs 
 		s.metrics.AdvertisableUnderlaysTruncated.Inc()
 	}
 
-	bzzAddress, err := s.signedAddress(advertisableUnderlays)
+	bzzAddress, err := s.signedAddress(s.stabilizeUnderlays(advertisableUnderlays))
 	if err != nil {
 		return nil, err
 	}
