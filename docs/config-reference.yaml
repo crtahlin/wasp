@@ -63,7 +63,13 @@
 ## triggers connect to main net bootnodes.
 # mainnet: true
 
-## NAT exposed address
+## NAT exposed address.
+## A node behind NAT now stabilises its advertised address automatically: it learns
+## its public address from peers and holds it steady, so peers see one stable address
+## instead of a new one per connection. Setting nat-addr still works and overrides
+## the automatic behaviour with a fixed address. If a node ever sits at zero peers
+## while dialling, the signal of the old failure is the handshake_address_minted_total
+## metric climbing roughly one per connection. See issue #221.
 # nat-addr: ""
 
 ## WSS NAT exposed address
