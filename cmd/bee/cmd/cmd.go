@@ -365,11 +365,11 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	}
 	cmd.Flags().String(optionNameVerbosity, "info", "log verbosity level 0=silent, 1=error, 2=warn, 3=info, 4=debug, 5=trace")
 	cmd.Flags().String(optionWelcomeMessage, "", "send a welcome message string during handshakes")
-	cmd.Flags().Int(optionNamePullSyncMaxChunksPerSecond, 0, "per-peer inbound chunk rate this node will serve; 0 uses the default of 250")
+	cmd.Flags().Int(optionNamePullSyncMaxChunksPerSecond, 0, "rate this node serves to each peer pulling from it, in chunks per second; 0 uses the default of 250. Raising it lets peers pull from you faster at the cost of your own upload bandwidth; lowering it makes you a slower source for the network.")
 	cmd.Flags().Duration(optionNamePullSyncRecalcInterval, 0, "how often the puller re-decides which peers to sync from; 0 uses the default of 5m")
 	cmd.Flags().Duration(optionNameReserveWakeUpDuration, 0, "how long the reserve worker waits between runs; 0 uses the default of 15m")
 	cmd.Flags().Duration(optionNameReserveBatchSweepInterval, 0, "how often the reserve reconciles chunks against their batches and evicts orphans; 0 runs it on every wake-up (the default). A longer interval keeps the frequent wake-up scan to the cheap within-radius count; it delays repairing the divergence case the sweep exists for, bounded by the interval")
-	cmd.Flags().Int(optionNamePullerMaxChunksPerSecond, 0, "total inbound sync rate across all peers; 0 uses the default of 1000, roughly 4 MB/s")
+	cmd.Flags().Int(optionNamePullerMaxChunksPerSecond, 0, "total inbound sync rate across all peers, in chunks per second; 0 uses the default of 1000, roughly 4 MB/s. Raising it fills a large reserve faster but draws more serving bandwidth from the peers you sync from, a cost paid by them; keep the default unless you run a large-reserve node that needs it.")
 	cmd.Flags().Int(optionNameSamplerReadConcurrency, 0, "chunk loads the reserve sampler keeps in flight; 0 uses the default, which matches the CPU count and preserves previous behaviour")
 	cmd.Flags().Int(optionNameSamplerSortWindow, 0, "chunks the reserve sampler buffers and sorts into disk order before reading; 0 reads in bin order, which is the previous behaviour")
 	cmd.Flags().Int(optionNameReserveHasConcurrency, 0, "reserve lookups pullsync may have in flight at once; 0 leaves them unbounded, which is the previous behaviour")

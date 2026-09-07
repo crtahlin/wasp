@@ -222,12 +222,16 @@
 ## minimum radius storage threshold
 # minimum-storage-radius: 0
 
-## total inbound sync rate across all peers; 0 uses the default of 1000,
-## roughly 4 MB/s
+## total inbound sync rate across all peers, in chunks per second; 0 uses the
+## default of 1000, roughly 4 MB/s. Raising it fills a large reserve faster but
+## draws more serving bandwidth from the peers you sync from, a cost paid by them.
+## Keep the default unless you run a large-reserve node that needs it. This is the
+## rate that gates reserve fill; the saturation peer count is not (see issue #32).
 # puller-max-chunks-per-second: 0
 
-## per-peer inbound chunk rate this node will serve; 0 uses the default of
-## 250
+## rate this node serves to each peer pulling from it, in chunks per second; 0 uses
+## the default of 250. Raising it lets peers pull from you faster at the cost of
+## your own upload bandwidth; lowering it makes you a slower source for the network.
 # pullsync-max-chunks-per-second: 0
 
 ## how often the puller re-decides which peers to sync from; 0 uses the
