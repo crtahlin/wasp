@@ -45,7 +45,7 @@ Setup:
 
 ## The result: raising the cache does not help
 
-**Table — reserve sample duration by block cache size, bench-1 goleveldb d=0, page
+**Table: reserve sample duration by block cache size, bench-1 goleveldb d=0, page
 cache dropped before each run, committed depth 9**
 
 | Block cache | Coverage of 213 MB index | Cold runs (s) | Median (s) |
