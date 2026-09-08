@@ -176,7 +176,13 @@
 # writes under compaction pressure. See docs/agent-playbooks/test-bench.md.
 # ========================================================================
 
-## size of block cache of the database in bytes
+## size of block cache of the database in bytes. This caches the index store's
+## blocks, not chunk data, which the operating system page cache serves. Raising
+## it uses more heap memory and, on a node whose reserve is larger than RAM,
+## leaves less page cache for the much larger chunk store, which can slow reads;
+## a node measurement found no reserve-sample speedup from raising it (issue #12).
+## Lowering it caches less of the index. The default serves a normal node; raise
+## it only on a large-reserve goleveldb node that has measured a need.
 # db-block-cache-capacity: 33554432
 
 ## level-0 SST files at which the index store starts compacting; lower
