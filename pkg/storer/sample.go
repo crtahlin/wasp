@@ -368,7 +368,12 @@ func (db *DB) ReserveSample(
 			wstat := SampleStats{}
 			// One hasher per goroutine: bmt hashers carry state and are not
 			// safe to share.
-			hasher := bmt.NewPrefixHasher(anchor)
+			// The sampler runs a pool of these hashers in parallel, one per
+			// worker, so it already saturates the cores. NewSamplerPrefixHasher
+			// gives a hasher that does not add a second layer of per-section
+			// goroutines on top of that on the non-SIMD platforms most weak
+			// nodes run. See issue #236.
+			hasher := bmt.NewSamplerPrefixHasher(anchor)
 			defer func() { addStats(wstat) }()
 
 			for lc := range loadedC {

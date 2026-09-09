@@ -26,6 +26,15 @@ type goroutineHasher struct {
 	result chan []byte
 	errc   chan error
 	span   []byte
+	// sync hashes each section in the calling goroutine instead of spawning one
+	// goroutine per section. The BMT root is identical either way, because the
+	// per-node toggle assigns left and right children regardless of arrival
+	// order. It is faster when the caller already saturates the cores with its
+	// own parallelism, where the per-section fan-out is only oversubscription;
+	// the reserve sampler is that caller (see issue #236). The result channel is
+	// buffered in sync mode so the final in-line section can deliver the root to
+	// the same goroutine that reads it without deadlocking.
+	sync bool
 }
 
 func newGoroutineHasher() *goroutineHasher {
@@ -47,6 +56,22 @@ func newGoroutinePrefixHasher(prefix []byte) *goroutineHasher {
 		errc:          make(chan error, 1),
 		span:          make([]byte, SpanSize),
 		bmt:           newGoroutineTree(gc.maxSize, gc.depth, gc.hasherFunc),
+	}
+}
+
+// newGoroutineSyncPrefixHasher builds a prefix hasher that hashes sections in
+// the calling goroutine rather than one goroutine per section. See the sync
+// field for why. The result channel is buffered so the single in-line delivery
+// of the root does not block the goroutine that also reads it.
+func newGoroutineSyncPrefixHasher(prefix []byte) *goroutineHasher {
+	gc := newGoroutineConf(prefix, swarm.BmtBranches, 32)
+	return &goroutineHasher{
+		goroutineConf: gc,
+		result:        make(chan []byte, 1),
+		errc:          make(chan error, 1),
+		span:          make([]byte, SpanSize),
+		bmt:           newGoroutineTree(gc.maxSize, gc.depth, gc.hasherFunc),
+		sync:          true,
 	}
 }
 
@@ -90,9 +115,14 @@ func (h *goroutineHasher) Write(b []byte) (int, error) {
 	}
 	// remember where the final section lives so Sum can kick it off.
 	h.pos = to
-	// fan out one goroutine per fully-populated section to start hashing it concurrently.
+	// fan out one goroutine per fully-populated section to start hashing it
+	// concurrently, or, in sync mode, hash each section in this goroutine.
 	for i := from; i < to; i++ {
-		go h.processSection(i, false)
+		if h.sync {
+			h.processSection(i, false)
+		} else {
+			go h.processSection(i, false)
+		}
 	}
 	return l, nil
 }
@@ -109,9 +139,15 @@ func (h *goroutineHasher) Sum(b []byte) []byte {
 	// zero-pad the trailing partial section so the final-section hasher sees a
 	// deterministic 64-byte input regardless of how Write was sliced.
 	copy(h.bmt.buffer[h.size:], zerosection)
-	// hash the last section on its own goroutine with the final flag set, which
-	// fills missing right-sister branches with all-zero subtree hashes on its way up.
-	go h.processSection(h.pos, true)
+	// hash the last section with the final flag set, which fills missing
+	// right-sister branches with all-zero subtree hashes on its way up. In sync
+	// mode this runs in-line and delivers the root to the buffered result
+	// channel that the select below reads.
+	if h.sync {
+		h.processSection(h.pos, true)
+	} else {
+		go h.processSection(h.pos, true)
+	}
 	// wait for either the BMT root to bubble up via h.result or an error from one of
 	// the per-section goroutines via h.errc; the error is swallowed because the
 	// hash.Hash.Sum contract has no error return.

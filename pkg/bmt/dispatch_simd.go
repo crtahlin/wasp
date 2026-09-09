@@ -35,3 +35,17 @@ func NewPrefixHasher(prefix []byte) Hasher {
 	}
 	return newGoroutinePrefixHasher(prefix)
 }
+
+// NewSamplerPrefixHasher returns a prefix hasher for a caller that already
+// saturates the cores with its own parallelism, such as the reserve sampler's
+// hasher pool. On SIMD the SIMD hasher is returned unchanged; it is
+// single-threaded per hash and has no per-section fan-out to remove. Off SIMD
+// the sync goroutine hasher is returned, which hashes sections in the calling
+// goroutine so it does not oversubscribe the cores the caller is already using.
+// See issue #236.
+func NewSamplerPrefixHasher(prefix []byte) Hasher {
+	if SIMDOptIn() && keccak.HasSIMD() {
+		return newSIMDPrefixHasher(prefix)
+	}
+	return newGoroutineSyncPrefixHasher(prefix)
+}
