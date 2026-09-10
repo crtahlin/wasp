@@ -148,6 +148,16 @@
 ## staking contract address
 # staking-address: ""
 
+## recover stake left in retired staking contracts when the node starts
+## (issue #256): "off" (default, do nothing), "withdraw" (recover it to the
+## node's wallet), or "migrate" (recover it into the current staking contract).
+## It moves staked funds, so it is off by default and acts only on this explicit
+## opt-in. If the node has no native balance for gas or the chain is unreachable,
+## it is skipped and retried on the next start, never blocking startup; a
+## part-finished migrate resumes where it left off. Discover recoverable stake
+## first, without moving anything, with GET /stake/legacy.
+# stake-recovery-on-startup: "off"
+
 ## enable storage incentives feature
 # storage-incentives-enable: true
 

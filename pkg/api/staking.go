@@ -272,6 +272,12 @@ func (s *Service) legacyStakeRecoverHandler(w http.ResponseWriter, r *http.Reque
 		jsonhttp.NotFound(w, "unknown legacy staking deployment")
 		return
 	}
+	if errors.Is(err, staking.ErrInsufficientGas) {
+		logger.Debug("insufficient native balance for gas", "deployment", paths.ID, "error", err)
+		logger.Error(nil, "insufficient native balance for gas")
+		jsonhttp.BadRequest(w, "insufficient native balance for gas")
+		return
+	}
 	if err != nil {
 		logger.Debug("recover legacy stake failed", "deployment", paths.ID, "error", err)
 		logger.Error(nil, "recover legacy stake failed")

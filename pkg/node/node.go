@@ -188,6 +188,7 @@ type Options struct {
 	RedistributionContractAddress   string
 	ReserveCapacityDoubling         int
 	MaxReserveCapacityDoubling      int
+	StakeRecoveryOnStartup          string
 	RedistributionSyncRateThreshold int
 	ResolverConnectionCfgs          []multiresolver.ConnectionConfig
 	Resync                          bool
@@ -273,6 +274,49 @@ func effectiveMaxDoubling(requested, configuredMax int) (int, error) {
 		return 0, fmt.Errorf("config reserve capacity doubling has to be between default: 0 and maximum: %d", maxDoubling)
 	}
 	return maxDoubling, nil
+}
+
+// runStakeRecoveryOnStartup optionally recovers stake left in retired staking
+// contracts when the node starts (issue #256). The mode is off (the default,
+// nothing happens), withdraw (recover to the wallet), or migrate (recover into
+// the current contract). An invalid mode is a configuration error and stops
+// startup; everything else never blocks or fails startup. The recovery runs in
+// the background on its own context, so a slow or unreachable chain backend, or
+// a node with no gas, cannot hold up or crash the node: it is logged and retried
+// on the next start.
+func runStakeRecoveryOnStartup(mode string, chainEnabled bool, svc staking.LegacyStakeService, logger log.Logger) error {
+	switch mode {
+	case "", "off":
+		return nil
+	case string(staking.RecoverModeWithdraw), string(staking.RecoverModeMigrate):
+	default:
+		return fmt.Errorf("invalid stake-recovery-on-startup %q: must be off, withdraw or migrate", mode)
+	}
+	if !chainEnabled {
+		logger.Warning("stake-recovery-on-startup is set but the chain is disabled; skipping legacy stake recovery")
+		return nil
+	}
+
+	rmode := staking.RecoverMode(mode)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		logger.Info("recovering legacy stake at startup", "mode", mode)
+		results, err := svc.RecoverAll(ctx, rmode)
+		if err != nil {
+			logger.Warning("legacy stake recovery at startup did not run; will retry on next start", "error", err)
+			return
+		}
+		for _, r := range results {
+			switch {
+			case r.Error != "":
+				logger.Warning("legacy stake recovery skipped a deployment; will retry on next start", "deployment", r.DeploymentID, "error", r.Error)
+			case r.Phase == "done" && !r.AlreadyDone && r.Recovered != nil && r.Recovered.Sign() > 0:
+				logger.Info("recovered legacy stake at startup", "deployment", r.DeploymentID, "mode", mode, "amount", r.Recovered)
+			}
+		}
+	}()
+	return nil
 }
 
 // syncedWithinThreshold reports whether the pull-sync rate is low enough for the
@@ -1320,12 +1364,19 @@ func NewBee(
 
 	stakingContract := staking.New(overlayEthAddress, stakingContractAddress, abiutil.MustParseABI(chainCfg.StakingABI), bzzTokenAddress, transactionService, common.BytesToHash(nonce), contractGasLimit, uint8(o.ReserveCapacityDoubling))
 
-	// Discovery of stake left in retired staking contracts (issue #256). The
-	// catalog is empty until confirmed historical addresses are added, so this
-	// is inert by default; it never moves funds. See docs/experiments/stake-recovery.
-	legacyStakeService, err := staking.NewLegacyStakeService(overlayEthAddress, bzzTokenAddress, transactionService, contractGasLimit, config.LegacyStakingDeployments(chainID), chainCfg.StakingABI, stakingContract, stateStore, chainID)
+	// Discovery and recovery of stake left in retired staking contracts (issue
+	// #256). The catalog is empty until confirmed historical addresses are added,
+	// so this is inert by default and never moves funds unless an operator opts
+	// in. See docs/experiments/stake-recovery.
+	nativeBalanceFn := func(ctx context.Context) (*big.Int, error) {
+		return chainBackend.BalanceAt(ctx, overlayEthAddress, nil)
+	}
+	legacyStakeService, err := staking.NewLegacyStakeService(overlayEthAddress, bzzTokenAddress, transactionService, contractGasLimit, config.LegacyStakingDeployments(chainID), chainCfg.StakingABI, stakingContract, stateStore, chainID, nativeBalanceFn)
 	if err != nil {
 		return nil, fmt.Errorf("legacy stake service: %w", err)
+	}
+	if err := runStakeRecoveryOnStartup(o.StakeRecoveryOnStartup, chainEnabled, legacyStakeService, logger); err != nil {
+		return nil, err
 	}
 
 	if chainEnabled {
