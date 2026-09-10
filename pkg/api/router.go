@@ -705,4 +705,10 @@ func (s *Service) mountBusinessDebug() {
 	handle("/rchash/{depth}/{anchor1}/{anchor2}", jsonhttp.MethodHandler{
 		"GET": http.HandlerFunc(s.rchash),
 	})
+
+	// Measurement-only benchmark for the probe-based sample (issue #241), like
+	// /rchash. Not part of the redistribution game.
+	handle("/probesample/{depth}/{anchor}/{k}", jsonhttp.MethodHandler{
+		"GET": http.HandlerFunc(s.probeSample),
+	})
 }
