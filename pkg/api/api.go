@@ -147,6 +147,11 @@ type Storer interface {
 	storer.RadiusChecker
 	storer.Debugger
 	storer.NeighborhoodStats
+	// ProbeSample and ReserveSizeWithinRadius back the measurement-only
+	// /probesample benchmark endpoint (issue #241). They are not part of the
+	// redistribution game.
+	ProbeSample(ctx context.Context, anchor []byte, committedDepth uint8, k int) (storer.ProbeStats, error)
+	ReserveSizeWithinRadius() uint64
 }
 
 type PinIntegrity interface {
