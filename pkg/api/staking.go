@@ -10,7 +10,6 @@ import (
 	"net/http"
 
 	"github.com/ethersphere/bee/v2/pkg/bigint"
-
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 	"github.com/ethersphere/bee/v2/pkg/storageincentives/staking"
 	"github.com/gorilla/mux"
@@ -140,6 +139,56 @@ func (s *Service) withdrawStakeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonhttp.OK(w, stakeTransactionReponse{TxHash: txHash.String()})
+}
+
+type legacyStakeEntryResponse struct {
+	DeploymentID     string         `json:"deploymentId"`
+	Address          string         `json:"address"`
+	RecoverableStake *bigint.BigInt `json:"recoverableStake,omitempty"`
+	Paused           bool           `json:"paused"`
+	RecoverMethod    string         `json:"recoverMethod"`
+	Error            string         `json:"error,omitempty"`
+}
+
+type legacyStakeResponse struct {
+	Deployments []legacyStakeEntryResponse `json:"deployments"`
+}
+
+// legacyStakeHandler reports, per known retired staking contract on this chain,
+// how much of the node's stake is recoverable and how. It is read-only and
+// moves no funds. See docs/experiments/stake-recovery.
+func (s *Service) legacyStakeHandler(w http.ResponseWriter, r *http.Request) {
+	logger := s.logger.WithName("get_stake_legacy").Build()
+
+	resp := legacyStakeResponse{Deployments: []legacyStakeEntryResponse{}}
+	if s.legacyStake == nil {
+		jsonhttp.OK(w, resp)
+		return
+	}
+
+	statuses, err := s.legacyStake.Discover(r.Context())
+	if err != nil {
+		logger.Debug("legacy stake discovery failed", "error", err)
+		logger.Error(nil, "legacy stake discovery failed")
+		jsonhttp.InternalServerError(w, "legacy stake discovery failed")
+		return
+	}
+
+	for _, st := range statuses {
+		entry := legacyStakeEntryResponse{
+			DeploymentID:  st.DeploymentID,
+			Address:       st.Address.String(),
+			Paused:        st.Paused,
+			RecoverMethod: string(st.RecoverMethod),
+			Error:         st.Error,
+		}
+		if st.RecoverableStake != nil {
+			entry.RecoverableStake = bigint.Wrap(st.RecoverableStake)
+		}
+		resp.Deployments = append(resp.Deployments, entry)
+	}
+
+	jsonhttp.OK(w, resp)
 }
 
 func (s *Service) migrateStakeHandler(w http.ResponseWriter, r *http.Request) {

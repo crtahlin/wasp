@@ -175,6 +175,7 @@ type Service struct {
 	probe           *Probe
 	metricsRegistry *prometheus.Registry
 	stakingContract staking.Contract
+	legacyStake     staking.LegacyStakeService
 	Options
 
 	http.Handler
@@ -274,6 +275,7 @@ type ExtraOptions struct {
 	AccessControl   accesscontrol.Controller
 	PostageContract postagecontract.Interface
 	Staking         staking.Contract
+	LegacyStake     staking.LegacyStakeService
 	Steward         steward.Interface
 	SyncStatus      func() (bool, error)
 	NodeStatus      *status.Service
@@ -356,6 +358,7 @@ func (s *Service) Configure(signer crypto.Signer, tracer *tracing.Tracer, o Opti
 	s.postageContract = e.PostageContract
 	s.steward = e.Steward
 	s.stakingContract = e.Staking
+	s.legacyStake = e.LegacyStake
 
 	s.pingpong = e.Pingpong
 	s.topologyDriver = e.TopologyDriver

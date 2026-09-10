@@ -12,9 +12,9 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethersphere/bee/v2/pkg/bigint"
-
 	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/bigint"
+	"github.com/ethersphere/bee/v2/pkg/config"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
 	"github.com/ethersphere/bee/v2/pkg/sctx"
@@ -345,5 +345,35 @@ func TestMigrateStake(t *testing.T) {
 		jsonhttptest.Request(t, ts, http.MethodDelete, "/stake", http.StatusOK,
 			jsonhttptest.WithRequestHeader(api.GasLimitHeader, "2000000"),
 		)
+	})
+}
+
+func TestLegacyStake(t *testing.T) {
+	t.Parallel()
+
+	t.Run("manifest", func(t *testing.T) {
+		t.Parallel()
+
+		addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+		legacy := stakingContractMock.NewLegacyStakeService(func(context.Context) ([]staking.LegacyStakeStatus, error) {
+			return []staking.LegacyStakeStatus{
+				{DeploymentID: "d1", Address: addr, RecoverableStake: big.NewInt(7), Paused: true, RecoverMethod: config.RecoverByMigrate},
+			}, nil
+		})
+		ts, _, _, _ := newTestServer(t, testServerOptions{LegacyStake: legacy})
+		jsonhttptest.Request(t, ts, http.MethodGet, "/stake/legacy", http.StatusOK,
+			jsonhttptest.WithExpectedJSONResponse(&api.LegacyStakeResponse{
+				Deployments: []api.LegacyStakeEntryResponse{
+					{DeploymentID: "d1", Address: addr.String(), RecoverableStake: bigint.Wrap(big.NewInt(7)), Paused: true, RecoverMethod: "migrate"},
+				},
+			}))
+	})
+
+	t.Run("none configured", func(t *testing.T) {
+		t.Parallel()
+
+		ts, _, _, _ := newTestServer(t, testServerOptions{})
+		jsonhttptest.Request(t, ts, http.MethodGet, "/stake/legacy", http.StatusOK,
+			jsonhttptest.WithExpectedJSONResponse(&api.LegacyStakeResponse{Deployments: []api.LegacyStakeEntryResponse{}}))
 	})
 }

@@ -2518,6 +2518,27 @@ paths:
         default:
           description: Default response
 
+  "/stake/legacy":
+    get:
+      summary: Discover stake left in retired staking contracts.
+      description: >-
+        Reports, per known retired staking contract on this chain, how much of
+        the node's stake is recoverable and how. Read-only; it moves no funds.
+        The list is empty when no retired deployments are known for the chain.
+      tags:
+        - Staking
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "SwarmCommon.yaml#/components/schemas/LegacyStakeResponse"
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        default:
+          description: Default response
+
   "/stake/withdrawable":
     get:
       summary: Get the withdrawable staked amount.
