@@ -45,6 +45,10 @@ type Contract interface {
 	WithdrawStake(ctx context.Context) (common.Hash, error)
 	MigrateStake(ctx context.Context) (common.Hash, error)
 	UpdateHeight(ctx context.Context) (common.Hash, bool, error)
+	// Paused reports whether the staking contract is paused. A retired
+	// contract is paused, which is the state in which its stake can be
+	// recovered. See docs/experiments/stake-recovery.
+	Paused(ctx context.Context) (bool, error)
 	RedistributionStatuser
 }
 
@@ -433,6 +437,12 @@ func (c *contract) withdrawFromStake(ctx context.Context) (*types.Receipt, error
 	}
 
 	return receipt, nil
+}
+
+// Paused exposes the internal paused check so a recovery flow can tell whether
+// a retired contract is in the state that allows its stake to be recovered.
+func (c *contract) Paused(ctx context.Context) (bool, error) {
+	return c.paused(ctx)
 }
 
 func (c *contract) paused(ctx context.Context) (bool, error) {

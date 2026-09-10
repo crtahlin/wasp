@@ -839,6 +839,33 @@ components:
           $ref: "#/components/schemas/TransactionHash"
           description: Hash of the staking transaction.
 
+    LegacyStakeResponse:
+      type: object
+      properties:
+        deployments:
+          type: array
+          items:
+            type: object
+            properties:
+              deploymentId:
+                type: string
+                description: Stable identifier of the retired deployment.
+              address:
+                type: string
+                description: Address of the retired staking contract.
+              recoverableStake:
+                $ref: "#/components/schemas/BigInt"
+                description: Stake recoverable from this contract; omitted when the contract could not be read.
+              paused:
+                type: boolean
+                description: Whether the contract is paused, the state in which its stake can be recovered.
+              recoverMethod:
+                type: string
+                description: How this contract pays its stake back (withdraw or migrate).
+              error:
+                type: string
+                description: Set when this deployment could not be read; the amount is then omitted.
+
     SwarmOnlyReference:
       oneOf:
         - $ref: "#/components/schemas/SwarmAddress"

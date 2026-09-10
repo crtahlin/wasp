@@ -655,6 +655,13 @@ func (s *Service) mountBusinessDebug() {
 		})),
 	)
 
+	handle("/stake/legacy", web.ChainHandlers(
+		s.stakingAccessHandler,
+		web.FinalHandler(jsonhttp.MethodHandler{
+			"GET": http.HandlerFunc(s.legacyStakeHandler),
+		})),
+	)
+
 	handle("/stake/{amount}", web.ChainHandlers(
 		s.stakingAccessHandler,
 		s.gasConfigMiddleware("deposit stake"),

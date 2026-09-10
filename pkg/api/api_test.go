@@ -103,6 +103,7 @@ type testServerOptions struct {
 	CORSAllowedOrigins []string
 	PostageContract    postagecontract.Interface
 	StakingContract    staking.Contract
+	LegacyStake        staking.LegacyStakeService
 	Post               postage.Service
 	AccessControl      accesscontrol.Controller
 	Steward            steward.Interface
@@ -209,6 +210,7 @@ func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.
 		Steward:         o.Steward,
 		SyncStatus:      o.SyncStatus,
 		Staking:         o.StakingContract,
+		LegacyStake:     o.LegacyStake,
 		NodeStatus:      o.NodeStatus,
 		PinIntegrity:    o.PinIntegrity,
 	}

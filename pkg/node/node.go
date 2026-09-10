@@ -1320,6 +1320,14 @@ func NewBee(
 
 	stakingContract := staking.New(overlayEthAddress, stakingContractAddress, abiutil.MustParseABI(chainCfg.StakingABI), bzzTokenAddress, transactionService, common.BytesToHash(nonce), contractGasLimit, uint8(o.ReserveCapacityDoubling))
 
+	// Discovery of stake left in retired staking contracts (issue #256). The
+	// catalog is empty until confirmed historical addresses are added, so this
+	// is inert by default; it never moves funds. See docs/experiments/stake-recovery.
+	legacyStakeService, err := staking.NewLegacyStakeService(overlayEthAddress, bzzTokenAddress, transactionService, contractGasLimit, config.LegacyStakingDeployments(chainID), chainCfg.StakingABI)
+	if err != nil {
+		return nil, fmt.Errorf("legacy stake service: %w", err)
+	}
+
 	if chainEnabled {
 
 		stake, err := stakingContract.GetPotentialStake(ctx)
@@ -1475,6 +1483,7 @@ func NewBee(
 		AccessControl:   accesscontrol,
 		PostageContract: postageStampContractService,
 		Staking:         stakingContract,
+		LegacyStake:     legacyStakeService,
 		Steward:         steward,
 		SyncStatus:      syncStatusFn,
 		NodeStatus:      nodeStatus,
