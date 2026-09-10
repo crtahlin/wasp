@@ -1,5 +1,7 @@
 # wasp
 
+*It's Bee with the safety off.*
+
 An experimental downstream distribution of [Ethereum Swarm
 Bee](https://github.com/ethersphere/bee).
 
