@@ -22,6 +22,11 @@ import (
 // is not in the catalog for this chain.
 var ErrUnknownLegacyDeployment = errors.New("unknown legacy staking deployment")
 
+// ErrInsufficientGas is returned when the node has no native balance to pay for
+// the recovery transactions. No transaction is submitted, and any persisted
+// progress is left untouched so the recovery resumes once the node is funded.
+var ErrInsufficientGas = errors.New("insufficient native balance for gas")
+
 // RecoverMode is how stranded stake is recovered.
 type RecoverMode string
 
@@ -104,6 +109,9 @@ type legacyStakeService struct {
 	current Contract
 	state   storage.StateStorer
 	chainID int64
+	// nativeBalance reads the node's native-token balance, used to refuse a
+	// recovery gracefully when there is no gas. Nil disables the check.
+	nativeBalance func(ctx context.Context) (*big.Int, error)
 }
 
 // NewLegacyStakeService builds a service over the given retired deployments,
@@ -123,14 +131,15 @@ func NewLegacyStakeService(
 	current Contract,
 	state storage.StateStorer,
 	chainID int64,
+	nativeBalance func(ctx context.Context) (*big.Int, error),
 ) (LegacyStakeService, error) {
 	factory := func(address common.Address, contractABI abi.ABI) Contract {
 		return New(owner, address, contractABI, bzzTokenAddress, transactionService, common.Hash{}, gasLimit, 0)
 	}
-	return newLegacyStakeService(deployments, fallbackABI, factory, current, state, chainID)
+	return newLegacyStakeService(deployments, fallbackABI, factory, current, state, chainID, nativeBalance)
 }
 
-func newLegacyStakeService(deployments []config.LegacyStakingDeployment, fallbackABI string, factory contractFactory, current Contract, state storage.StateStorer, chainID int64) (LegacyStakeService, error) {
+func newLegacyStakeService(deployments []config.LegacyStakingDeployment, fallbackABI string, factory contractFactory, current Contract, state storage.StateStorer, chainID int64, nativeBalance func(ctx context.Context) (*big.Int, error)) (LegacyStakeService, error) {
 	entries := make([]legacyEntry, 0, len(deployments))
 	for _, d := range deployments {
 		raw := d.ABI
@@ -143,7 +152,7 @@ func newLegacyStakeService(deployments []config.LegacyStakingDeployment, fallbac
 		}
 		entries = append(entries, legacyEntry{cfg: d, client: factory(d.Address, parsed)})
 	}
-	return &legacyStakeService{entries: entries, current: current, state: state, chainID: chainID}, nil
+	return &legacyStakeService{entries: entries, current: current, state: state, chainID: chainID, nativeBalance: nativeBalance}, nil
 }
 
 func (s *legacyStakeService) stateKey(id string) string {
@@ -216,6 +225,23 @@ func (s *legacyStakeService) recoverToWallet(ctx context.Context, e legacyEntry)
 	return e.client.WithdrawStake(ctx)
 }
 
+// ensureGas refuses a recovery when the node has no native balance to pay for
+// the transaction, so no transaction is submitted and no state is changed. A
+// nil balance reader disables the check.
+func (s *legacyStakeService) ensureGas(ctx context.Context) error {
+	if s.nativeBalance == nil {
+		return nil
+	}
+	bal, err := s.nativeBalance(ctx)
+	if err != nil {
+		return fmt.Errorf("read native balance: %w", err)
+	}
+	if bal == nil || bal.Sign() == 0 {
+		return ErrInsufficientGas
+	}
+	return nil
+}
+
 func (s *legacyStakeService) Recover(ctx context.Context, id string, mode RecoverMode) (RecoverResult, error) {
 	e, ok := s.entryByID(id)
 	if !ok {
@@ -243,6 +269,9 @@ func (s *legacyStakeService) Recover(ctx context.Context, id string, mode Recove
 			res.Recovered = big.NewInt(0)
 			return res, nil
 		}
+		if err := s.ensureGas(ctx); err != nil {
+			return res, err
+		}
 		tx, err := s.recoverToWallet(ctx, e)
 		if err != nil {
 			return res, fmt.Errorf("recover to wallet: %w", err)
@@ -268,6 +297,10 @@ func (s *legacyStakeService) Recover(ctx context.Context, id string, mode Recove
 	// Step two, migrate only: redeposit the recovered amount into the current
 	// contract. If this fails the state stays at "withdrawn", so a later call
 	// resumes here without recovering again.
+	if err := s.ensureGas(ctx); err != nil {
+		res.Phase = phaseWithdrawn
+		return res, err
+	}
 	depTx, err := s.current.DepositStake(ctx, st.Amount)
 	if err != nil {
 		res.Phase = phaseWithdrawn

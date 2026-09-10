@@ -81,6 +81,7 @@ const (
 	optionNamePriceOracleAddress           = "price-oracle-address"
 	optionNameRedistributionAddress        = "redistribution-address"
 	optionNameStakingAddress               = "staking-address"
+	optionNameStakeRecoveryOnStartup       = "stake-recovery-on-startup"
 	optionNameBlockTime                    = "block-time"
 	optionNameBlockSyncInterval            = "block-sync-interval"
 	optionWarmUpTime                       = "warmup-time"
@@ -400,6 +401,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().String(optionNamePriceOracleAddress, "", "price oracle contract address")
 	cmd.Flags().String(optionNameRedistributionAddress, "", "redistribution contract address")
 	cmd.Flags().String(optionNameStakingAddress, "", "staking contract address")
+	cmd.Flags().String(optionNameStakeRecoveryOnStartup, "off", "recover stake left in retired staking contracts when the node starts: \"off\" (default, do nothing), \"withdraw\" (recover it to the node's wallet), or \"migrate\" (recover it into the current staking contract). It moves staked funds, so it is off by default and runs only on explicit opt-in. If the node has no gas or the chain is unreachable it is skipped and retried on the next start, never blocking startup.")
 	cmd.Flags().Uint64(optionNameBlockTime, 5, "chain block time")
 	cmd.Flags().Uint64(optionNameBlockSyncInterval, 10, "block number cache sync interval in blocks")
 	cmd.Flags().Duration(optionWarmUpTime, time.Minute*5, "maximum node warmup duration; proceeds when stable or after this time")

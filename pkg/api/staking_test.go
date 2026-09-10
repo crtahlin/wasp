@@ -438,3 +438,14 @@ func TestLegacyStakeRecover(t *testing.T) {
 			}))
 	})
 }
+
+func TestLegacyStakeRecoverNoGas(t *testing.T) {
+	t.Parallel()
+
+	legacy := stakingContractMock.NewLegacyStakeService(stakingContractMock.WithRecover(func(context.Context, string, staking.RecoverMode) (staking.RecoverResult, error) {
+		return staking.RecoverResult{}, staking.ErrInsufficientGas
+	}))
+	ts, _, _, _ := newTestServer(t, testServerOptions{LegacyStake: legacy})
+	jsonhttptest.Request(t, ts, http.MethodPost, "/stake/legacy/d1?mode=withdraw", http.StatusBadRequest,
+		jsonhttptest.WithExpectedJSONResponse(&jsonhttp.StatusResponse{Code: http.StatusBadRequest, Message: "insufficient native balance for gas"}))
+}

@@ -29,7 +29,12 @@ func factoryFor(clients map[common.Address]staking.Contract) staking.ContractFac
 
 func newService(t *testing.T, deployments []config.LegacyStakingDeployment, clients map[common.Address]staking.Contract, current staking.Contract, state storage.StateStorer) staking.LegacyStakeService {
 	t.Helper()
-	svc, err := staking.NewLegacyStakeServiceWithFactory(deployments, "[]", factoryFor(clients), current, state, 100)
+	return newServiceGas(t, deployments, clients, current, state, nil)
+}
+
+func newServiceGas(t *testing.T, deployments []config.LegacyStakingDeployment, clients map[common.Address]staking.Contract, current staking.Contract, state storage.StateStorer, nativeBalance func(ctx context.Context) (*big.Int, error)) staking.LegacyStakeService {
+	t.Helper()
+	svc, err := staking.NewLegacyStakeServiceWithFactory(deployments, "[]", factoryFor(clients), current, state, 100, nativeBalance)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +111,37 @@ func TestLegacyStakeServiceBadABI(t *testing.T) {
 		{ID: "bad", ChainID: 100, Address: common.HexToAddress("0x4444444444444444444444444444444444444444"), ABI: "not json"},
 	}
 	factory := staking.ContractFactory(func(common.Address, abi.ABI) staking.Contract { return nil })
-	if _, err := staking.NewLegacyStakeServiceWithFactory(deployments, "[]", factory, nil, statestoremock.NewStateStore(), 100); err == nil {
+	if _, err := staking.NewLegacyStakeServiceWithFactory(deployments, "[]", factory, nil, statestoremock.NewStateStore(), 100, nil); err == nil {
 		t.Fatal("expected an error for a deployment with an unparseable ABI")
+	}
+}
+
+func TestLegacyStakeRecoverNoGas(t *testing.T) {
+	t.Parallel()
+
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	deployments := []config.LegacyStakingDeployment{{ID: "d1", ChainID: 100, Address: addr, RecoverMethod: config.RecoverByWithdraw}}
+	clients := map[common.Address]staking.Contract{
+		addr: stakingmock.New(
+			stakingmock.WithGetStake(func(context.Context) (*big.Int, error) { return big.NewInt(9), nil }),
+			stakingmock.WithWithdrawStake(func(context.Context) (common.Hash, error) {
+				t.Fatal("must not submit a transaction when there is no gas")
+				return common.Hash{}, nil
+			}),
+		),
+	}
+	// Native balance is zero: no gas.
+	svc := newServiceGas(t, deployments, clients, nil, statestoremock.NewStateStore(),
+		func(context.Context) (*big.Int, error) { return big.NewInt(0), nil })
+
+	_, err := svc.Recover(context.Background(), "d1", staking.RecoverModeWithdraw)
+	if !errors.Is(err, staking.ErrInsufficientGas) {
+		t.Fatalf("expected ErrInsufficientGas, got %v", err)
+	}
+	// Nothing recovered means the state is untouched, so a funded retry works.
+	st, _ := svc.Status(context.Background(), "d1")
+	if st.Phase != "" {
+		t.Fatalf("expected no persisted phase after a no-gas refusal, got %q", st.Phase)
 	}
 }
 
