@@ -657,8 +657,19 @@ func (s *Service) mountBusinessDebug() {
 
 	handle("/stake/legacy", web.ChainHandlers(
 		s.stakingAccessHandler,
+		s.gasConfigMiddleware("discover or sweep-recover legacy stake"),
 		web.FinalHandler(jsonhttp.MethodHandler{
-			"GET": http.HandlerFunc(s.legacyStakeHandler),
+			"GET":  http.HandlerFunc(s.legacyStakeHandler),
+			"POST": http.HandlerFunc(s.legacyStakeRecoverAllHandler),
+		})),
+	)
+
+	handle("/stake/legacy/{id}", web.ChainHandlers(
+		s.stakingAccessHandler,
+		s.gasConfigMiddleware("recover or inspect legacy stake"),
+		web.FinalHandler(jsonhttp.MethodHandler{
+			"GET":  http.HandlerFunc(s.legacyStakeStatusHandler),
+			"POST": http.HandlerFunc(s.legacyStakeRecoverHandler),
 		})),
 	)
 

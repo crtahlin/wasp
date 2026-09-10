@@ -355,11 +355,11 @@ func TestLegacyStake(t *testing.T) {
 		t.Parallel()
 
 		addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
-		legacy := stakingContractMock.NewLegacyStakeService(func(context.Context) ([]staking.LegacyStakeStatus, error) {
+		legacy := stakingContractMock.NewLegacyStakeService(stakingContractMock.WithDiscover(func(context.Context) ([]staking.LegacyStakeStatus, error) {
 			return []staking.LegacyStakeStatus{
 				{DeploymentID: "d1", Address: addr, RecoverableStake: big.NewInt(7), Paused: true, RecoverMethod: config.RecoverByMigrate},
 			}, nil
-		})
+		}))
 		ts, _, _, _ := newTestServer(t, testServerOptions{LegacyStake: legacy})
 		jsonhttptest.Request(t, ts, http.MethodGet, "/stake/legacy", http.StatusOK,
 			jsonhttptest.WithExpectedJSONResponse(&api.LegacyStakeResponse{
@@ -375,5 +375,66 @@ func TestLegacyStake(t *testing.T) {
 		ts, _, _, _ := newTestServer(t, testServerOptions{})
 		jsonhttptest.Request(t, ts, http.MethodGet, "/stake/legacy", http.StatusOK,
 			jsonhttptest.WithExpectedJSONResponse(&api.LegacyStakeResponse{Deployments: []api.LegacyStakeEntryResponse{}}))
+	})
+}
+
+func TestLegacyStakeRecover(t *testing.T) {
+	t.Parallel()
+
+	t.Run("withdraw ok", func(t *testing.T) {
+		t.Parallel()
+		legacy := stakingContractMock.NewLegacyStakeService(stakingContractMock.WithRecover(func(_ context.Context, id string, mode staking.RecoverMode) (staking.RecoverResult, error) {
+			return staking.RecoverResult{DeploymentID: id, Mode: mode, Recovered: big.NewInt(9), WithdrawTx: common.HexToHash("0xaa"), Phase: "done"}, nil
+		}))
+		ts, _, _, _ := newTestServer(t, testServerOptions{LegacyStake: legacy})
+		jsonhttptest.Request(t, ts, http.MethodPost, "/stake/legacy/d1?mode=withdraw", http.StatusOK,
+			jsonhttptest.WithExpectedJSONResponse(&api.LegacyRecoverResponse{
+				DeploymentID: "d1", Mode: "withdraw", Recovered: bigint.Wrap(big.NewInt(9)),
+				WithdrawTx: common.HexToHash("0xaa").String(), Phase: "done",
+			}))
+	})
+
+	t.Run("missing mode", func(t *testing.T) {
+		t.Parallel()
+		legacy := stakingContractMock.NewLegacyStakeService()
+		ts, _, _, _ := newTestServer(t, testServerOptions{LegacyStake: legacy})
+		jsonhttptest.Request(t, ts, http.MethodPost, "/stake/legacy/d1", http.StatusBadRequest,
+			jsonhttptest.WithExpectedJSONResponse(&jsonhttp.StatusResponse{Code: http.StatusBadRequest, Message: "query parameter mode must be withdraw or migrate"}))
+	})
+
+	t.Run("unknown deployment", func(t *testing.T) {
+		t.Parallel()
+		legacy := stakingContractMock.NewLegacyStakeService(stakingContractMock.WithRecover(func(context.Context, string, staking.RecoverMode) (staking.RecoverResult, error) {
+			return staking.RecoverResult{}, staking.ErrUnknownLegacyDeployment
+		}))
+		ts, _, _, _ := newTestServer(t, testServerOptions{LegacyStake: legacy})
+		jsonhttptest.Request(t, ts, http.MethodPost, "/stake/legacy/nope?mode=migrate", http.StatusNotFound,
+			jsonhttptest.WithExpectedJSONResponse(&jsonhttp.StatusResponse{Code: http.StatusNotFound, Message: "unknown legacy staking deployment"}))
+	})
+
+	t.Run("status", func(t *testing.T) {
+		t.Parallel()
+		legacy := stakingContractMock.NewLegacyStakeService(stakingContractMock.WithStatus(func(_ context.Context, id string) (staking.RecoverState, error) {
+			return staking.RecoverState{Phase: "withdrawn", Amount: big.NewInt(4)}, nil
+		}))
+		ts, _, _, _ := newTestServer(t, testServerOptions{LegacyStake: legacy})
+		jsonhttptest.Request(t, ts, http.MethodGet, "/stake/legacy/d1", http.StatusOK,
+			jsonhttptest.WithExpectedJSONResponse(&api.LegacyStatusResponse{DeploymentID: "d1", Phase: "withdrawn", Amount: bigint.Wrap(big.NewInt(4))}))
+	})
+
+	t.Run("sweep", func(t *testing.T) {
+		t.Parallel()
+		legacy := stakingContractMock.NewLegacyStakeService(stakingContractMock.WithRecoverAll(func(_ context.Context, mode staking.RecoverMode) ([]staking.RecoverResult, error) {
+			return []staking.RecoverResult{
+				{DeploymentID: "d1", Mode: mode, Recovered: big.NewInt(3), Phase: "done"},
+			}, nil
+		}))
+		ts, _, _, _ := newTestServer(t, testServerOptions{LegacyStake: legacy})
+		jsonhttptest.Request(t, ts, http.MethodPost, "/stake/legacy?mode=migrate", http.StatusOK,
+			jsonhttptest.WithExpectedJSONResponse(&api.LegacyRecoverAllResponse{
+				Recoveries: []api.LegacyRecoverResponse{
+					{DeploymentID: "d1", Mode: "migrate", Recovered: bigint.Wrap(big.NewInt(3)), Phase: "done"},
+				},
+			}))
 	})
 }

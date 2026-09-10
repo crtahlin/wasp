@@ -866,6 +866,53 @@ components:
                 type: string
                 description: Set when this deployment could not be read; the amount is then omitted.
 
+    LegacyRecoverResponse:
+      type: object
+      properties:
+        deploymentId:
+          type: string
+        mode:
+          type: string
+          description: withdraw or migrate.
+        recovered:
+          $ref: "#/components/schemas/BigInt"
+          description: Amount recovered.
+        withdrawTx:
+          type: string
+          description: Hash of the transaction that recovered the stake from the retired contract.
+        depositTx:
+          type: string
+          description: Hash of the redeposit transaction, for migrate mode.
+        phase:
+          type: string
+          description: Recovery phase (empty, withdrawn, or done).
+        alreadyDone:
+          type: boolean
+          description: True when the deployment was already recovered.
+        error:
+          type: string
+          description: Set, in a sweep, when this deployment failed.
+
+    LegacyRecoverAllResponse:
+      type: object
+      properties:
+        recoveries:
+          type: array
+          items:
+            $ref: "#/components/schemas/LegacyRecoverResponse"
+
+    LegacyStatusResponse:
+      type: object
+      properties:
+        deploymentId:
+          type: string
+        phase:
+          type: string
+          description: Recovery phase (empty, withdrawn, or done).
+        amount:
+          $ref: "#/components/schemas/BigInt"
+          description: Amount recorded for an in-progress or finished recovery.
+
     SwarmOnlyReference:
       oneOf:
         - $ref: "#/components/schemas/SwarmAddress"
@@ -1395,6 +1442,15 @@ components:
 
 
   parameters:
+    LegacyRecoverModeParameter:
+      in: query
+      name: mode
+      schema:
+        type: string
+        enum: [withdraw, migrate]
+      required: true
+      description: "How to recover: withdraw to the wallet, or migrate into the current contract."
+
     GasPriceParameter:
       in: header
       name: gas-price
