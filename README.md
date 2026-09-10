@@ -71,6 +71,8 @@ Releases: <https://github.com/crtahlin/wasp/releases>
 
 ## What is in it
 
+- [`docs/DIFFERENCES.md`](docs/DIFFERENCES.md): every way wasp differs from the
+  latest released Bee, kept current as either side changes
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is planned
 - [`docs/experiments/INDEX.md`](docs/experiments/INDEX.md) — what has landed, and
   what came of it, including the things that did not work

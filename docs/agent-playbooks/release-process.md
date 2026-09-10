@@ -44,7 +44,9 @@ load-bearing — git-cliff takes the first match.
 
 ## Cutting a release
 
-1. Confirm `main` is green and the ledger is current.
+1. Confirm `main` is green and the ledger is current, and refresh
+   `docs/DIFFERENCES.md` (rule 13 in `AGENTS.md`). Once the release is tagged,
+   replace `main` with the new version in that file's *In wasp* column.
 2. Preview what will ship:
 
    ```bash
