@@ -2538,6 +2538,89 @@ paths:
           $ref: "SwarmCommon.yaml#/components/responses/500"
         default:
           description: Default response
+    post:
+      summary: Recover stake from every retired contract that holds it.
+      description: >-
+        Sweeps all known retired deployments on this chain, recovering stake in
+        the chosen mode, and reports a per-deployment outcome. Moves funds.
+      tags:
+        - Staking
+      parameters:
+        - $ref: "SwarmCommon.yaml#/components/parameters/LegacyRecoverModeParameter"
+        - $ref: "SwarmCommon.yaml#/components/parameters/GasPriceParameter"
+        - $ref: "SwarmCommon.yaml#/components/parameters/GasLimitParameter"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "SwarmCommon.yaml#/components/schemas/LegacyRecoverAllResponse"
+        "400":
+          $ref: "SwarmCommon.yaml#/components/responses/400"
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        default:
+          description: Default response
+
+  "/stake/legacy/{id}":
+    get:
+      summary: Report the recovery progress of one retired deployment.
+      tags:
+        - Staking
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Deployment identifier.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "SwarmCommon.yaml#/components/schemas/LegacyStatusResponse"
+        "404":
+          $ref: "SwarmCommon.yaml#/components/responses/404"
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        default:
+          description: Default response
+    post:
+      summary: Recover stake from one retired contract.
+      description: >-
+        Recovers this node's stake from the named retired contract, either to
+        the wallet (mode=withdraw) or into the current contract (mode=migrate).
+        Moves funds. Idempotent: a partly finished recovery resumes.
+      tags:
+        - Staking
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Deployment identifier.
+        - $ref: "SwarmCommon.yaml#/components/parameters/LegacyRecoverModeParameter"
+        - $ref: "SwarmCommon.yaml#/components/parameters/GasPriceParameter"
+        - $ref: "SwarmCommon.yaml#/components/parameters/GasLimitParameter"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "SwarmCommon.yaml#/components/schemas/LegacyRecoverResponse"
+        "400":
+          $ref: "SwarmCommon.yaml#/components/responses/400"
+        "404":
+          $ref: "SwarmCommon.yaml#/components/responses/404"
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        default:
+          description: Default response
 
   "/stake/withdrawable":
     get:

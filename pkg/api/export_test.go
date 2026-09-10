@@ -97,6 +97,9 @@ type (
 	GetWithdrawableResponse           = getWithdrawableResponse
 	LegacyStakeResponse               = legacyStakeResponse
 	LegacyStakeEntryResponse          = legacyStakeEntryResponse
+	LegacyRecoverResponse             = legacyRecoverResponse
+	LegacyRecoverAllResponse          = legacyRecoverAllResponse
+	LegacyStatusResponse              = legacyStatusResponse
 	StakeTransactionReponse           = stakeTransactionReponse
 	StatusSnapshotResponse            = statusSnapshotResponse
 	StatusResponse                    = statusResponse
