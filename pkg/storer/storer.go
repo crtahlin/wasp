@@ -287,8 +287,10 @@ const (
 // reading and hashing were separated, so the default changes nothing.
 func DefaultSamplerReadConcurrency() int { return max(4, runtime.NumCPU()) }
 
-// Storage-engine names for the index store. goleveldb is the default and only
-// blessed engine; Pebble is opt-in for the storage-engine A/B (issue #185).
+// Storage-engine names for the index store. Pebble is the recommended engine
+// and the default for a fresh data directory (issue #185); goleveldb stays
+// supported and selectable, and an existing goleveldb store keeps goleveldb, so
+// this binary opens an upstream data directory with no migration.
 const (
 	EngineLevelDB = "leveldb"
 	EnginePebble  = "pebble"

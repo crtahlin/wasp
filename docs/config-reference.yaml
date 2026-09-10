@@ -188,7 +188,11 @@
 ## level-0 SST files at which the index store starts compacting; lower
 ## compacts sooner and more often (more write amplification), higher lets
 ## level 0 grow (more read amplification on the sampling path); 0 means the
-## goleveldb default of 4
+## goleveldb default of 4. The 8 shown here is the goleveldb-oriented default.
+## Pebble keeps level 0 shallow (a threshold of 4) on its own, which is what
+## keeps the reserve-sample read fast (issue #198), and only a value other than
+## 8 overrides that, so leave this unset for pebble unless a measurement on a
+## real node says otherwise.
 # db-compaction-l0-trigger: 8
 
 ## disables db compactions triggered by seeks
@@ -210,11 +214,14 @@
 ## compaction catch up; 0 means the goleveldb default of 8
 # db-write-slowdown-trigger: 8
 
-## index-store engine for a NEW data directory: "leveldb" (default) or
-## "pebble". Experimental; goleveldb is the supported engine. Empty uses the
-## engine the data directory was created with, or goleveldb for a fresh one.
-## The two on-disk formats are not interchangeable, so a directory is bound
-## to its engine. See issue #185.
+## index-store engine for a NEW data directory: "pebble" (the recommended
+## engine and the default since issue #185) or "leveldb". Empty uses the engine
+## the data directory was created with, and pebble for a fresh one. This is
+## backwards compatible: an existing goleveldb store, including a data directory
+## created by upstream bee, keeps goleveldb automatically, so dropping in this
+## binary needs no flag and no migration. The two on-disk formats are not
+## interchangeable, so a directory is bound to its engine; switch only by
+## starting a fresh data directory. See issue #185.
 # storage-engine: ""
 
 # ========================================================================
