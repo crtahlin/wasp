@@ -134,7 +134,9 @@ This step is easy to skip and was skipped for twenty-five merges, which left
 `export-patch.sh` able to resolve two experiments out of twenty-seven. If you
 are reading this while writing a merge, do it now.
 
-Finally, add the row to `docs/experiments/INDEX.md`.
+Finally, add the row to `docs/experiments/INDEX.md`. If the merge changes what
+a node does compared with Bee, the pull request should already have updated
+`docs/DIFFERENCES.md` (rule 13 in `AGENTS.md`). If it did not, do it now.
 
 ## 7. Validate on a real node
 

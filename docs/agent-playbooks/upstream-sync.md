@@ -49,7 +49,7 @@ a fork ends up re-resolving the same conflicts forever. **Never squash a sync.**
 
 ## Reviewing a sync pull request
 
-Three things, in order:
+In order:
 
 1. **The protocol-freeze diff.** `git diff main...HEAD -- .github/protocol-freeze.lock`.
    If upstream moved a protocol minor, read
@@ -80,7 +80,12 @@ Three things, in order:
    ```bash
    git diff --name-status main...HEAD -- .github/workflows/ | grep '^A'
    ```
-4. **CI green**, then merge with a merge commit.
+4. **`docs/DIFFERENCES.md`.** After the sync, the new base is the latest Bee
+   release, which is what that file compares against. Re-check every entry
+   against it, remove each one the release now covers, empty *Bee changes wasp
+   does not have yet* of anything this sync brings in, and update the two lines
+   at the top. The commands are in rule 13 of `AGENTS.md`.
+5. **CI green**, then merge with a merge commit.
 
 ## Never `git fetch --tags upstream`
 

@@ -162,6 +162,53 @@ for i, l in enumerate(sys.stdin.read().split("\n")):
 Use character counting, not `awk`'s `length()`, which counts bytes and so
 falsely flags any line containing an em-dash or other non-ASCII character.
 
+**13. Keep `docs/DIFFERENCES.md` current.**
+
+`docs/DIFFERENCES.md` lists every way wasp differs from upstream Bee. It compares
+wasp with the **latest released** Bee version, the newest upstream tag that is
+not a release candidate, and never with upstream `master`: operators choose
+between releases, and `master` can carry work that is later changed or reverted.
+The top of the file names the Bee release it was compared with and the wasp
+commit it describes. Both lines must stay true.
+
+Refresh it at each of these points:
+
+- **A merge that changes what a node does compared with Bee.** That covers
+  behaviour, a setting, an API endpoint, a metric, a log line an operator would
+  act on, and packaging. Update the file in the same pull request, with `main`
+  in the *In wasp* column.
+- **An upstream sync.** The new base is now the latest release. Re-check every
+  entry against it and remove each one the release covers. Name that release in
+  the commit message.
+- **A wasp release.** Replace `main` with the new version in the *In wasp*
+  column.
+- **At least once a month, and whenever Bee publishes a release.** A Bee release
+  that wasp has not absorbed yet becomes the comparison point. Remove the
+  entries it covers, and list what it adds under *Bee changes wasp does not
+  have yet*.
+
+The check:
+
+```bash
+git fetch upstream       # never --tags; see upstream-sync.md
+BASE="upstream/$(cat .upstream-base)"
+LATEST=$(git tag -l 'upstream/v*' | grep -v -- '-rc' | sort -V | tail -1)
+LAST=<wasp commit named at the top of docs/DIFFERENCES.md>
+
+# Fork merges since the last refresh. Each is a candidate entry.
+git log --first-parent --format='%h %s' "$LAST"..main
+
+# Files that both the fork and the latest Bee release changed since the
+# base. Bee can only have adopted a fork change in one of these files, so
+# read each one; a match is not proof of adoption.
+comm -12 <(git diff --name-only "$BASE" "$LATEST" | sort) \
+         <(git diff --name-only "$BASE" main | sort)
+```
+
+When `$LATEST` equals `$BASE`, the second command prints nothing, and nothing
+can have been adopted. A refresh that finds no change still updates the two
+lines at the top of the file, so a reader can see when it was last checked.
+
 ## Writing
 
 Plain language. No project-management jargon: not "park", "parked", "spike",
@@ -185,6 +232,7 @@ it cost a cleanup commit. Check before merging, not after.
 | Touching anything protocol-adjacent | `docs/agent-playbooks/protocol-compatibility.md` |
 | Running or measuring on real nodes | `docs/agent-playbooks/test-bench.md` |
 | Provisioning a bench machine | `docs/agent-playbooks/bench-vm-spec.md` |
+| Looking for how wasp differs from Bee | `docs/DIFFERENCES.md` |
 | Looking for what has been tried | `docs/experiments/INDEX.md` |
 | Looking for what is planned | `docs/ROADMAP.md` |
 
