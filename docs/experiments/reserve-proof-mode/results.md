@@ -32,15 +32,24 @@ measured runs each, reserve about 3.77M chunks at radius 9**
 |------|--------|------|--------------------|----------|------|--------|
 | bench-1 | goleveldb | classic | 3,777,884 | 53.6, 118.8, 52.3, 52.1, 75.4 | 70.4 | 53.6 |
 | bench-1 | goleveldb | windowed | 910 | 1.57, 1.45, 1.47, 1.53, 1.46 | 1.50 | 1.47 |
-| bench-2 | pebble | classic | ~3,774,000 | 156.3, 161.9, 120.2, 145.5, 123.0 | 141.4 | 145.5 |
+| bench-2 | pebble | classic | ~3,774,000 | 156.3, 161.9, 120.2, 145.5, 123.0 | 141.4 (invalid) | 145.5 |
 | bench-2 | pebble | windowed | 948 | 1.77, 1.70, 1.80, 1.72, 1.70 | 1.74 | 1.72 |
 
-Within each node, same binary, config the only difference:
-
-- **goleveldb: about 47x faster on the mean** (70.4 s to 1.50 s), 36x on the
-  median, reading about 4,150 times fewer chunks (3,777,884 against 910).
-- **pebble: about 81x faster on the mean** (141.4 s to 1.74 s), 85x on the
-  median, reading about 3,980 times fewer chunks (about 3,774,000 against 948).
+- **goleveldb (valid): about 47x faster on the mean** (70.4 s to 1.50 s), 36x on
+  the median, reading about 4,150 times fewer chunks (3,777,884 against 910).
+- **pebble classic is not a valid baseline and is retracted.** Its 141 s is about
+  three times pebble's real settled sample cost. Pebble's own `DefaultOptions`
+  records the settled figure, about 44 s at this L0 setting, faster than
+  goleveldb (storage-engine-eval/results.md). bench-2 was measured too soon after
+  a restart, while it was still catching up sync and its Pebble level 0 was deep,
+  and Pebble's per-chunk index lookup is sensitive to level-0 depth in a way
+  goleveldb's is not. The windowed arm, which does about 900 lookups rather than
+  3.77 million, did not show it, which is exactly why the inflation went unnoticed
+  at first. A clean pebble speedup needs a re-measure on a settled, sync-idle node
+  with level 0 confirmed shallow before the runs; against the settled ~44 s
+  baseline the windowed 1.74 s would be about 25x, but mixing a fresh windowed
+  number with a documented classic number is not a measurement, so this is left
+  open rather than stated as a result.
 
 The windowed sample is **deterministic**: each run on a node returned the same
 duration to within one or two percent and, in the earlier single-node run, an
@@ -78,18 +87,22 @@ their cost is the deterministic index walk, not disk-bound chunk loads. For a
 proof that has to finish inside a fixed round time, that predictability matters as
 much as the speed.
 
-**Pebble's full scan was slower than goleveldb's here**, about 141 seconds against
-70 on the same binary, while the windowed floors were close, 1.74 against 1.50.
-Treat the cross-engine absolute comparison as loose: bench-1 and bench-2 are
-different machines with different peer counts at measurement time, so this is not
-a controlled engine benchmark. The clean, controlled comparison is within each
-node, classic against windowed, and there both engines show the same result: the
-windowed proof removes almost all of the sample's cost.
+**The pebble classic figure was a measurement error, not an engine result.**
+Pebble's settled reserve-sample cost at this L0 setting is about 44 seconds,
+faster than goleveldb, per its own default-options comment and the
+storage-engine-eval results. The 141 seconds measured here is about three times
+that, because bench-2 was sampled too soon after a restart with its level 0 still
+deep, and pebble's per-chunk index lookup pays for level-0 depth. The lesson,
+already recorded once for a dirty-build slowdown, is that a pebble sample must be
+measured on a settled, sync-idle store with level 0 confirmed shallow first;
+gating on peer count alone, as was done here, is not enough. The windowed arm is
+unaffected because it does about 900 lookups, not 3.77 million.
 
 ## What this does and does not show
 
-It shows the windowed proof is cheap, deterministic and valid on a real reserve,
-on both engines. It does not change the soundness finding (#271, simulation) or
+It shows the windowed proof is cheap, deterministic and valid on a real reserve
+(the windowed arm is sound on both engines; the pebble classic baseline is
+retracted pending a settled re-measure). It does not change the soundness finding (#271, simulation) or
 the on-chain constraint: neither node was staked, both won nothing, and on the
 live network a windowed proof is still rejected by the current contract. The
 measurement used `/rchash`, which runs the sampler without the redistribution
