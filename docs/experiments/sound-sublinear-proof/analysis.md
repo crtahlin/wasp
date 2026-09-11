@@ -53,6 +53,38 @@ unpredictable, the node cannot pack its chunks where the measurement will look.
 This is the user's "randomly spaced sample" intuition made precise: sample a random region,
 and inside it fall back to the honest, unforgeable order statistic.
 
+## Why the probe scheme failed and this one does not
+
+It is worth stating the difference between the two candidates plainly, because it is the
+whole reason one is sound and the other is not.
+
+The current whole-reserve scan measures a quantity the node cannot choose: the transformed
+address of a chunk is a keyed hash of the chunk's content, so a node cannot make its sixteen
+smallest transformed addresses small except by actually holding many chunks. That is what
+makes the proof unforgeable. It reads the whole reserve, which is what makes it expensive.
+
+The probe scheme (#248) tried to cut the cost by measuring a different quantity: the gaps
+between stored addresses at k anchor-derived points. But a node chooses where it stores, so
+it chooses its gaps. Sixteen evenly spaced probe points sit in the middle of the largest
+empty gaps, so a node that spaced half a reserve evenly looked denser everywhere than a node
+that held a full reserve at random. The measured quantity had become one the node controls,
+and the unpredictable anchor did not help, because every probe fell into a small gap no
+matter where the anchor put it. In the simulation the evenly-spaced half-share passed 99.9
+percent of rounds against an honest half-reserve's 11.8. That is the failure: the probe
+scheme bought cheapness by measuring the one thing the node can arrange.
+
+The windowed order statistic keeps the unforgeable quantity and gives up only the scanning.
+Inside the window it measures transformed addresses, exactly as the whole-reserve scan does,
+so evenly spacing the stored addresses buys nothing: the transformed addresses are not the
+stored addresses, and the node cannot place them. What it gives up is looking everywhere; it
+looks in one anchor-chosen region. The only freedom that leaves a node is where in the space
+to store at all, and because the window is unpredictable, storing over a fraction of the
+space passes only that fraction of rounds. The tables below show both facts: even placement
+tracks random placement (the probe break is gone), and a concentrating node is paid in
+proportion to what it stores (the remaining freedom is not an exploit). The one-line summary:
+the probe scheme made the cheap thing the measured thing; the windowed statistic keeps the
+measured thing unforgeable and only shrinks where it looks.
+
 ## Soundness result
 
 The simulation (`main.go`) is scale-free: only the count of a node's chunks in the window
