@@ -1515,6 +1515,7 @@ func NewBee(
 				transactionService,
 				saludService,
 				logger,
+				o.ReserveProofMode,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("storage incentives agent: %w", err)

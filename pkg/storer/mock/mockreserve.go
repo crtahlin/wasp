@@ -96,6 +96,13 @@ func WithSample(s storer.Sample) Option {
 	})
 }
 
+func WithWindowedSample(s storer.Sample) Option {
+	return optionFunc(func(p *ReserveStore) {
+		p.windowedSample = s
+		p.windowedSampleSet = true
+	})
+}
+
 var _ storer.ReserveStore = (*ReserveStore)(nil)
 
 type ReserveStore struct {
@@ -120,7 +127,9 @@ type ReserveStore struct {
 	subResponses []chunksResponse
 	putHook      func(swarm.Chunk) error
 
-	sample storer.Sample
+	sample            storer.Sample
+	windowedSample    storer.Sample
+	windowedSampleSet bool
 }
 
 // NewReserve returns a new Reserve mock.
@@ -269,6 +278,13 @@ func (s *ReserveStore) ReserveHas(addr swarm.Address, batchID []byte, stampHash 
 }
 
 func (s *ReserveStore) ReserveSample(context.Context, []byte, uint8, uint64, *big.Int) (storer.Sample, error) {
+	return s.sample, nil
+}
+
+func (s *ReserveStore) WindowedSample(context.Context, []byte, uint8, uint64, *big.Int) (storer.Sample, error) {
+	if s.windowedSampleSet {
+		return s.windowedSample, nil
+	}
 	return s.sample, nil
 }
 

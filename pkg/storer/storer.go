@@ -144,6 +144,7 @@ type Reserve interface {
 	ReserveStore
 	EvictBatch(ctx context.Context, batchID []byte) error
 	ReserveSample(context.Context, []byte, uint8, uint64, *big.Int) (Sample, error)
+	WindowedSample(context.Context, []byte, uint8, uint64, *big.Int) (Sample, error)
 	ReserveSize() int
 }
 

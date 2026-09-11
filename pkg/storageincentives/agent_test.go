@@ -114,7 +114,7 @@ func TestAgent(t *testing.T) {
 
 				contract := &mockContract{t: t, expectedRadius: radius + tc.doubling}
 
-				service, _ := createService(t, addr, backend, contract, tc.blocksPerRound, tc.blocksPerPhase, radius, tc.doubling)
+				service, _ := createService(t, addr, backend, contract, tc.blocksPerRound, tc.blocksPerPhase, radius, tc.doubling, storer.ReserveProofModeClassic)
 				testutil.CleanupCloser(t, service)
 
 				<-wait
@@ -169,6 +169,8 @@ func createService(
 	blocksPerPhase uint64,
 	radius uint8,
 	doubling uint8,
+	reserveProofMode string,
+	reserveOpts ...resMock.Option,
 ) (*storageincentives.Agent, error) {
 	t.Helper()
 
@@ -180,11 +182,12 @@ func createService(
 		return false, nil
 	}))
 
-	reserve := resMock.NewReserve(
+	reserveOpts = append([]resMock.Option{
 		resMock.WithRadius(radius),
 		resMock.WithSample(storer.RandSample(t, nil)),
 		resMock.WithCapacityDoubling(int(doubling)),
-	)
+	}, reserveOpts...)
+	reserve := resMock.NewReserve(reserveOpts...)
 
 	return storageincentives.New(
 		addr, common.Address{},
@@ -203,6 +206,7 @@ func createService(
 		transactionmock.New(),
 		&mockHealth{},
 		log.Noop,
+		reserveProofMode,
 	)
 }
 
@@ -336,3 +340,51 @@ func (m *mockContract) Reveal(_ context.Context, r uint8, _ []byte, _ []byte) (c
 type mockHealth struct{}
 
 func (m *mockHealth) IsHealthy() bool { return true }
+
+// TestAgentReserveProofModeRouting checks that the agent takes the windowed
+// sample in windowed mode and the classic sample otherwise. The reserve mock is
+// given a different sample for each path, so the two modes must yield different
+// sample hashes through the shared, format-identical proof pipeline (#273).
+func TestAgentReserveProofModeRouting(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		addr := swarm.RandAddress(t)
+		anchor1 := testutil.RandBytes(t, 32)
+		anchor2 := testutil.RandBytes(t, 32)
+		var radius uint8 = 8
+
+		classicSample := storer.RandSample(t, anchor1)
+		windowedSample := storer.RandSample(t, anchor1)
+
+		newAgent := func(mode string) *storageincentives.Agent {
+			backend := &mockchainBackend{
+				limit:       1_000_000,
+				block:       12,
+				balance:     big.NewInt(0), // cannot play, so the round loop stays quiet
+				incrementBy: 1,
+			}
+			contract := &mockContract{t: t, expectedRadius: radius}
+			svc, err := createService(t, addr, backend, contract, 12, 4, radius, 0, mode,
+				resMock.WithSample(classicSample), resMock.WithWindowedSample(windowedSample))
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.CleanupCloser(t, svc)
+			return svc
+		}
+
+		classicRes, err := newAgent(storer.ReserveProofModeClassic).SampleWithProofs(context.Background(), anchor1, anchor2, radius)
+		if err != nil {
+			t.Fatalf("classic sample with proofs: %v", err)
+		}
+		windowedRes, err := newAgent(storer.ReserveProofModeWindowed).SampleWithProofs(context.Background(), anchor1, anchor2, radius)
+		if err != nil {
+			t.Fatalf("windowed sample with proofs: %v", err)
+		}
+
+		if classicRes.Hash.Equal(windowedRes.Hash) {
+			t.Fatal("classic and windowed produced the same sample hash; the agent did not route by reserve-proof-mode")
+		}
+	})
+}

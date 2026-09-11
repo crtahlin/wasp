@@ -714,6 +714,7 @@ func createRedistributionAgentService(
 		tranService,
 		&mockHealth{},
 		log.Noop,
+		"classic", // reserve-proof-mode (#273); classic is the default
 	)
 }
 
