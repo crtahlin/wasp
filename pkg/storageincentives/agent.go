@@ -64,6 +64,7 @@ type Agent struct {
 	batchExpirer           postagecontract.PostageBatchExpirer
 	redistributionStatuser staking.RedistributionStatuser
 	store                  storer.Reserve
+	reserveProofMode       string
 	fullSyncedFunc         func() bool
 	overlay                swarm.Address
 	quit                   chan struct{}
@@ -92,6 +93,7 @@ func New(overlay swarm.Address,
 	tranService transaction.Service,
 	health Health,
 	logger log.Logger,
+	reserveProofMode string,
 ) (*Agent, error) {
 	a := &Agent{
 		overlay:                overlay,
@@ -101,6 +103,7 @@ func New(overlay swarm.Address,
 		contract:               contract,
 		batchExpirer:           batchExpirer,
 		store:                  store,
+		reserveProofMode:       reserveProofMode,
 		fullSyncedFunc:         fullSyncedFunc,
 		blocksPerRound:         blocksPerRound,
 		quit:                   make(chan struct{}),
@@ -466,7 +469,17 @@ func (a *Agent) reserveSampleAndHash(ctx context.Context, anchor []byte, depth u
 			return sampleResult{}, err
 		}
 
-		rSample, err := a.store.ReserveSample(ctx, anchor, depth, uint64(timeLimiter), a.minBatchBalance())
+		// Windowed proof (#273): when the operator has opted into windowed
+		// mode, take the windowed sample. The commitment and proofs downstream
+		// are built in the identical format, so a windowed-aware contract would
+		// accept them; the live contract does not, which is why windowed is
+		// experimental and off by default.
+		var rSample storer.Sample
+		if a.reserveProofMode == storer.ReserveProofModeWindowed {
+			rSample, err = a.store.WindowedSample(ctx, anchor, depth, uint64(timeLimiter), a.minBatchBalance())
+		} else {
+			rSample, err = a.store.ReserveSample(ctx, anchor, depth, uint64(timeLimiter), a.minBatchBalance())
+		}
 		if err != nil {
 			return sampleResult{}, err
 		}
