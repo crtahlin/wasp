@@ -6,6 +6,7 @@ package storer
 
 import (
 	"context"
+	"math/big"
 
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/events"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
@@ -88,3 +89,29 @@ const (
 )
 
 func WritePauseEdge(prev, cur bool) WritePauseChange { return writePauseEdge(prev, cur) }
+
+// Windowed-proof test hooks (#273).
+
+var (
+	WindowDepthIncrement = windowDepthIncrement
+	DeriveWindowAnchor   = deriveWindowAnchor
+)
+
+const (
+	MinWindowCount          = minWindowCount
+	MaxWindowDepthIncrement = maxWindowDepthIncrement
+)
+
+// ReserveSampleWithWindow drives the shared sampler with an explicit window
+// predicate so tests can exercise the filtering path directly, independent of
+// the reserve size that WindowedSample uses to size the window.
+func (db *DB) ReserveSampleWithWindow(
+	ctx context.Context,
+	anchor []byte,
+	committedDepth uint8,
+	consensusTime uint64,
+	minBatchBalance *big.Int,
+	inWindow func([]byte) bool,
+) (Sample, error) {
+	return db.reserveSample(ctx, anchor, committedDepth, consensusTime, minBatchBalance, inWindow)
+}

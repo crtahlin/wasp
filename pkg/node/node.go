@@ -160,6 +160,7 @@ type Options struct {
 	DBBlockCacheCapacity            uint64
 	DBDisableSeeksCompaction        bool
 	StorageEngine                   string
+	ReserveProofMode                string
 	DBOpenFilesLimit                uint64
 	DBWriteBufferSize               uint64
 	DBCompactionL0Trigger           int
@@ -371,6 +372,21 @@ func NewBee(
 
 	if err := validatePublicAddress(o.NATWSSAddr); err != nil {
 		return nil, fmt.Errorf("invalid NAT WSS address %s: %w", o.NATWSSAddr, err)
+	}
+
+	// Reserve-proof-mode (#273). Empty and classic both select the whole-reserve
+	// proof the network and the live contract expect. windowed is the
+	// experimental sublinear proof from #271; in phase A it is not yet wired into
+	// the redistribution agent, and it wins nothing on the live contract, so an
+	// operator who sets it is warned.
+	if o.ReserveProofMode == "" {
+		o.ReserveProofMode = storer.ReserveProofModeClassic
+	}
+	if !storer.ValidReserveProofMode(o.ReserveProofMode) {
+		return nil, fmt.Errorf("invalid reserve-proof-mode %q: use %q or %q", o.ReserveProofMode, storer.ReserveProofModeClassic, storer.ReserveProofModeWindowed)
+	}
+	if o.ReserveProofMode == storer.ReserveProofModeWindowed {
+		logger.Warning("reserve-proof-mode set to windowed: an experimental sublinear reserve proof the live redistribution contract does not accept, so this node will not win redistribution rounds; use it only on a testnet or for research (#273)")
 	}
 
 	ctx, ctxCancel := context.WithCancel(ctx)
