@@ -183,8 +183,9 @@ Refresh it at each of these points:
 - **A wasp release.** Replace `main` with the new version in the *In wasp*
   column.
 - **At least once a month, and whenever Bee publishes a release.** A Bee release
-  that wasp has not absorbed yet becomes the comparison point. Mark the entries
-  it covers, and list what it adds under *Bee changes wasp does not have yet*.
+  that wasp has not absorbed yet becomes the comparison point. Remove the
+  entries it covers, and list what it adds under *Bee changes wasp does not
+  have yet*.
 
 The check:
 

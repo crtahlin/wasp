@@ -49,7 +49,7 @@ a fork ends up re-resolving the same conflicts forever. **Never squash a sync.**
 
 ## Reviewing a sync pull request
 
-Three things, in order:
+In order:
 
 1. **The protocol-freeze diff.** `git diff main...HEAD -- .github/protocol-freeze.lock`.
    If upstream moved a protocol minor, read
