@@ -209,6 +209,28 @@ When `$LATEST` equals `$BASE`, the second command prints nothing, and nothing
 can have been adopted. A refresh that finds no change still updates the two
 lines at the top of the file, so a reader can see when it was last checked.
 
+**14. Keep `docs/UPSTREAM.md` current.**
+
+`docs/UPSTREAM.md` lists every wasp issue that also applies to upstream Bee, the
+ones carrying the `affects-upstream` label, with its status, fork branch and
+merge commit. Update it whenever an issue gains or loses that label, and whenever
+such an issue closes: add or amend its row with the outcome (`done`, and the
+ledger's `validated` or `neutral` where it has one, or `not planned`) and the
+branch and merge commit.
+
+Resolve the commit from the fork-only range, not by issue number alone. Wasp
+issue numbers collide with upstream Bee pull-request numbers in the shared
+history, so a bare `git log --grep '(#N)'` can return an upstream commit. Use:
+
+```bash
+git log --first-parent "upstream/$(cat .upstream-base)"..main --grep "(#N)"
+```
+
+and, when the fix landed on its own branch without an issue reference in the
+merge subject, resolve it from the branch tip instead. Do not link to the Bee
+repository (rule 1); the label is a marker for a later human decision, nothing
+more.
+
 ## Writing
 
 Plain language. No project-management jargon: not "park", "parked", "spike",
@@ -233,6 +255,7 @@ it cost a cleanup commit. Check before merging, not after.
 | Running or measuring on real nodes | `docs/agent-playbooks/test-bench.md` |
 | Provisioning a bench machine | `docs/agent-playbooks/bench-vm-spec.md` |
 | Looking for how wasp differs from Bee | `docs/DIFFERENCES.md` |
+| Looking for what also applies to upstream Bee | `docs/UPSTREAM.md` |
 | Looking for what has been tried | `docs/experiments/INDEX.md` |
 | Looking for what is planned | `docs/ROADMAP.md` |
 
