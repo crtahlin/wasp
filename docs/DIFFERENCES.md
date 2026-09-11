@@ -126,9 +126,11 @@ endpoints.
 | `GET /stake/legacy/{id}`, `POST /stake/legacy/{id}?mode=withdraw\|migrate` | Reports recovery progress for one retired contract, or recovers from it. | `main` | [#256](https://github.com/crtahlin/wasp/issues/256) |
 | `GET /probesample/{depth}/{anchor}/{k}` | Measures the cost of a probe-based reserve sample. For benchmarking only; it does not change what the node submits in redistribution. | `main` | [#241](https://github.com/crtahlin/wasp/issues/241) |
 
-The list of retired staking contracts in `pkg/config/legacy_staking.go` is empty,
-so the `/stake/legacy` endpoints and `stake-recovery-on-startup` find nothing
-until confirmed contract addresses are added.
+The list of retired staking contracts in `pkg/config/legacy_staking.go` is seeded
+with the verified retired deployments, the two most recent per chain on Gnosis
+and Sepolia, so the `/stake/legacy` endpoints and `stake-recovery-on-startup` act
+on a node that has stake stranded in one of them. `stake-recovery-on-startup` is
+`off` by default, so recovery is opt-in.
 
 ## Metrics and log lines
 
