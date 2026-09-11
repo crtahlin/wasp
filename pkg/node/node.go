@@ -1365,9 +1365,11 @@ func NewBee(
 	stakingContract := staking.New(overlayEthAddress, stakingContractAddress, abiutil.MustParseABI(chainCfg.StakingABI), bzzTokenAddress, transactionService, common.BytesToHash(nonce), contractGasLimit, uint8(o.ReserveCapacityDoubling))
 
 	// Discovery and recovery of stake left in retired staking contracts (issue
-	// #256). The catalog is empty until confirmed historical addresses are added,
-	// so this is inert by default and never moves funds unless an operator opts
-	// in. See docs/experiments/stake-recovery.
+	// #256). stake-recovery-on-startup defaults to migrate, so a node that has
+	// stake stranded in a retired contract recovers it into the current contract
+	// on startup; set it to off to disable, or withdraw to recover to the wallet.
+	// It is a no-op for a node with nothing stranded, and never blocks startup.
+	// See docs/experiments/stake-recovery.
 	nativeBalanceFn := func(ctx context.Context) (*big.Int, error) {
 		return chainBackend.BalanceAt(ctx, overlayEthAddress, nil)
 	}

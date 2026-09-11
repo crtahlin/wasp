@@ -96,13 +96,17 @@ subcommand (modeled on the `bee db` subcommands) can offer the same from the com
 
 A configuration value `stake-recovery-on-startup` with three values:
 
-- `off` (default): do nothing.
-- `migrate`: at startup, recover any legacy stake and move it into the current contract.
+- `migrate` (default): at startup, recover any legacy stake and move it into the current
+  contract, restaking it.
 - `withdraw`: at startup, recover any legacy stake to the node's wallet.
+- `off`: do nothing.
 
-When set to `migrate` or `withdraw`, the node runs discovery once early in startup, before
+The default is `migrate`, so a node that has stake stranded in a retired contract recovers it
+automatically on the next start, which is the point of the feature after an upgrade. When set
+to `migrate` or `withdraw`, the node runs discovery once early in startup, before
 staking-dependent work, and recovers each deployment that holds stake in the chosen mode,
-resuming any partial state. It reuses the same code as the API.
+resuming any partial state. It is a no-op for a node with nothing stranded. It reuses the same
+code as the API.
 
 ### Handling no gas, and no backend
 
@@ -140,19 +144,21 @@ insufficient native balance or a failing send:
 
 ## Configuration
 
-- `stake-recovery-on-startup`: `off` (default), `migrate`, or `withdraw`. Documented in
-  `docs/config-reference.yaml`, including that it moves staked funds and so is off by default.
+- `stake-recovery-on-startup`: `migrate` (default), `withdraw`, or `off`. Documented in
+  `docs/config-reference.yaml`, including that the default moves staked funds automatically.
 - New endpoints under `/stake/legacy`, documented in `openapi/Swarm.yaml`.
 
 Nothing here changes on-disk layout, so no migration of the data directory is needed.
 
 ## Rollout and rollback
 
-The default is `off`, so merging and shipping the code changes no behavior. An operator opts in
-per node by setting the configuration value or by calling the API. Rollback is setting the
-value back to `off` (or not calling the API); no state is left that affects normal operation.
-Because it moves staked funds, enabling it on a real staked node is the operator's decision,
-and the first real use should be watched.
+The default is `migrate`, so a node with stake stranded in a retired contract restakes it into
+the current contract on its next start; a node with nothing stranded is unaffected. Set the
+value to `off` to disable the startup behavior, or to `withdraw` to recover to the wallet
+instead of restaking. Because it moves staked funds automatically, the behavior is documented
+prominently, it is gas-checked and never blocks startup, and the on-chain recovery still stays
+idempotent so a repeat start does not double-submit. Rollback is setting the value to `off`; no
+state is left that affects normal operation.
 
 ## Upstream portability
 

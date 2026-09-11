@@ -67,6 +67,7 @@ For every change in full, run `git log --first-parent main`.
 | Pull-sync during sampling | Historical syncing continues while the node computes its reserve sample, the proof of storage for a redistribution round. | Historical syncing pauses while the sample runs. Push-sync and retrieval continue. | `main` | | [#23](https://github.com/crtahlin/wasp/issues/23) |
 | Advertised address behind NAT | Rebuilt on every handshake from how each peer sees the node, so it changes with every NAT port mapping. The node re-signs and re-advertises it until it can lose all its peers. | Pinned once a public address is seen, and changed only after a sustained run of handshakes shows a different public IP. No change for a node with `nat-addr` set. | `main` | | [#225](https://github.com/crtahlin/wasp/pull/225) |
 | Push-sync on a node using reserve capacity doubling | Decides whether to store a pushed chunk directly from the lowered storage radius. | Decides from the committed depth, the storage radius plus the doubling, so its receipts are never shallower than the network radius. No change for a node without doubling. | `main` | | [#222](https://github.com/crtahlin/wasp/pull/222) |
+| Stake in a retired staking contract | Stays stranded; recovering it needs an old release and manual contract calls. | On startup the node recovers it into the current contract and restakes, by default. Set `stake-recovery-on-startup` to `off` to disable, or `withdraw` to recover to the wallet. No change for a node with nothing stranded. | `main` | | [#256](https://github.com/crtahlin/wasp/issues/256) |
 
 ## Existing Bee settings that behave differently
 
@@ -106,7 +107,7 @@ including what raising and lowering it costs, in
 | `kademlia-saturation-peers` | 8, as in Bee. | Connected peers per bin below which the bin keeps looking for peers. | v0.1.0 | [#148](https://github.com/crtahlin/wasp/pull/148) |
 | `kademlia-over-saturation-peers` | 18, as in Bee. | Connected peers per bin above which further peers are disconnected. | v0.1.0 | [#148](https://github.com/crtahlin/wasp/pull/148) |
 | `log-sink-buffer` | 4,096 lines. **Differs from Bee**, which writes synchronously; 0 restores that. | Log lines that may wait to be written before further lines are dropped. | v0.1.1 | [#156](https://github.com/crtahlin/wasp/issues/156) |
-| `stake-recovery-on-startup` | `off`. | Whether the node recovers stake from retired staking contracts at startup, to the wallet (`withdraw`) or into the current contract (`migrate`). | `main` | [#256](https://github.com/crtahlin/wasp/issues/256) |
+| `stake-recovery-on-startup` | `migrate`. **Moves staked funds by default:** a node with stake in a retired contract restakes it into the current contract on startup. `off` disables it; `withdraw` recovers to the wallet instead. It is a no-op for a node with nothing stranded. | Whether, and how, the node recovers stake from retired staking contracts at startup. | `main` | [#256](https://github.com/crtahlin/wasp/issues/256) |
 
 The storer's shutdown wait is also adjustable, but only as `Options.ShutdownTimeout`
 in the Go API, not as a node setting. Its default is 3 seconds, as in Bee
@@ -126,9 +127,10 @@ endpoints.
 | `GET /stake/legacy/{id}`, `POST /stake/legacy/{id}?mode=withdraw\|migrate` | Reports recovery progress for one retired contract, or recovers from it. | `main` | [#256](https://github.com/crtahlin/wasp/issues/256) |
 | `GET /probesample/{depth}/{anchor}/{k}` | Measures the cost of a probe-based reserve sample. For benchmarking only; it does not change what the node submits in redistribution. | `main` | [#241](https://github.com/crtahlin/wasp/issues/241) |
 
-The list of retired staking contracts in `pkg/config/legacy_staking.go` is empty,
-so the `/stake/legacy` endpoints and `stake-recovery-on-startup` find nothing
-until confirmed contract addresses are added.
+The list of retired staking contracts in `pkg/config/legacy_staking.go` is seeded
+with the verified retired deployments, the two most recent per chain on Gnosis
+and Sepolia, so the `/stake/legacy` endpoints and `stake-recovery-on-startup` act
+on a node that has stake stranded in one of them.
 
 ## Metrics and log lines
 
