@@ -107,6 +107,7 @@ including what raising and lowering it costs, in
 | `kademlia-over-saturation-peers` | 18, as in Bee. | Connected peers per bin above which further peers are disconnected. | v0.1.0 | [#148](https://github.com/crtahlin/wasp/pull/148) |
 | `log-sink-buffer` | 4,096 lines. **Differs from Bee**, which writes synchronously; 0 restores that. | Log lines that may wait to be written before further lines are dropped. | v0.1.1 | [#156](https://github.com/crtahlin/wasp/issues/156) |
 | `stake-recovery-on-startup` | `off`. | Whether the node recovers stake from retired staking contracts at startup, to the wallet (`withdraw`) or into the current contract (`migrate`). | `main` | [#256](https://github.com/crtahlin/wasp/issues/256) |
+| `reserve-proof-mode` | `classic`, the whole-reserve proof upstream uses and the live contract verifies. | The redistribution reserve-size proof. `windowed` is an experimental sublinear proof, a windowed order statistic that reads a fraction of the reserve. The live contract does not accept it, so a windowed node wins nothing; it is for a testnet or research only. | `main` | [#273](https://github.com/crtahlin/wasp/issues/273) |
 
 The storer's shutdown wait is also adjustable, but only as `Options.ShutdownTimeout`
 in the Go API, not as a node setting. Its default is 3 seconds, as in Bee

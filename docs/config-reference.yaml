@@ -234,6 +234,16 @@
 ## starting a fresh data directory. See issue #185.
 # storage-engine: ""
 
+## redistribution reserve-size proof. "classic" (the default) is the
+## whole-reserve scan that upstream bee uses and that the live redistribution
+## contract verifies. "windowed" is an experimental sublinear proof, a windowed
+## order statistic that reads only a fraction of the reserve (issue #271). It is
+## EXPERIMENTAL and does NOT win on the live network: the deployed contract only
+## accepts the classic proof, so a node in windowed mode produces a proof the
+## contract rejects and earns nothing, no matter how many nodes run it. Use it
+## only on a testnet or for research; leave unset for classic. See issue #273.
+# reserve-proof-mode: "classic"
+
 # ========================================================================
 # Reserve and sync
 #

@@ -16,6 +16,10 @@ Bee](https://github.com/ethersphere/bee).
 >   network, or lose staked funds during a redistribution round.
 > - **No warranty of any kind.** See [`DISCLAIMER.md`](DISCLAIMER.md) and
 >   [`LICENSE`](LICENSE).
+> - **Some options are experimental even by this fork's standards.** Settings
+>   marked experimental in the config reference, such as `reserve-proof-mode:
+>   windowed`, can stop the node winning redistribution rounds entirely. Leave
+>   them at their defaults unless you are on a testnet or know exactly why.
 >
 > If you want a Swarm node that works, run [upstream
 > Bee](https://github.com/ethersphere/bee). Run this only if you understand what
