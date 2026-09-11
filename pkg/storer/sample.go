@@ -182,12 +182,13 @@ func (db *DB) orderSampleReads(
 	return out
 }
 
-func (db *DB) ReserveSample(
+func (db *DB) reserveSample(
 	ctx context.Context,
 	anchor []byte,
 	committedDepth uint8,
 	consensusTime uint64,
 	minBatchBalance *big.Int,
+	inWindow func([]byte) bool,
 ) (Sample, error) {
 	// Signal that a sample is running so the puller pauses pulling and leaves the
 	// store quiet. Cleared on every return, including error and cancellation, so
@@ -235,6 +236,14 @@ func (db *DB) ReserveSample(
 
 		err := db.reserve.IterateChunksItems(db.StorageRadius(), func(ch *reserve.ChunkBinItem) (bool, error) {
 			if swarm.Proximity(ch.Address.Bytes(), anchor) < committedDepth {
+				return false, nil
+			}
+			// Windowed proof (#273): when a window predicate is set, keep only
+			// the chunks inside the anchor-derived sub-window. Placed before the
+			// count below so TotalIterated stays the honest cost measure, the
+			// number of chunks actually read. A nil predicate is classic mode,
+			// the whole neighbourhood.
+			if inWindow != nil && !inWindow(ch.Address.Bytes()) {
 				return false, nil
 			}
 			// Counted before the filters below, so that TotalIterated keeps
@@ -484,6 +493,20 @@ func (db *DB) ReserveSample(
 	db.logger.Info("reserve sampler finished", "duration", time.Since(t), "storage_radius", committedDepth, "consensus_time_ns", consensusTime, "stats", fmt.Sprintf("%+v", allStats))
 
 	return Sample{Stats: *allStats, Items: sampleItems}, nil
+}
+
+// ReserveSample generates the classic whole-neighbourhood sample the
+// redistribution game uses today. It is the default reserve-proof-mode and is
+// unchanged from upstream: it delegates to the shared reserveSample with no
+// window predicate. WindowedSample (#273) is the experimental sublinear variant.
+func (db *DB) ReserveSample(
+	ctx context.Context,
+	anchor []byte,
+	committedDepth uint8,
+	consensusTime uint64,
+	minBatchBalance *big.Int,
+) (Sample, error) {
+	return db.reserveSample(ctx, anchor, committedDepth, consensusTime, minBatchBalance, nil)
 }
 
 // less function uses the byte compare to check for lexicographic ordering

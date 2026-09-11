@@ -381,6 +381,7 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		DBBlockCacheCapacity:            c.config.GetUint64(optionNameDBBlockCacheCapacity),
 		DBDisableSeeksCompaction:        c.config.GetBool(optionNameDBDisableSeeksCompaction),
 		StorageEngine:                   c.config.GetString(optionNameStorageEngine),
+		ReserveProofMode:                c.config.GetString(optionNameReserveProofMode),
 		DBOpenFilesLimit:                c.config.GetUint64(optionNameDBOpenFilesLimit),
 		DBWriteBufferSize:               c.config.GetUint64(optionNameDBWriteBufferSize),
 		DBCompactionL0Trigger:           c.config.GetInt(optionNameDBCompactionL0Trigger),
