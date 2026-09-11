@@ -43,21 +43,54 @@ type LegacyStakingDeployment struct {
 
 // legacyStakingDeployments holds the known retired staking contracts per chain.
 //
-// It is deliberately empty until an entry's address and recovery method are
-// confirmed from the storage-incentives release history. Adding an entry with a
-// wrong address or method would send a recovery transaction to the wrong place,
-// so an entry is added only once verified against the on-chain deployment. The
-// discovery and recovery code works over whatever is listed here, so an empty
-// list simply means the node reports no recoverable legacy stake.
+// Each address is a staking address that go-storage-incentives-abi pinned at
+// the named version and that a later release replaced; the ID is that version.
+// Every entry was verified on chain (2026-09-11): the contract exists, reports
+// paused() == true, and carries the migrateStake, withdrawFromStake, stakes and
+// withdrawableStake methods, so a node's stake is recovered by calling
+// migrateStake on the paused contract (RecoverByMigrate). An entry is added
+// only after that check, because a wrong address or method would send a
+// recovery transaction to the wrong place.
+//
+// The recovery reuses the current chain's staking ABI (the ABI field is left
+// empty), which is correct because these contracts share the method shapes the
+// recovery uses. DeploymentBlock is left 0; it is informational and the
+// discovery and recovery paths read current on-chain state rather than scanning
+// from it.
+//
+// Deliberately NOT listed: the oldest staking contracts, Gnosis
+// 0x781c6D1f0eaE6F1Da1F604c6cDCcdB8B76428ba7 and Sepolia
+// 0x41379955a216968996D10614B74b31AA48a0624A (pinned v0.6.2 to v0.9.0). They are
+// paused but expose neither migrateStake nor withdrawFromStake, so they predate
+// this recovery mechanism and cannot be recovered by it; recording them here as
+// recoverable would be wrong.
 var legacyStakingDeployments = []LegacyStakingDeployment{
-	// Example shape (do not enable until the address is confirmed):
-	// {
-	// 	ID:              "storage-incentives-<tag>",
-	// 	ChainID:         Mainnet.ChainID,
-	// 	Address:         common.HexToAddress("0x..."),
-	// 	DeploymentBlock: 0,
-	// 	RecoverMethod:   RecoverByMigrate,
-	// },
+	// Gnosis mainnet (chain 100).
+	{
+		ID:            "gnosis-abi-v0.9.2",
+		ChainID:       Mainnet.ChainID,
+		Address:       common.HexToAddress("0x445B848e16730988F871c4a09aB74526d27c2Ce8"),
+		RecoverMethod: RecoverByMigrate,
+	},
+	{
+		ID:            "gnosis-abi-v0.9.1",
+		ChainID:       Mainnet.ChainID,
+		Address:       common.HexToAddress("0xBe212EA1A4978a64e8f7636Ae18305C38CA092Bd"),
+		RecoverMethod: RecoverByMigrate,
+	},
+	// Sepolia testnet (chain 11155111).
+	{
+		ID:            "sepolia-abi-v0.9.2",
+		ChainID:       Testnet.ChainID,
+		Address:       common.HexToAddress("0x4353A36f4376A273a65595Acd9bE6c63D90fC352"),
+		RecoverMethod: RecoverByMigrate,
+	},
+	{
+		ID:            "sepolia-abi-v0.9.1",
+		ChainID:       Testnet.ChainID,
+		Address:       common.HexToAddress("0x5CF39e699b601c2EBc3e25b19Fd4102d8366b56F"),
+		RecoverMethod: RecoverByMigrate,
+	},
 }
 
 // LegacyStakingDeployments returns the retired staking contracts known for the
