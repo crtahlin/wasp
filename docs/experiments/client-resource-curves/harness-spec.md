@@ -43,10 +43,13 @@ this spec is inert until then.
 - bee and wasp+goleveldb run from a frozen copy of bench-1's existing goleveldb
   reserve, so every run starts from the same store.
 - wasp+pebble needs a pebble-format reserve, because the two on-disk formats are
-  not interchangeable (docs/DIFFERENCES.md). It is built once, by an offline
-  conversion of the goleveldb reserve if a converter is practical, or by a one-time
-  sync into a pebble store, and then frozen. The large drive holds both images plus
-  compaction headroom.
+  not interchangeable (docs/DIFFERENCES.md). No converter is built (that rabbit
+  hole is out of scope): a fresh pebble node syncs its reserve from the network,
+  reusing bench-1's identity key so no wallet funding is needed (the node runs
+  swap-disabled), then the filled pebble store is frozen as the pebble image. The
+  fill is the long pole, days, so it runs in the background while the bee and
+  wasp+goleveldb arms run off the goleveldb image. The large drive holds both
+  images plus compaction headroom.
 - Each run resets the node to its frozen image, so radius and reserve size start
   known and identical across clients (the procedure's fixed-radius, known-size
   requirement).
