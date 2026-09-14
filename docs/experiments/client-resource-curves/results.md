@@ -74,12 +74,19 @@ eviction (2.7 times the mean). It is not a settle artifact: read-amplification w
 1 (shallow) at the start, so the raw-file-count worry was a misreading. But note
 the axis: the methodology's expectation for eviction was about READ RESPONSIVENESS,
 that goleveldb stalls reads during its fast reclaim while pebble stays responsive,
-NOT about processor. Pebble's higher processor is consistent with that, it is the
-continuous compaction pebble does to avoid the stall, but it does not confirm it.
-The harness samples processor, disk and L0, not request latency, so the read-stall
-hypothesis itself is UNMEASURED here. What is established: pebble's eviction is
-more processor-intensive; whether it is more read-responsive is open and needs a
-latency probe added to the harness.
+NOT about processor. Pebble's higher processor is the continuous compaction pebble does to stay
+responsive. A request-latency probe was then added to the harness (it times a
+retrieval each interval) and both engines re-run: during the eviction, goleveldb's
+retrieval latency degraded more (median 578 to 650 ms, +12 percent; worst 627 to
+1135 ms, roughly double, with one timeout) than pebble's (median 594 to 614 ms,
++3 percent; worst 719 to 820 ms, no timeout). So the two axes agree: pebble spends
+about 2.7 times the processor and in return degrades reads far less. That is the
+methodology's hypothesised trade, pebble stays responsive while reclaiming more
+slowly, and the extra processor is how it buys the responsiveness. Caveats: the
+latency probe retrieves a random in-neighbourhood address, a miss forwarded to the
+network (about 580 ms baseline), so it is a soft proxy for the local store read
+path; node-level responsiveness (/status latency) stayed flat for both, so neither
+stalled the node on this NVMe; the effect would be larger on a slower disk.
 
 ## Radius decrease, the backfill plateau
 
