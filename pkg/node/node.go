@@ -189,6 +189,7 @@ type Options struct {
 	RedistributionContractAddress   string
 	ReserveCapacityDoubling         int
 	MaxReserveCapacityDoubling      int
+	ReserveCapacity                 uint64
 	StakeRecoveryOnStartup          string
 	RedistributionSyncRateThreshold int
 	ResolverConnectionCfgs          []multiresolver.ConnectionConfig
@@ -348,6 +349,21 @@ func tracingEnvironment(networkID uint64) string {
 	}
 }
 
+// minReserveCapacity is the smallest reserve-capacity (#283) that still leaves
+// room for a reserve sample; a value below this is rejected.
+const minReserveCapacity = 4096
+
+// effectiveReserveCapacity is the reserve capacity in chunks: the configured
+// reserve-capacity (or the default constant when unset) with the doubling
+// multiplied on top (#283).
+func effectiveReserveCapacity(configured uint64, doubling int) int {
+	base := storer.DefaultReserveCapacity
+	if configured > 0 {
+		base = int(configured)
+	}
+	return (1 << doubling) * base
+}
+
 func NewBee(
 	ctx context.Context,
 	addr string,
@@ -379,6 +395,10 @@ func NewBee(
 	// experimental sublinear proof from #271; in phase A it is not yet wired into
 	// the redistribution agent, and it wins nothing on the live contract, so an
 	// operator who sets it is warned.
+	// reserve-capacity floor: it must be able to hold a reserve sample (#283).
+	if o.ReserveCapacity > 0 && o.ReserveCapacity < minReserveCapacity {
+		return nil, fmt.Errorf("reserve-capacity %d is below the minimum of %d chunks", o.ReserveCapacity, minReserveCapacity)
+	}
 	if o.ReserveProofMode == "" {
 		o.ReserveProofMode = storer.ReserveProofModeClassic
 	}
@@ -436,7 +456,10 @@ func NewBee(
 	}
 	shallowReceiptTolerance := shallowReceiptToleranceFor(maxDoubling, o.ReserveCapacityDoubling)
 
-	reserveCapacity := (1 << o.ReserveCapacityDoubling) * storer.DefaultReserveCapacity
+	// reserve-capacity sets the base the doubling multiplies; unset keeps the
+	// default constant so an upgrading node is unchanged (#283).
+	reserveCapacity := effectiveReserveCapacity(o.ReserveCapacity, o.ReserveCapacityDoubling)
+	logger.Info("reserve capacity", "chunks", reserveCapacity, "configured", o.ReserveCapacity, "doubling", o.ReserveCapacityDoubling)
 
 	stateStore, stateStoreMetrics, err := InitStateStore(logger, o.DataDir, o.StatestoreCacheCapacity)
 	if err != nil {
