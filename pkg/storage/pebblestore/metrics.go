@@ -30,6 +30,8 @@ type statsCollector struct {
 	store *Store
 
 	levelFiles     *prometheus.Desc
+	levelSublevels *prometheus.Desc
+	readAmp        *prometheus.Desc
 	levelSize      *prometheus.Desc
 	compactions    *prometheus.Desc
 	compactionDebt *prometheus.Desc
@@ -52,6 +54,16 @@ func newStatsCollector(store *Store) *statsCollector {
 		levelSize: prometheus.NewDesc(fq("level_size_bytes"),
 			"Total size of SST files at each level, in bytes.",
 			[]string{"level"}, nil),
+		levelSublevels: prometheus.NewDesc(fq("level_sublevels"),
+			"Number of L0 sublevels, i.e. the read-amplification Pebble actually "+
+				"compacts on (L0CompactionThreshold). Only level 0 carries sublevels; "+
+				"other levels report 0. This, not level_files, is the right L0-depth "+
+				"yardstick and the one to compare against goleveldb's file count.",
+			[]string{"level"}, nil),
+		readAmp: prometheus.NewDesc(fq("read_amp"),
+			"Whole-database read amplification, the number of overlapping levels a "+
+				"read may consult. Sum of per-level sublevels.",
+			nil, nil),
 		compactions: prometheus.NewDesc(fq("compactions_total"),
 			"Cumulative compactions performed, by what triggered them.",
 			[]string{"kind"}, nil),
@@ -73,7 +85,9 @@ func newStatsCollector(store *Store) *statsCollector {
 
 func (c *statsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.levelFiles
+	ch <- c.levelSublevels
 	ch <- c.levelSize
+	ch <- c.readAmp
 	ch <- c.compactions
 	ch <- c.compactionDebt
 	ch <- c.writeBytes
@@ -90,7 +104,10 @@ func (c *statsCollector) Collect(ch chan<- prometheus.Metric) {
 			float64(l.NumFiles), strconv.Itoa(level))
 		ch <- prometheus.MustNewConstMetric(c.levelSize, prometheus.GaugeValue,
 			float64(l.Size), strconv.Itoa(level))
+		ch <- prometheus.MustNewConstMetric(c.levelSublevels, prometheus.GaugeValue,
+			float64(l.Sublevels), strconv.Itoa(level))
 	}
+	ch <- prometheus.MustNewConstMetric(c.readAmp, prometheus.GaugeValue, float64(stats.ReadAmp()))
 
 	for kind, n := range map[string]int64{
 		"default":      stats.Compact.DefaultCount,
