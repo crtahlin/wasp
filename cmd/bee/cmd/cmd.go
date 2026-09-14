@@ -27,6 +27,7 @@ const (
 	optionNameCacheCapacity                = "cache-capacity"
 	optionNameStorageEngine                = "storage-engine"
 	optionNameReserveProofMode             = "reserve-proof-mode"
+	optionNameReserveCapacity              = "reserve-capacity"
 	optionNameDBOpenFilesLimit             = "db-open-files-limit"
 	optionNameDBBlockCacheCapacity         = "db-block-cache-capacity"
 	optionNameDBWriteBufferSize            = "db-write-buffer-size"
@@ -337,6 +338,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Uint64(optionNameCacheCapacity, 1_000_000, fmt.Sprintf("cache capacity in chunks, multiply by %d to get approximate capacity in bytes", swarm.ChunkSize))
 	cmd.Flags().String(optionNameStorageEngine, "", "index-store engine for a NEW data directory: \"pebble\" (default) or \"leveldb\". Empty uses the engine the data directory was created with, and pebble for a fresh one. An existing goleveldb store keeps goleveldb. The two on-disk formats are not interchangeable, so a directory is bound to its engine. See issue #185.")
 	cmd.Flags().String(optionNameReserveProofMode, "classic", "redistribution reserve-size proof: \"classic\" (default, the whole-reserve scan the live contract accepts) or \"windowed\" (experimental sublinear proof; NOT accepted by the live contract, wins nothing, testnet and research only). See issue #273.")
+	cmd.Flags().Uint64(optionNameReserveCapacity, 0, "reserve size in chunks; 0 uses the default of 4194304 (1<<22). Sets the base that reserve-capacity-doubling multiplies. For sizing the reserve to a disk or driving radius behaviour in testing. See issue #283.")
 	cmd.Flags().Uint64(optionNameDBOpenFilesLimit, 200, "number of open files allowed by database")
 	cmd.Flags().Uint64(optionNameDBBlockCacheCapacity, 32*1024*1024, "size of block cache of the database in bytes")
 	cmd.Flags().Uint64(optionNameDBWriteBufferSize, 32*1024*1024, "size of the database write buffer in bytes")

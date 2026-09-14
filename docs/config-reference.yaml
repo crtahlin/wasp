@@ -244,6 +244,13 @@
 ## only on a testnet or for research; leave unset for classic. See issue #273.
 # reserve-proof-mode: "classic"
 
+## reserve size in chunks. 0 (the default) uses 4194304 (1<<22). This sets the
+## base that reserve-capacity-doubling multiplies, so the two compose. Lower it to
+## size the reserve to a smaller disk, raise it to hold more; the node's storage
+## radius follows (it deepens when over capacity, shallows when well under). A
+## value below 4096 is rejected. See issue #283.
+# reserve-capacity: 0
+
 # ========================================================================
 # Reserve and sync
 #
