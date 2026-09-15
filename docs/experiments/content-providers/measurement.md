@@ -63,7 +63,9 @@ The machine roles are defined in `docs/agent-playbooks/test-bench.md`.
 **Connections.** At the start of each block Q connects to P, and before the
 condition 4 runs to S, with `POST /connect/{multiaddr}`. A hint dials only an
 overlay that Q's address book already knows, so without this step condition 4
-could silently turn into condition 2.
+could silently turn into condition 2. A `POST /connect` to a peer that is already
+connected answers with an error (`pkg/api/peer.go:34-39`); that answer counts as
+success here.
 
 **Network path.**
 - The direct path between the two bench machines has a round trip below 1 ms, far
@@ -109,13 +111,13 @@ could silently turn into condition 2.
      `GET /wasp/providers/{reference}/lookup`, then the download with the returned
      overlays as the hint.
    - The gap is filed as [#297](https://github.com/crtahlin/wasp/issues/297).
-7. **Content B's first step runs condition 1 with P cut off** (see Content B).
-   Otherwise P, which holds the file pinned and is connected to Q, could deliver
-   it as an ordinary peer.
+7. **Content B's first step runs condition 1 with P unreachable from Q** (see
+   Content B). Otherwise P, which holds the file pinned and is connected to Q,
+   could deliver it directly as an ordinary peer.
 8. **The lookup-cost runs are made in the pseudosettle block only.** A lookup
-   makes at most 24 requests, spread over different chunk addresses and so over
-   different peers. That stays well within Q's free allowance with each peer, so
-   settlement does not change it.
+   makes at most 24 chunk retrievals, spread over different chunk addresses and so
+   over different peers. Each retrieval may try several peers, but the cost stays
+   far below Q's free allowance with each peer, so settlement does not change it.
 9. **Overdraft spills** (spec.md, Measurement, Metrics) cannot be counted
    directly. They are derived as described under "What each run records".
 
@@ -201,10 +203,12 @@ this next to their numbers.
 **Content B**, after batch B has expired:
 1. **The network check.**
    - Q runs with `providers-enable: false`, and every packet from Q's machine to
-     P's machine is dropped, so that P cannot take part.
+     P's machine is dropped, so that P cannot deliver directly.
    - Three runs. The file must not arrive. If it does, forwarding nodes still hold
-     it, and content B is reported as not testable.
-2. **The delay is restored and Q reconnects to P.** Then, with Q's settings of
+     it, or P delivered it through a relay, and content B is reported as not
+     testable.
+2. **The delay is restored and Q reconnects to P.** The delay is checked as for a
+   block, before and after this step. Then, with Q's settings of
    each block in turn (`providers-enable: true`, first without and then with
    SWAP), three runs each of:
    - the hint to P;
@@ -266,13 +270,14 @@ of P's other traffic, so they are context, not the measure.
   `prepareCredit` succeeds (`pkg/retrieval/preferred.go:224-232`), so a chunk
   whose provider was overdrawn has no attempt. In condition 5 the same
   difference also includes the chunks fetched before discovery found P.
-- **Lost attempts:** preferred attempts minus hits minus misses. These are slow
-  answers that came after normal retrieval had already delivered the chunk. They
-  are paid for but not used, and they are counted in no delivery figure.
+- **Lost attempts:** preferred attempts minus hits minus misses. These are mostly
+  slow answers that came after normal retrieval had already delivered the chunk,
+  which are paid for but not used. A few are slow misses or stream errors, which
+  are not paid. None is counted in a delivery figure.
 
 **Expected limit.** Without SWAP, P can serve Q about 14 chunks per second once
-Q's allowance with P is used up, fewer for the chunks it is far from (spec.md,
-Hypothesis). In the pseudosettle block P will therefore serve only a small share
+Q's allowance with P is used up, more for the chunks close to it, which cost less
+(spec.md, Hypothesis). In the pseudosettle block P will therefore serve only a small share
 of a 16 MiB file. The SWAP block has no such limit.
 
 **For each lookup:**
