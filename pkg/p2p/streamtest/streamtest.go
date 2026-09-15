@@ -129,6 +129,8 @@ func (r *Recorder) NewStream(ctx context.Context, addr swarm.Address, h p2p.Head
 	recordOut := newRecord(r.messageLatency)
 	streamOut := newStream(recordIn, recordOut, version, versionErr)
 	streamIn := newStream(recordOut, recordIn, version, versionErr)
+	// the handler side sees the request headers, as on a real libp2p stream
+	streamIn.headers = h
 
 	var handler p2p.HandlerFunc
 	var headler p2p.HeadlerFunc

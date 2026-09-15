@@ -26,6 +26,13 @@ type metrics struct {
 	ChunkPrice            prometheus.Summary
 	TotalErrors           prometheus.Counter
 	ChunkRetrieveTime     prometheus.Histogram
+
+	// content providers (wasp)
+	PreferredAttempts prometheus.Counter
+	PreferredHits     prometheus.Counter
+	PreferredMisses   prometheus.Counter
+	LocalOnlyMisses   prometheus.Counter
+	LocalOnlyLimited  prometheus.Counter
 }
 
 func newMetrics() metrics {
@@ -99,6 +106,36 @@ func newMetrics() metrics {
 			Help:      "Histogram for time taken to retrieve a chunk.",
 		},
 		),
+		PreferredAttempts: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "preferred_attempts",
+			Help:      "Retrieval attempts sent to a preferred peer with the local-only header.",
+		}),
+		PreferredHits: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "preferred_hits",
+			Help:      "Chunks delivered by a preferred peer.",
+		}),
+		PreferredMisses: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "preferred_misses",
+			Help:      "Preferred attempts that did not deliver the chunk.",
+		}),
+		LocalOnlyMisses: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "local_only_misses",
+			Help:      "Local-only requests from peers answered with a miss.",
+		}),
+		LocalOnlyLimited: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "local_only_limited",
+			Help:      "Local-only misses answered with the limit error.",
+		}),
 	}
 }
 
