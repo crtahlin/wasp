@@ -164,6 +164,9 @@ type Service struct {
 	pss             pss.Interface
 	gsoc            gsoc.Listener
 	steward         steward.Interface
+	providers       Providers
+	providerSetsMu  sync.Mutex
+	providerSets    map[string]providerSetEntry
 	logger          log.Logger
 	loggerV1        log.Logger
 	tracer          *tracing.Tracer
@@ -277,6 +280,7 @@ type ExtraOptions struct {
 	Staking         staking.Contract
 	LegacyStake     staking.LegacyStakeService
 	Steward         steward.Interface
+	Providers       Providers
 	SyncStatus      func() (bool, error)
 	NodeStatus      *status.Service
 	PinIntegrity    PinIntegrity
@@ -357,6 +361,7 @@ func (s *Service) Configure(signer crypto.Signer, tracer *tracing.Tracer, o Opti
 	s.accesscontrol = e.AccessControl
 	s.postageContract = e.PostageContract
 	s.steward = e.Steward
+	s.providers = e.Providers
 	s.stakingContract = e.Staking
 	s.legacyStake = e.LegacyStake
 
@@ -615,6 +620,7 @@ func (s *Service) corsHandler(h http.Handler) http.Handler {
 		SwarmRedundancyStrategyHeader, SwarmRedundancyFallbackModeHeader, SwarmChunkRetrievalTimeoutHeader, SwarmLookAheadBufferSizeHeader,
 		SwarmFeedIndexHeader, SwarmFeedIndexNextHeader, SwarmSocSignatureHeader, SwarmOnlyRootChunk, GasPriceHeader, GasLimitHeader, ImmutableHeader,
 		SwarmActHeader, SwarmActTimestampHeader, SwarmActPublisherHeader, SwarmActHistoryAddressHeader,
+		WaspProvidersHeader,
 	}
 	allowedHeadersStr := strings.Join(allowedHeaders, ", ")
 

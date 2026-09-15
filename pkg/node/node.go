@@ -123,6 +123,7 @@ type Bee struct {
 	storageIncetivesCloser   io.Closer
 	pushSyncCloser           io.Closer
 	retrievalCloser          io.Closer
+	providersCloser          io.Closer
 	stabilizationDetector    io.Closer
 	shutdownInProgress       bool
 	shutdownMutex            sync.Mutex
@@ -195,6 +196,7 @@ type Options struct {
 	ResolverConnectionCfgs          []multiresolver.ConnectionConfig
 	Resync                          bool
 	RetrievalCaching                bool
+	ProvidersEnable                 bool
 	SkipPostageSnapshot             bool
 	StakingContractAddress          string
 	StatestoreCacheCapacity         uint64
@@ -1344,6 +1346,7 @@ func NewBee(
 	retrieval := retrieval.New(swarmAddress, waitNetworkRFunc, localStore, p2ps, kad, logger, acc, pricer, tracer, o.RetrievalCaching)
 	b.retrievalCloser = retrieval
 	localStore.SetRetrievalService(retrieval)
+	retrieval.SetProvidersEnabled(o.ProvidersEnable)
 
 	statusMetricsRegistry.MustRegister(retrieval.StatusMetrics()...)
 
@@ -1557,6 +1560,17 @@ func NewBee(
 	feedFactory := factory.New(localStore.Download(true))
 	steward := steward.New(localStore, retrieval, localStore.Cache())
 
+	var providersAPI api.Providers
+	if o.ProvidersEnable {
+		providersService, err := newProvidersService(logger, networkID, swarmAddress, nonce, signer, localStore, retrieval, post, batchStore, stamperStore, p2ps, kad, addressbook, stateStore)
+		if err != nil {
+			return nil, fmt.Errorf("content providers: %w", err)
+		}
+		providersService.Start()
+		b.providersCloser = providersService
+		providersAPI = providersService
+	}
+
 	extraOpts := api.ExtraOptions{
 		Pingpong:        pingPong,
 		TopologyDriver:  kad,
@@ -1577,6 +1591,7 @@ func NewBee(
 		Staking:         stakingContract,
 		LegacyStake:     legacyStakeService,
 		Steward:         steward,
+		Providers:       providersAPI,
 		SyncStatus:      syncStatusFn,
 		NodeStatus:      nodeStatus,
 		PinIntegrity:    localStore.PinIntegrity(),
@@ -1667,7 +1682,7 @@ type namedCloser struct {
 // Every service with a background worker to join on shutdown must appear here,
 // otherwise its worker leaks when the node stops.
 func (b *Bee) shutdownClosers() []namedCloser {
-	return []namedCloser{
+	closers := []namedCloser{
 		{b.pssCloser, "pss"},
 		{b.gsocCloser, "gsoc"},
 		{b.pusherCloser, "pusher"},
@@ -1679,6 +1694,11 @@ func (b *Bee) shutdownClosers() []namedCloser {
 		{b.hiveCloser, "hive"},
 		{b.saludCloser, "salud"},
 	}
+	// the providers service exists only when the setting is on
+	if b.providersCloser != nil {
+		closers = append(closers, namedCloser{b.providersCloser, "providers"})
+	}
+	return closers
 }
 
 func (b *Bee) Shutdown() error {

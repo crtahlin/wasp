@@ -107,6 +107,7 @@ type testServerOptions struct {
 	Post               postage.Service
 	AccessControl      accesscontrol.Controller
 	Steward            steward.Interface
+	Providers          api.Providers
 	WsHeaders          http.Header
 	DirectUpload       bool
 	Probe              *api.Probe
@@ -208,6 +209,7 @@ func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.
 		AccessControl:   o.AccessControl,
 		PostageContract: o.PostageContract,
 		Steward:         o.Steward,
+		Providers:       o.Providers,
 		SyncStatus:      o.SyncStatus,
 		Staking:         o.StakingContract,
 		LegacyStake:     o.LegacyStake,

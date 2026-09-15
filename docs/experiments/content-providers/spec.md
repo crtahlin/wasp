@@ -13,8 +13,9 @@ All code references are to wasp `main` at `8e53d493`, whose base is bee `v2.8.2`
 - **Provider**: a node that holds some content and says so.
 - **Requester**: a node downloading that content.
 - **Content key K**: what a provider announces.
-  - For `/bzz` and `/bytes` it is the reference as given: 32 bytes, or 64 for an
-    encrypted reference.
+  - For `/bzz` and `/bytes` it is the reference, 32 bytes. An encrypted reference
+    is 64 bytes and carries its decryption key, which a record would publish, so
+    encrypted references are never announced or looked up.
   - For a feed it is `keccak256("wasp-feed-v1" || owner || topic)`. Feeds are
     handled in phase 3.
 - **SOC**: a single owner chunk. Its address is derived from an owner key and an
@@ -171,7 +172,9 @@ hour of each window, the next one. Readers then need to read only the current wi
   - `capability` is `full` or `partial`.
   - `address` is a `bzz.Address` in its existing JSON form
     (`pkg/bzz/address.go:200`). The provider signs it fresh with `bzz.NewAddress`,
-    with at most 4 underlays, so that the payload stays small.
+    with at most 4 underlays, public addresses first, so that the payload stays
+    small. It carries no chequebook address, which a record does not need to
+    reveal.
   - A provider refuses to write a payload larger than 4096 bytes.
 
 A reader accepts a record only if all of these hold:
@@ -184,8 +187,9 @@ A reader accepts a record only if all of these hold:
 3. That Ethereum address equals the SOC owner.
 4. `v` is 1, `key` equals K, and `window` equals the current window.
 
-Addresses taken from records are used only to dial. They are never written to the
-address book.
+Addresses taken from records are used only to dial. The address book is never
+written from a record; a successful dial stores the address that the handshake
+verified, as any connection does.
 
 Signing records with the node's key cannot be confused with its other signatures:
 - handshake data starts with `"bee-handshake-"` (`address.go:139`);
@@ -309,6 +313,13 @@ only. Forwarded requests never carry a preferred set.
 - **Demotion.** After 16 misses in a row from one provider for one K, the requester
   drops that provider for that K for 10 minutes. An invalid chunk from a provider
   drops it at once.
+- **Sharing.** Downloads of the same K share one preferred set, kept until 10 minutes after
+  its last use, so
+  discovered providers and dropped providers carry over from one request to the
+  next. An explicit hint applies to its own request only, so one client's hint
+  never steers another client's downloads.
+- **Candidates.** A provider that failed this chunk in the last minute is left
+  out.
 
 ### 3. Answering as a provider
 
@@ -340,8 +351,9 @@ reserve, pins and cache. A local-only request is answered from all of it.
 
 **Announcing** (new package `pkg/providers`, with the fork copyright header).
 - **`POST /wasp/providers/{reference}`**, with `Swarm-Postage-Batch-Id`:
-  - pins the reference if it is not already pinned, reusing the pin traversal in
-    `pkg/api/pin.go`;
+  - requires the reference to be pinned already, with `POST /pins/{reference}`,
+    and returns 400 otherwise. Pinning inside this call would mean refactoring
+    upstream's `pkg/api/pin.go`, which makes every upstream sync more expensive;
   - stores K and the batch in the state store;
   - writes the record and the pointer entry for the current window. Returns 201.
 - **`DELETE /wasp/providers/{reference}`:** stops announcing. The node stays listed
@@ -613,10 +625,13 @@ Unit tests, as `package _test`:
 - `Wasp-Providers` parsing, the 8-entry cap, rejection of non-overlay entries, and
   the header being ignored when the setting is off;
 - the CORS allowed headers include it;
-- `/wasp/providers` status codes, including a light node (400) and a missing batch.
+- `/wasp/providers` status codes, including a light node (400), an unpinned
+  reference (400) and a missing batch.
 
-Before every push: `make format && make build && make test && make lint &&
-make protocol-freeze`.
+Before every push: `make build && make test && make lint && make protocol-freeze`.
+Do not run `make format` across the repository. Under make, its `gci` call gets
+an empty local prefix and regroups the imports of unrelated files; format only
+the files that changed.
 
 Node-level:
 - the mixed-version test from Protocol impact;

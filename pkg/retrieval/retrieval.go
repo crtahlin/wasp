@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/accounting"
@@ -20,6 +21,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/p2p"
 	"github.com/ethersphere/bee/v2/pkg/p2p/protobuf"
 	"github.com/ethersphere/bee/v2/pkg/pricer"
+	"github.com/ethersphere/bee/v2/pkg/ratelimit"
 	pb "github.com/ethersphere/bee/v2/pkg/retrieval/pb"
 	"github.com/ethersphere/bee/v2/pkg/safe"
 	"github.com/ethersphere/bee/v2/pkg/skippeers"
@@ -54,9 +56,10 @@ type Interface interface {
 }
 
 type retrievalResult struct {
-	chunk swarm.Chunk
-	peer  swarm.Address
-	err   error
+	chunk     swarm.Chunk
+	peer      swarm.Address
+	err       error
+	preferred bool
 }
 
 type Storer interface {
@@ -78,6 +81,13 @@ type Service struct {
 	tracer        *tracing.Tracer
 	caching       bool
 	errSkip       *skippeers.List
+
+	// providers turns on the content-providers behavior: a local-only request
+	// from a peer is answered from the local store only, and origin retrievals
+	// try the peers in a preferred set first.
+	providers       atomic.Bool
+	peerMissLimiter *ratelimit.Limiter
+	nodeMissLimiter *ratelimit.Limiter
 }
 
 func New(
@@ -105,7 +115,17 @@ func New(
 		tracer:        tracer,
 		caching:       forwarderCaching,
 		errSkip:       skippeers.NewList(time.Minute),
+		// local-only misses: 100 per second per peer, 1000 per second in total
+		peerMissLimiter: ratelimit.New(10*time.Millisecond, 100),
+		nodeMissLimiter: ratelimit.New(time.Millisecond, 1000),
 	}
+}
+
+// SetProvidersEnabled turns the content-providers behavior on or off. With it
+// on, the handler answers a request carrying LocalOnlyHeader from the local
+// store only, and origin retrievals try the peers of a preferred set first.
+func (s *Service) SetProvidersEnabled(enabled bool) {
+	s.providers.Store(enabled)
 }
 
 func (s *Service) Protocol() p2p.ProtocolSpec {
@@ -142,9 +162,24 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		return nil, fmt.Errorf("invalid address queried")
 	}
 
+	// preferred peers, such as content providers, are tried first, on origin
+	// requests only
+	var (
+		preferredSet   *PreferredSet
+		preferredPeers []swarm.Address
+	)
+	if origin && s.providers.Load() {
+		if preferredSet = PreferredPeers(ctx); preferredSet != nil {
+			preferredPeers = preferredSet.Peers()
+		}
+	}
+
 	flightRoute := chunkAddr.String()
 	if origin {
 		flightRoute = chunkAddr.String() + originSuffix
+		if fp := fingerprint(preferredPeers); fp != "" {
+			flightRoute += preferredSuffix + fp
+		}
 	}
 
 	totalRetrieveAttempts := 0
@@ -161,6 +196,20 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		defer skip.Close()
 
 		var preemptiveTicker <-chan time.Time
+
+		// preferred candidates for this chunk, tried one after the other before
+		// normal peer selection, and the timer that starts the next attempt
+		// when a preferred attempt is slow
+		candidates := s.preferredCandidates(preferredPeers, chunkAddr, s.errSkip.ChunkPeers(chunkAddr))
+		var (
+			preferredTimer  *time.Timer
+			preferredTimerC <-chan time.Time
+		)
+		defer func() {
+			if preferredTimer != nil {
+				preferredTimer.Stop()
+			}
+		}()
 
 		if !sourcePeerAddr.IsZero() {
 			skip.Forever(chunkAddr, sourcePeerAddr)
@@ -201,10 +250,30 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 				return nil, ctx.Err()
 			case <-preemptiveTicker:
 				retry()
+			case <-preferredTimerC:
+				preferredTimerC = nil
+				retry()
 			case <-retryC:
 
 				totalRetrieveAttempts++
 				s.metrics.PeerRequestCounter.Inc()
+
+				if len(candidates) > 0 {
+					peer := candidates[0]
+					candidates = candidates[1:]
+					if !s.retrievePreferred(ctx, spanCtx, quit, chunkAddr, peer, skip, resultC) {
+						retry()
+						continue
+					}
+					inflight++
+					if preferredTimer == nil {
+						preferredTimer = time.NewTimer(preferredWait)
+					} else {
+						preferredTimer.Reset(preferredWait)
+					}
+					preferredTimerC = preferredTimer.C
+					continue
+				}
 
 				fullSkip := append(skip.ChunkPeers(chunkAddr), s.errSkip.ChunkPeers(chunkAddr)...)
 				peer, err := s.closestPeer(chunkAddr, fullSkip, origin)
@@ -263,12 +332,22 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 						attribute.String("swarm.chunk.address", chunkAddr.String()),
 					))
 					defer span.End()
-					s.retrieveChunk(ctx, quit, chunkAddr, peer, resultC, action, span)
+					s.retrieveChunk(ctx, quit, chunkAddr, peer, resultC, action, span, nil, false)
 				})
 
 			case res := <-resultC:
 
 				inflight--
+
+				if res.preferred {
+					s.preferredResult(preferredSet, res)
+					// the answer is in, so the timer armed for this attempt
+					// must not start another one
+					if preferredTimer != nil {
+						preferredTimer.Stop()
+					}
+					preferredTimerC = nil
+				}
 
 				if res.err == nil {
 					loggerV1.Debug("retrieved chunk", "chunk_address", chunkAddr, "peer_address", res.peer, "peer_proximity", swarm.Proximity(res.peer.Bytes(), chunkAddr.Bytes()))
@@ -277,6 +356,14 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 
 				loggerV1.Debug("failed to get chunk", "chunk_address", chunkAddr, "peer_address", res.peer,
 					"peer_proximity", swarm.Proximity(res.peer.Bytes(), chunkAddr.Bytes()), "error", res.err)
+
+				if res.preferred {
+					// a miss at a preferred peer is not a peer error: it does
+					// not use up an allowed error, and it does not skip the
+					// peer for other chunks
+					retry()
+					continue
+				}
 
 				errorsLeft--
 				s.errSkip.Add(chunkAddr, res.peer, skiplistDur)
@@ -297,7 +384,7 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 	return v, nil
 }
 
-func (s *Service) retrieveChunk(ctx context.Context, quit chan struct{}, chunkAddr, peer swarm.Address, result chan retrievalResult, action accounting.Action, span trace.Span) {
+func (s *Service) retrieveChunk(ctx context.Context, quit chan struct{}, chunkAddr, peer swarm.Address, result chan retrievalResult, action accounting.Action, span trace.Span, headers p2p.Headers, preferred bool) {
 	var (
 		startTime = time.Now()
 		err       error
@@ -313,7 +400,7 @@ func (s *Service) retrieveChunk(ctx context.Context, quit chan struct{}, chunkAd
 			span.SetAttributes(attribute.Bool("swarm.operation.success", true))
 		}
 		select {
-		case result <- retrievalResult{err: err, chunk: chunk, peer: peer}:
+		case result <- retrievalResult{err: err, chunk: chunk, peer: peer, preferred: preferred}:
 		case <-quit:
 			return
 		}
@@ -322,7 +409,7 @@ func (s *Service) retrieveChunk(ctx context.Context, quit chan struct{}, chunkAd
 	ctx, cancel := context.WithTimeout(ctx, RetrieveChunkTimeout)
 	defer cancel()
 
-	stream, err := s.streamer.NewStream(ctx, peer, nil, protocolName, protocolVersion, streamName)
+	stream, err := s.streamer.NewStream(ctx, peer, headers, protocolName, protocolVersion, streamName)
 	if err != nil {
 		err = fmt.Errorf("new stream: %w", err)
 		return
@@ -467,6 +554,10 @@ func (s *Service) handler(p2pctx context.Context, p p2p.Peer, stream p2p.Stream)
 	chunk, err := s.storer.Lookup().Get(ctx, addr)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
+			// a local-only request is answered from the local store only
+			if _, ok := stream.Headers()[LocalOnlyHeader]; ok && s.providers.Load() {
+				return s.localOnlyMiss(p.Address)
+			}
 			// forward the request
 			chunk, err = s.RetrieveChunk(ctx, addr, p.Address)
 			if err != nil {

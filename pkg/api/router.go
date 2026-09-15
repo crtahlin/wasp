@@ -412,6 +412,19 @@ func (s *Service) mountAPI() {
 		"GET": http.HandlerFunc(s.stewardshipGetHandler),
 		"PUT": http.HandlerFunc(s.stewardshipPutHandler),
 	})
+
+	handle("/wasp/providers", jsonhttp.MethodHandler{
+		"GET": http.HandlerFunc(s.providersListHandler),
+	})
+
+	handle("/wasp/providers/{reference}", jsonhttp.MethodHandler{
+		"POST":   http.HandlerFunc(s.providersAnnounceHandler),
+		"DELETE": http.HandlerFunc(s.providersWithdrawHandler),
+	})
+
+	handle("/wasp/providers/{reference}/lookup", jsonhttp.MethodHandler{
+		"GET": http.HandlerFunc(s.providersLookupHandler),
+	})
 }
 
 func (s *Service) mountBusinessDebug() {
