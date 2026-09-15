@@ -25,8 +25,8 @@ The terms of [spec.md](spec.md) apply. In addition:
 - **Bloom filter**: a compact bit array built from a set of addresses. It answers
   "possibly in the set" or "certainly not in the set". The share of wrong
   "possibly" answers is its false-positive rate.
-- **Summary**: a Bloom filter of the chunk addresses a node holds, sent to its
-  connected peers (part C).
+- **Summary**: a Bloom filter of some of the chunk addresses a node holds, sent to
+  its connected peers. Part C says which addresses.
 - **Hot set**: the chunks a node accessed most recently.
 - **User agent**: the free-text name and version a libp2p node announces to its
   peers when they connect.
@@ -83,7 +83,7 @@ These findings decide which gaps are worth closing. Each was checked in the code
   light peers. As an illustration, 100 viewers of a 5 Mbit/s stream need up to
   500 Mbit/s from that one node, if all of them fetch through it. No light node can
   take any of that load, because light nodes have no connections to each other.
-- A light node's cache can only save its full peer a fetch from further away. The
+- A light node's cache can only save its full peer a fetch from farther away. The
   full peer usually already has the chunk: it cached it when it relayed it
   (finding 1).
 
@@ -110,10 +110,11 @@ These findings decide which gaps are worth closing. Each was checked in the code
   debt to it grows past what it allows.
   - A light node grants a refresh of 450,000 units per second
     (`node.go:232-234`, `node.go:1219-1221`, `node.go:1240`).
-  - The full node checks the refresh it receives against the full-node rate,
-    4,500,000, for every peer (`pkg/accounting/accounting.go:1131-1142`). The debit
-    side already uses the light rate for light peers (`accounting.go:741-743`,
-    `accounting.go:1337-1339`).
+  - The full node is the one in debt, so it sends the refresh. It then checks the
+    amount the light node accepted against the full-node rate, 4,500,000, for every
+    peer (`pkg/accounting/accounting.go:1084`, check at `accounting.go:1131-1142`).
+    When it applies a debit, it already uses the light rate for light peers
+    (`accounting.go:1337-1339`).
   - Stock Bee never meets this case, since full nodes never owe light nodes.
   - Light-node serving therefore needs one of two things: serving free of charge on
     both sides, or a wasp full node that checks light peers against the light rate.
@@ -169,9 +170,10 @@ so part A needs a new accessor.
 **Accounting.** The relaying node charges the requester its own price for the chunk
 (`retrieval.go:572`) and pays the provider the provider's price (`retrieval.go:459`).
 A price falls as the node gets closer to the chunk (`pkg/pricer/pricer.go:34-36`).
-- Normal forwarding goes to a peer closer to the chunk, so a relaying node earns more
-  than it pays.
-- A named provider may be further from the chunk than the relaying node, and then the
+- Normal forwarding goes only to a peer closer to the chunk (`retrieval.go:497-503`),
+  so a relaying node earns at least what it pays. The price depends only on
+  proximity order, so the two prices are often equal.
+- A named provider may be farther from the chunk than the relaying node, and then the
   relaying node loses money on that chunk. For a random chunk, the provider is the
   closer of the two about half of the time.
 - A slow provider attempt is not canceled (`preferred.go:34-36`), so the relaying
@@ -281,7 +283,18 @@ header does not, and it cannot reach beyond connected peers" (spec.md, section 1
   Across a whole file at a 1% false-positive rate, the answer is close to certain.
   This is the spec's reason never to announce the cache (spec.md, section 3). The
   cache does not record where a chunk came from today, so the spec must add that
-  marker, or a node that downloads through its API must not send summaries.
+  marker, or a node that downloads through its API must not send summaries. The
+  marker must keep its first value: the cache writer returns early when an entry
+  already exists (`cache.go:90-93`), so a chunk first downloaded through the API and
+  later relayed must stay marked as a download.
+- **Not chunks relayed for light peers, by default.** Every request from a light
+  peer is that peer's own download (see the table in part A), and a full node can
+  have up to 100 light peers. Its relayed cache therefore holds largely their
+  downloads. A connected wasp peer could test a known reference against the summary
+  and learn that this node, or one of its few light peers, fetched it. Those light
+  peers never chose to share that. Options for the spec: leave out chunks relayed
+  for light peers, using the same marker, or summarize only chunks requested by at
+  least N different peers.
 - The hot set first. The cache order index is keyed by access time
   (`pkg/storer/internal/cache/cache.go:371-392`), so the most recently used chunks
   can be taken up to a cap.
@@ -316,9 +329,11 @@ Stale entries cost only a local-only miss.
 
 **Privacy.**
 - A summary shows connected wasp peers which chunks the node relayed for others and
-  which it pinned. A peer on a request path already sees only the requests routed
-  to it, so this is new information, and sending summaries is a setting of its own,
-  off by default.
+  which it pinned. A peer on a request path sees only the requests routed to it, so
+  this is new information, and sending summaries is a setting of its own, off by
+  default.
+- Relayed chunks can still point to a small group of requesters. That is why chunks
+  relayed for light peers are left out, or counted across peers (see Content).
 - The requester side learns nothing new, since the node asks its own peers, as in
   normal routing.
 
@@ -338,8 +353,9 @@ gated on measurement, as the spec already says.
 - Her node reads the event's provider records, published by the broadcaster's full
   node, and sends her requests, naming that provider, to her connected wasp full
   peers.
-- Each of them fetches from the provider in one hop. The provider sees those full
-  nodes, never Ana.
+- Each of them that is connected to the provider fetches from it in one hop. Whether
+  a relaying node connects to a provider it is not yet connected to is still open.
+  The provider sees those full nodes, never Ana.
 - If none of her peers runs wasp, she gets exactly today's behavior.
 
 **2. A gateway that shares its cache without an administrator.**
@@ -400,6 +416,8 @@ availability. Passive sharing is filed under phase 2, so it waits for that resul
 If speed shows no gain but availability holds, parts A and B are still worth
 building for availability: A is how a requester would use a provider without
 revealing itself to it, and B is how content that nobody pinned gets announced.
+Building them after such a result is an exception to that rule of spec.md, and the
+part A and B spec changes amend it.
 
 **Before part C is specified.** Its value depends on how often a connected peer
 holds a chunk that the node lacks. That cannot be measured on the network while few
@@ -431,11 +449,12 @@ A simulation informs the decision; it is not a performance claim.
 
 **Open questions for the specs:**
 - the header names (see Protocol impact);
-- the accounting rule for part A: providers no dearer than the relaying node, or a
-  capped loss;
+- the accounting rule for part A: providers no more expensive than the relaying
+  node, or a capped loss;
 - whether part A passes requests on with some probability, as in Crowds;
 - whether a relaying node dials a named provider that is not connected;
 - N, the size cap and the reference cap for part B;
-- how the cache marks relayed chunks, the summary cap and the period for part C.
+- how the cache marks relayed and downloaded chunks, and which relayed chunks count,
+  plus the summary cap and the period for part C.
 
 Generated with help of AI.
