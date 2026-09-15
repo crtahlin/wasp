@@ -57,6 +57,9 @@ type Record struct {
 // the provider says it holds content key k during window w. The address must
 // be signed by the same key and carry between 1 and MaxUnderlays underlays.
 func NewRecordChunk(signer crypto.Signer, k []byte, w uint64, addr *bzz.Address, capability Capability) (swarm.Chunk, error) {
+	if err := checkKey(k); err != nil {
+		return nil, err
+	}
 	if addr == nil || len(addr.Underlays) == 0 || len(addr.Underlays) > MaxUnderlays {
 		return nil, fmt.Errorf("%w: the address must carry 1 to %d underlays", ErrInvalidRecord, MaxUnderlays)
 	}
@@ -138,6 +141,9 @@ type slotJSON struct {
 // the provider owners and signed with the index key of k. It holds at most
 // MaxSlotEntries owners.
 func NewSlotChunk(k []byte, w uint64, i int, owners [][]byte) (swarm.Chunk, error) {
+	if err := checkKey(k); err != nil {
+		return nil, err
+	}
 	if i < 0 || i >= Slots {
 		return nil, fmt.Errorf("%w: slot %d", ErrInvalidRecord, i)
 	}
@@ -228,6 +234,15 @@ func containsOwner(owners [][]byte, o []byte) bool {
 		}
 	}
 	return false
+}
+
+// checkKey refuses a content key that is not 32 bytes. An encrypted reference
+// is 64 bytes and carries its decryption key, which a record would publish.
+func checkKey(k []byte) error {
+	if len(k) != swarm.HashSize {
+		return fmt.Errorf("%w: content key of %d bytes, want %d", ErrInvalidRecord, len(k), swarm.HashSize)
+	}
+	return nil
 }
 
 func validCapability(c Capability) bool {

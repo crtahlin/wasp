@@ -177,13 +177,13 @@ func localOnlyHeaders() p2p.Headers {
 }
 
 // preferredCandidates returns at most maxPreferredAttempts peers from peers
-// that are connected full nodes, ordered by closeness to the chunk. Light
-// peers never enter the topology's connected set, which matters because a
-// light node blocklists a peer that opens a retrieval stream to it.
-func (s *Service) preferredCandidates(peers []swarm.Address, chunkAddr swarm.Address) []swarm.Address {
+// that are connected full nodes and not in skip, ordered by closeness to the
+// chunk. Light peers never enter the topology's connected set, which matters
+// because a light node blocklists a peer that opens a retrieval stream to it.
+func (s *Service) preferredCandidates(peers []swarm.Address, chunkAddr swarm.Address, skip []swarm.Address) []swarm.Address {
 	candidates := make([]swarm.Address, 0, len(peers))
 	for _, a := range peers {
-		if a.Equal(s.addr) || !s.connectedFullNode(a) {
+		if a.Equal(s.addr) || swarm.ContainsAddress(skip, a) || !s.connectedFullNode(a) {
 			continue
 		}
 		candidates = append(candidates, a)

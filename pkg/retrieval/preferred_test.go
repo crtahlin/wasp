@@ -246,16 +246,77 @@ func TestLocalOnlyLimit(t *testing.T) {
 }
 
 // TestPreferredOnlyConnected tests that a preferred peer that is not a
-// connected full node is never asked.
+// connected full node is never asked, even though it would answer.
 func TestPreferredOnlyConnected(t *testing.T) {
 	t.Parallel()
 
-	f := newProviderFixture(t, true, nil, nil)
-	stranger := swarm.RandAddress(t)
-	f.retrieve(t, stranger)
+	var (
+		chunk        = testingc.FixtureChunk("0033")
+		clientAddr   = swarm.RandAddress(t)
+		strangerAddr = swarm.RandAddress(t)
+		holderAddr   = swarm.RandAddress(t)
+		pricer       = pricermock.NewMockService(defaultPrice, defaultPrice)
+	)
 
-	if _, err := f.recorder.Records(stranger, "retrieval", "1.4.0", "retrieval"); !errors.Is(err, streamtest.ErrRecordsNotFound) {
-		t.Fatalf("a peer that is not connected was asked: %v", err)
+	newHolder := func(addr swarm.Address) *retrieval.Service {
+		st := &testStorer{ChunkStore: inmemchunkstore.New()}
+		if err := st.Put(context.Background(), chunk); err != nil {
+			t.Fatal(err)
+		}
+		return createRetrieval(t, addr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	}
+	holder := newHolder(holderAddr)
+	// the stranger holds the chunk and has a handler, but is not connected
+	stranger := newHolder(strangerAddr)
+	stranger.SetProvidersEnabled(true)
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{
+			strangerAddr.String(): stranger.Protocol(),
+			holderAddr.String():   holder.Protocol(),
+		}),
+	)
+	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		topologymock.NewTopologyDriver(topologymock.WithPeers(holderAddr)), log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	client.SetProvidersEnabled(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(strangerAddr))
+	if _, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := recorder.Records(strangerAddr, "retrieval", "1.4.0", "retrieval"); !errors.Is(err, streamtest.ErrRecordsNotFound) {
+		t.Fatalf("a preferred peer that is not connected was asked: %v", err)
+	}
+}
+
+// TestPreferredInvalidChunkDemotes tests that a provider that delivers data
+// not matching the chunk address is dropped at once, and that the chunk is
+// then retrieved normally.
+func TestPreferredInvalidChunkDemotes(t *testing.T) {
+	t.Parallel()
+
+	f := newProviderFixture(t, true, nil, nil)
+	bad := swarm.NewChunk(f.chunk.Address(), []byte("these bytes are not the chunk"))
+	if err := f.providerStorer.Put(context.Background(), bad); err != nil {
+		t.Fatal(err)
+	}
+
+	set := retrieval.NewPreferredSet(f.providerAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	got, err := f.client.RetrieveChunk(retrieval.WithPreferredPeers(ctx, set), f.chunk.Address(), swarm.ZeroAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Data(), f.chunk.Data()) {
+		t.Fatal("retrieved data differs from the chunk")
+	}
+	if swarm.ContainsAddress(set.Peers(), f.providerAddr) {
+		t.Fatal("a provider that delivered an invalid chunk was not dropped")
 	}
 }
 

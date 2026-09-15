@@ -113,13 +113,21 @@ var batch = bytes.Repeat([]byte{1}, 32)
 
 func newService(t *testing.T, n *network, nd node, c *clock, connect func(context.Context, *bzz.Address) error) *providers.Service {
 	t.Helper()
+	return newServiceWith(t, n, n, nd, c, connect)
+}
+
+// newServiceWith builds a service whose lookups read local, which stands for
+// the node's own store in front of the network, and whose read-backs and
+// uploads use n, the network itself.
+func newServiceWith(t *testing.T, local, n *network, nd node, c *clock, connect func(context.Context, *bzz.Address) error) *providers.Service {
+	t.Helper()
 
 	svc, err := providers.New(providers.Options{
 		Logger:    log.Noop,
 		NetworkID: networkID,
 		Overlay:   nd.addr.Overlay,
 		Signer:    nd.signer,
-		Getter:    n,
+		Getter:    local,
 		Fetcher:   n,
 		Uploader:  n.session,
 		Stamper: func([]byte) (postage.Stamper, func() error, error) {
@@ -311,6 +319,86 @@ func TestReadBackRewritesLostEntry(t *testing.T) {
 	}
 }
 
+// TestReadBackIgnoresLocalCopy tests that the read-back asks the network, not
+// the node's own store, which can still hold an entry the network has lost.
+func TestReadBackIgnoresLocalCopy(t *testing.T) {
+	t.Parallel()
+
+	n, local, c := newNetwork(), newNetwork(), &clock{t: midWindow(1000)}
+	a := newNode(t, 1)
+	pa := newServiceWith(t, local, n, a, c, nil)
+	k := swarm.RandAddress(t).Bytes()
+
+	if err := pa.Announce(context.Background(), k, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	slot := slotAddress(t, k, 1000, a.owner)
+	ch, err := n.Get(context.Background(), slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.session().Put(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+	n.delete(slot)
+
+	c.set(c.now().Add(2 * time.Minute))
+	pa.RunOnce(context.Background())
+
+	if !n.has(slot) {
+		t.Fatal("the read-back trusted the local copy and did not write the entry again")
+	}
+}
+
+// TestLookupSkipsJunkEntries tests that a lookup returns only providers whose
+// records verify, whatever else the open index lists.
+func TestLookupSkipsJunkEntries(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+	pa := newService(t, n, a, c, nil)
+	reader := newService(t, n, b, c, nil)
+	k := swarm.RandAddress(t).Bytes()
+
+	if err := pa.Announce(context.Background(), k, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	// another slot lists owners that have no record
+	junk := [][]byte{swarm.RandAddress(t).Bytes()[:20], swarm.RandAddress(t).Bytes()[:20]}
+	i := (providers.SlotFor(a.owner) + 1) % providers.Slots
+	ch, err := providers.NewSlotChunk(k, 1000, i, junk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.session().Put(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := reader.Lookup(context.Background(), k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || !bytes.Equal(records[0].Owner, a.owner) {
+		t.Fatalf("lookup returned %d records, want only the provider's", len(records))
+	}
+}
+
+func TestEncryptedReferenceRefused(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	pa := newService(t, n, newNode(t, 1), c, nil)
+
+	// 64 bytes: a reference followed by its decryption key
+	k := append(swarm.RandAddress(t).Bytes(), swarm.RandAddress(t).Bytes()...)
+	if err := pa.Announce(context.Background(), k, batch); err == nil {
+		t.Fatal("an encrypted reference was announced; its record would publish the key")
+	}
+}
+
 func TestWithdraw(t *testing.T) {
 	t.Parallel()
 
@@ -340,11 +428,11 @@ func TestDiscover(t *testing.T) {
 	a, b := newNode(t, 1), newNode(t, 1)
 
 	var mu sync.Mutex
-	var dialled []swarm.Address
+	var dialed []swarm.Address
 	connect := func(_ context.Context, addr *bzz.Address) error {
 		mu.Lock()
 		defer mu.Unlock()
-		dialled = append(dialled, addr.Overlay)
+		dialed = append(dialed, addr.Overlay)
 		return nil
 	}
 
@@ -372,7 +460,7 @@ func TestDiscover(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(dialled) != 1 || !dialled[0].Equal(a.addr.Overlay) {
-		t.Fatalf("dialled %v, want the provider once", dialled)
+	if len(dialed) != 1 || !dialed[0].Equal(a.addr.Overlay) {
+		t.Fatalf("dialed %v, want the provider once", dialed)
 	}
 }

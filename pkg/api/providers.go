@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 	"github.com/ethersphere/bee/v2/pkg/postage"
@@ -22,7 +23,7 @@ import (
 )
 
 // WaspProvidersHeader names providers, by overlay, that a download tries
-// first. It is honoured only when content providers are on.
+// first. It is honored only when content providers are on.
 const WaspProvidersHeader = "Wasp-Providers"
 
 const (
@@ -32,6 +33,11 @@ const (
 	// looks up providers of its content. Smaller downloads cannot gain
 	// enough to pay for a lookup.
 	discoverAfterChunks = 64
+	// providerSetTTL is how long the preferred set of a content key is shared
+	// by its downloads, the same as the lookup cache.
+	providerSetTTL = 10 * time.Minute
+	// maxProviderSets bounds the number of shared preferred sets.
+	maxProviderSets = 1024
 )
 
 var errProvidersHeader = errors.New("invalid Wasp-Providers header: want comma-separated hex overlays")
@@ -75,7 +81,20 @@ func (s *Service) withProviders(r *http.Request, k []byte) (*http.Request, error
 		return nil, err
 	}
 
-	hint := &providerHint{set: retrieval.NewPreferredSet(overlays...), key: k}
+	// an encrypted reference carries its decryption key; only plain
+	// references are looked up
+	if len(k) != swarm.HashSize {
+		k = nil
+	}
+
+	// an explicit hint applies to this request only; otherwise the discovered
+	// providers, and which of them were dropped, are shared by all downloads
+	// of the same content key
+	set := retrieval.NewPreferredSet(overlays...)
+	if len(overlays) == 0 && k != nil {
+		set = s.providerSet(k)
+	}
+	hint := &providerHint{set: set, key: k}
 	ctx := retrieval.WithPreferredPeers(r.Context(), hint.set)
 	ctx = context.WithValue(ctx, providerHintKey{}, hint)
 	if len(overlays) > 0 {
@@ -94,10 +113,50 @@ func (s *Service) providerGetter(ctx context.Context, g storage.Getter) storage.
 	}
 	return storage.GetterFunc(func(ctx context.Context, addr swarm.Address) (swarm.Chunk, error) {
 		if hint.fetched.Add(1) == discoverAfterChunks {
-			s.providers.Discover(ctx, hint.key, hint.set)
+			// the lookup's own reads must not go to this download's
+			// preferred peers
+			s.providers.Discover(retrieval.WithPreferredPeers(ctx, nil), hint.key, hint.set)
 		}
 		return g.Get(ctx, addr)
 	})
+}
+
+type providerSetEntry struct {
+	set     *retrieval.PreferredSet
+	expires time.Time
+}
+
+// providerSet returns the preferred set shared by all downloads of content
+// key k for providerSetTTL, so that discovered providers, and the providers
+// dropped for missing chunks, carry over from one request to the next.
+func (s *Service) providerSet(k []byte) *retrieval.PreferredSet {
+	s.providerSetsMu.Lock()
+	defer s.providerSetsMu.Unlock()
+
+	now := time.Now()
+	if e, ok := s.providerSets[string(k)]; ok && now.Before(e.expires) {
+		return e.set
+	}
+	if s.providerSets == nil {
+		s.providerSets = make(map[string]providerSetEntry)
+	}
+	if len(s.providerSets) >= maxProviderSets {
+		for key, e := range s.providerSets {
+			if !now.Before(e.expires) {
+				delete(s.providerSets, key)
+			}
+		}
+		for key := range s.providerSets {
+			if len(s.providerSets) < maxProviderSets {
+				break
+			}
+			delete(s.providerSets, key)
+		}
+	}
+
+	set := retrieval.NewPreferredSet()
+	s.providerSets[string(k)] = providerSetEntry{set: set, expires: now.Add(providerSetTTL)}
+	return set
 }
 
 // parseProviderHints parses WaspProvidersHeader. Only overlays are accepted,
@@ -170,6 +229,11 @@ func (s *Service) providersAnnounceHandler(w http.ResponseWriter, r *http.Reques
 		response("invalid path params", logger, w)
 		return
 	}
+	if len(paths.Reference.Bytes()) != swarm.HashSize {
+		jsonhttp.BadRequest(w, "encrypted references cannot be announced: a record would publish their key")
+		return
+	}
+
 	headers := struct {
 		BatchID []byte `map:"Swarm-Postage-Batch-Id" validate:"required"`
 	}{}
@@ -274,6 +338,11 @@ func (s *Service) providersLookupHandler(w http.ResponseWriter, r *http.Request)
 	}{}
 	if response := s.mapStructure(mux.Vars(r), &paths); response != nil {
 		response("invalid path params", logger, w)
+		return
+	}
+
+	if len(paths.Reference.Bytes()) != swarm.HashSize {
+		jsonhttp.BadRequest(w, "encrypted references are not looked up")
 		return
 	}
 

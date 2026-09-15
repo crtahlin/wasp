@@ -17,6 +17,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/bzz"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
 	"github.com/ethersphere/bee/v2/pkg/postage"
+	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
 	"github.com/ethersphere/bee/v2/pkg/providers"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
@@ -26,12 +27,13 @@ import (
 
 // fakeProviders records what the API asks of the content-providers service.
 type fakeProviders struct {
-	mu        sync.Mutex
-	err       error
-	announced []providers.Announcement
-	withdrawn [][]byte
-	records   []*providers.Record
-	hints     []swarm.Address
+	mu         sync.Mutex
+	err        error
+	announced  []providers.Announcement
+	withdrawn  [][]byte
+	records    []*providers.Record
+	hints      []swarm.Address
+	discovered [][]byte
 }
 
 func (f *fakeProviders) Announce(_ context.Context, k, batchID []byte) error {
@@ -61,7 +63,11 @@ func (f *fakeProviders) Lookup(context.Context, []byte) ([]*providers.Record, er
 	return f.records, nil
 }
 
-func (f *fakeProviders) Discover(context.Context, []byte, providers.Adder) {}
+func (f *fakeProviders) Discover(_ context.Context, k []byte, _ providers.Adder) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.discovered = append(f.discovered, k)
+}
 
 func (f *fakeProviders) ConnectHints(_ context.Context, overlays []swarm.Address) {
 	f.mu.Lock()
@@ -229,6 +235,53 @@ func TestProvidersHeader(t *testing.T) {
 		if h.String() != overlays[i] {
 			t.Fatalf("hint %d is %s, want %s", i, h, overlays[i])
 		}
+	}
+}
+
+// TestProvidersDiscoverAfterManyChunks tests that a /bytes download looks up
+// providers of its reference only once it has fetched enough chunks, and that
+// a hint on /bytes reaches the service.
+func TestProvidersDiscoverAfterManyChunks(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeProviders{}
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:    mockstorer.New(),
+		Post:      mockpost.New(mockpost.WithAcceptAll()),
+		Providers: fake,
+	})
+
+	upload := func(chunks int) swarm.Address {
+		t.Helper()
+		content := make([]byte, chunks*swarm.ChunkSize)
+		for i := range content {
+			content[i] = byte(i*7 + chunks)
+		}
+		var resp api.BytesPostResponse
+		jsonhttptest.Request(t, client, http.MethodPost, "/bytes", http.StatusCreated,
+			jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
+			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
+			jsonhttptest.WithRequestHeader(api.SwarmRedundancyLevelHeader, "0"),
+			jsonhttptest.WithRequestBody(bytes.NewReader(content)),
+			jsonhttptest.WithUnmarshalJSONResponse(&resp),
+		)
+		return resp.Reference
+	}
+	small, large := upload(10), upload(100)
+	hint := swarm.RandAddress(t)
+
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+small.String(), http.StatusOK)
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+large.String(), http.StatusOK,
+		jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, hint.String()),
+	)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.discovered) != 1 || !bytes.Equal(fake.discovered[0], large.Bytes()) {
+		t.Fatalf("looked up %x, want only the large download's reference", fake.discovered)
+	}
+	if len(fake.hints) != 1 || !fake.hints[0].Equal(hint) {
+		t.Fatalf("hints %v, want the one named on /bytes", fake.hints)
 	}
 }
 

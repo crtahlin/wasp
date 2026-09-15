@@ -391,14 +391,12 @@
 ## enable pprof block profile
 # pprof-profile: false
 
-## content providers (wasp): announce pinned content through /wasp/providers,
-## look up providers for larger downloads, honour the Wasp-Providers download
-## header, and answer peers' local-only requests from the local store without
-## forwarding. Turning it on as a provider costs stamp slots for records and
-## upload bandwidth, and publishes which content the node holds; as a
-## requester it costs up to 24 extra retrievals per new content key, some of
-## them unpaid work for the nodes that forward them. Off costs nothing.
-## See docs/experiments/content-providers/spec.md
+## content providers: announce pinned content through /wasp/providers, look up
+## providers for larger downloads, honor the Wasp-Providers download header,
+## and answer local-only requests from peers. Off by default. Announcing costs
+## stamp slots and publishes which content this node holds; lookups cost extra
+## retrievals, some of them unpaid work for the nodes that forward them. See
+## docs/experiments/content-providers/spec.md
 # providers-enable: false
 
 ## forces the node to resync postage contract data

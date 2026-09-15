@@ -82,7 +82,7 @@ type Service struct {
 	caching       bool
 	errSkip       *skippeers.List
 
-	// providers turns on the content-providers behaviour: a local-only request
+	// providers turns on the content-providers behavior: a local-only request
 	// from a peer is answered from the local store only, and origin retrievals
 	// try the peers in a preferred set first.
 	providers       atomic.Bool
@@ -121,7 +121,7 @@ func New(
 	}
 }
 
-// SetProvidersEnabled turns the content-providers behaviour on or off. With it
+// SetProvidersEnabled turns the content-providers behavior on or off. With it
 // on, the handler answers a request carrying LocalOnlyHeader from the local
 // store only, and origin retrievals try the peers of a preferred set first.
 func (s *Service) SetProvidersEnabled(enabled bool) {
@@ -200,7 +200,7 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		// preferred candidates for this chunk, tried one after the other before
 		// normal peer selection, and the timer that starts the next attempt
 		// when a preferred attempt is slow
-		candidates := s.preferredCandidates(preferredPeers, chunkAddr)
+		candidates := s.preferredCandidates(preferredPeers, chunkAddr, s.errSkip.ChunkPeers(chunkAddr))
 		var (
 			preferredTimer  *time.Timer
 			preferredTimerC <-chan time.Time
@@ -341,6 +341,12 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 
 				if res.preferred {
 					s.preferredResult(preferredSet, res)
+					// the answer is in, so the timer armed for this attempt
+					// must not start another one
+					if preferredTimer != nil {
+						preferredTimer.Stop()
+					}
+					preferredTimerC = nil
 				}
 
 				if res.err == nil {

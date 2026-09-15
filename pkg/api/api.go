@@ -165,6 +165,8 @@ type Service struct {
 	gsoc            gsoc.Listener
 	steward         steward.Interface
 	providers       Providers
+	providerSetsMu  sync.Mutex
+	providerSets    map[string]providerSetEntry
 	logger          log.Logger
 	loggerV1        log.Logger
 	tracer          *tracing.Tracer

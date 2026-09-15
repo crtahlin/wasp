@@ -94,7 +94,7 @@ type Options struct {
 	// Connect connects to a provider found by a lookup, without forcing past
 	// a full bin. It may be nil.
 	Connect func(ctx context.Context, addr *bzz.Address) error
-	// Resolve returns a peer's address from the address book, for dialling
+	// Resolve returns a peer's address from the address book, for dialing
 	// an overlay named in a download hint. It may be nil.
 	Resolve func(overlay swarm.Address) (*bzz.Address, error)
 	// Store keeps the announced content keys across restarts.
@@ -124,6 +124,10 @@ type Service struct {
 	cache  map[string]cacheEntry
 	checks []readBack
 	warned map[string]uint64
+	closed bool
+
+	// annMu keeps a withdrawal from racing the loop's save of the same key.
+	annMu sync.Mutex
 }
 
 type cacheEntry struct {
@@ -180,9 +184,27 @@ func (s *Service) Start() {
 
 // Close stops the loop and any running lookups.
 func (s *Service) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	s.cancel()
 	s.wg.Wait()
 	return nil
+}
+
+// goBackground runs f in a goroutine that Close waits for, unless the service
+// is already closed.
+func (s *Service) goBackground(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		f()
+	}()
 }
 
 // Announce makes this node announce content key k, writing records and
@@ -195,16 +217,29 @@ func (s *Service) Announce(ctx context.Context, k, batchID []byte) error {
 	}
 	a := Announcement{Key: k, BatchID: batchID, Written: []uint64{w}}
 	s.publishDue(ctx, &a)
+
+	s.annMu.Lock()
+	defer s.annMu.Unlock()
 	return s.save(a)
 }
 
 // Withdraw stops announcing content key k. The node stays listed until the
 // last window it wrote ends.
 func (s *Service) Withdraw(k []byte) error {
+	s.annMu.Lock()
+	defer s.annMu.Unlock()
+
 	s.mu.Lock()
 	s.checks = slices.DeleteFunc(s.checks, func(c readBack) bool { return string(c.key) == string(k) })
+	delete(s.warned, string(k))
 	s.mu.Unlock()
 	return s.opts.Store.Delete(announcedKey(k))
+}
+
+// isAnnounced reports whether content key k is still announced.
+func (s *Service) isAnnounced(k []byte) bool {
+	var a Announcement
+	return s.opts.Store.Get(announcedKey(k), &a) == nil
 }
 
 // Announced returns the content keys this node announces.
@@ -248,6 +283,13 @@ func (s *Service) Lookup(ctx context.Context, k []byte) ([]*Record, error) {
 				delete(s.cache, ck)
 			}
 		}
+		// still full of live entries: drop any, so the cache stays bounded
+		for ck := range s.cache {
+			if len(s.cache) < lookupCacheMax {
+				break
+			}
+			delete(s.cache, ck)
+		}
 	}
 	s.cache[key] = cacheEntry{records: records, expires: now.Add(lookupCacheTTL)}
 	s.mu.Unlock()
@@ -259,13 +301,7 @@ func (s *Service) Lookup(ctx context.Context, k []byte) ([]*Record, error) {
 // connects to them, and adds their overlays to set. It stops when ctx is done
 // or the service closes.
 func (s *Service) Discover(ctx context.Context, k []byte, set Adder) {
-	if s.ctx.Err() != nil {
-		return
-	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-
+	s.goBackground(func() {
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		stop := context.AfterFunc(s.ctx, cancel)
@@ -279,27 +315,26 @@ func (s *Service) Discover(ctx context.Context, k []byte, set Adder) {
 			if r.Address.Overlay.Equal(s.opts.Overlay) {
 				continue
 			}
+			// add first: the preferred set only uses connected peers, so a
+			// provider that is already connected is useful at once
+			set.Add(r.Address.Overlay)
 			if s.opts.Connect != nil {
 				if err := s.opts.Connect(ctx, r.Address); err != nil {
 					s.logger.Debug("connect to provider failed", "peer_address", r.Address.Overlay, "error", err)
 				}
 			}
-			set.Add(r.Address.Overlay)
 		}
-	}()
+	})
 }
 
 // ConnectHints connects, in the background, to the overlays named in a
 // download hint that the address book knows. It stops when ctx is done or the
 // service closes.
 func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
-	if s.opts.Resolve == nil || s.opts.Connect == nil || s.ctx.Err() != nil {
+	if s.opts.Resolve == nil || s.opts.Connect == nil {
 		return
 	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-
+	s.goBackground(func() {
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		stop := context.AfterFunc(s.ctx, cancel)
@@ -318,7 +353,7 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
 				s.logger.Debug("connect to hinted provider failed", "peer_address", o, "error", err)
 			}
 		}
-	}()
+	})
 }
 
 // runOnce writes the windows that are due for every announcement and
@@ -332,7 +367,7 @@ func (s *Service) runOnce(ctx context.Context) {
 	for i := range announcements {
 		a := announcements[i]
 		if s.publishDue(ctx, &a) {
-			if err := s.save(a); err != nil {
+			if err := s.saveIfAnnounced(a); err != nil {
 				s.logger.Debug("save announcement failed", "key", hex.EncodeToString(a.Key), "error", err)
 			}
 		}
@@ -415,6 +450,9 @@ func (s *Service) processChecks(ctx context.Context) {
 
 	i := SlotFor(s.owner)
 	for _, c := range due {
+		if !s.isAnnounced(c.key) {
+			continue
+		}
 		owners, _ := s.readSlot(ctx, s.fetch, c.key, c.window, i)
 		if containsOwner(owners, s.owner) {
 			continue
@@ -559,6 +597,17 @@ func (s *Service) upload(ctx context.Context, batchID []byte, chunks ...swarm.Ch
 
 func (s *Service) save(a Announcement) error {
 	return s.opts.Store.Put(announcedKey(a.Key), a)
+}
+
+// saveIfAnnounced saves a, unless it was withdrawn while the loop was
+// publishing it.
+func (s *Service) saveIfAnnounced(a Announcement) error {
+	s.annMu.Lock()
+	defer s.annMu.Unlock()
+	if !s.isAnnounced(a.Key) {
+		return nil
+	}
+	return s.save(a)
 }
 
 // warnOnce logs a failed write once per content key and window, so an

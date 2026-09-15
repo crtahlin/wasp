@@ -21,14 +21,20 @@ could not serve what it announced.
 ## What announcing costs
 
 - **Stamp slots.** Every 12 hours the node writes one record and one pointer
-  entry per announced reference, and sometimes rewrites a lost pointer entry. That
-  is about 4 to 7 stamped chunks a day per reference, from the batch you named.
-  The content itself is not stamped: pinning keeps it without a stamp.
+  entry per announced reference: 4 stamp slots a day per reference, from the
+  batch you named. Rewriting a lost pointer entry reuses its slot, so uploads can
+  reach 10 a day while the slots stay at 4. Announcing the same reference again
+  publishes it again. The content itself is not stamped: pinning keeps it without
+  a stamp.
+- **Encrypted references cannot be announced.** Their record would publish the
+  decryption key.
 - **Upload bandwidth.** Nodes that find yours ask it first for the chunks of the
   content. They pay the normal retrieval price.
-- **Unpaid work, limited.** A peer can ask for a chunk your node does not hold
-  and get a fast "not held" answer, which earns nothing. The node answers at most
-  100 of those per second per peer and 1000 per second in total.
+- **Unpaid work.** A peer can ask for a chunk your node does not hold and get a
+  fast "not held" answer, which earns nothing. Past 100 of those per second per
+  peer, or 1000 per second in total, the node answers with a limit error instead.
+  The store lookup has already happened by then, so the limit caps the answers,
+  not the lookups.
 
 ## What announcing reveals
 
@@ -46,8 +52,9 @@ providers directly with the `Wasp-Providers` header (up to 8 hex overlays).
 
 What it costs you:
 
-- **Up to 24 extra retrievals per new reference,** some of them unpaid work for
-  the nodes that forward them.
+- **Up to 24 extra retrievals per reference,** repeated at most every 10 minutes
+  while downloads of it continue. Some of them are unpaid work for the nodes that
+  forward them.
 - **The provider learns what you download.** It sees that a request comes from
   your node itself, not forwarded for someone else.
 
