@@ -19,6 +19,7 @@ where that happens.
 |---|---|
 | `mainnet-canary` | Runs the current release against Swarm mainnet. Confirms a build connects to stock peers and stays healthy. This is the gate on merging any experiment |
 | `bench-1` | Repeatable before-and-after measurement: the same workload against a stock build and an experimental build |
+| `bench-2` | A second measurement machine, for measurements that need nodes on two different machines |
 | `integration-1` | Runs the local k3d cluster suite (`make beelocal`, `make deploylocal`, `make testlocal`), restoring the coverage lost when upstream's beekeeper workflow was removed |
 | `soak-1` | Long-running experiments whose effect only appears over days |
 
