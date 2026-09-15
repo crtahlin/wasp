@@ -171,7 +171,9 @@ hour of each window, the next one. Readers then need to read only the current wi
   - `capability` is `full` or `partial`.
   - `address` is a `bzz.Address` in its existing JSON form
     (`pkg/bzz/address.go:200`). The provider signs it fresh with `bzz.NewAddress`,
-    with at most 4 underlays, so that the payload stays small.
+    with at most 4 underlays, public addresses first, so that the payload stays
+    small. It carries no chequebook address, which a record does not need to
+    reveal.
   - A provider refuses to write a payload larger than 4096 bytes.
 
 A reader accepts a record only if all of these hold:
@@ -340,8 +342,9 @@ reserve, pins and cache. A local-only request is answered from all of it.
 
 **Announcing** (new package `pkg/providers`, with the fork copyright header).
 - **`POST /wasp/providers/{reference}`**, with `Swarm-Postage-Batch-Id`:
-  - pins the reference if it is not already pinned, reusing the pin traversal in
-    `pkg/api/pin.go`;
+  - requires the reference to be pinned already, with `POST /pins/{reference}`,
+    and returns 400 otherwise. Pinning inside this call would mean refactoring
+    upstream's `pkg/api/pin.go`, which makes every upstream sync more expensive;
   - stores K and the batch in the state store;
   - writes the record and the pointer entry for the current window. Returns 201.
 - **`DELETE /wasp/providers/{reference}`:** stops announcing. The node stays listed
@@ -613,7 +616,8 @@ Unit tests, as `package _test`:
 - `Wasp-Providers` parsing, the 8-entry cap, rejection of non-overlay entries, and
   the header being ignored when the setting is off;
 - the CORS allowed headers include it;
-- `/wasp/providers` status codes, including a light node (400) and a missing batch.
+- `/wasp/providers` status codes, including a light node (400), an unpinned
+  reference (400) and a missing batch.
 
 Before every push: `make format && make build && make test && make lint &&
 make protocol-freeze`.

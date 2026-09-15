@@ -84,6 +84,13 @@ func (s *Service) feedGetHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	r, perr := s.withProviders(r, nil)
+	if perr != nil {
+		logger.Debug("invalid providers header", "error", perr)
+		jsonhttp.BadRequest(w, perr.Error())
+		return
+	}
+
 	ch, cur, next, err := lookup.At(r.Context(), queries.At, queries.After)
 	if err != nil {
 		logger.Debug("lookup at failed", "at", queries.At, "error", err)

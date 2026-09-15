@@ -108,6 +108,7 @@ including what raising and lowering it costs, in
 | `log-sink-buffer` | 4,096 lines. **Differs from Bee**, which writes synchronously; 0 restores that. | Log lines that may wait to be written before further lines are dropped. | v0.1.1 | [#156](https://github.com/crtahlin/wasp/issues/156) |
 | `stake-recovery-on-startup` | `off`. | Whether the node recovers stake from retired staking contracts at startup, to the wallet (`withdraw`) or into the current contract (`migrate`). | `main` | [#256](https://github.com/crtahlin/wasp/issues/256) |
 | `reserve-proof-mode` | `classic`, the whole-reserve proof upstream uses and the live contract verifies. | The redistribution reserve-size proof. `windowed` is an experimental sublinear proof, a windowed order statistic that reads a fraction of the reserve. The live contract does not accept it, so a windowed node wins nothing; it is for a testnet or research only. | `main` | [#273](https://github.com/crtahlin/wasp/issues/273) |
+| `providers-enable` | `false`. | Content providers: announcing pinned content with `/wasp/providers`, looking up providers for larger downloads, honouring the `Wasp-Providers` download header, and answering peers' local-only requests from the local store without forwarding. See the [spec](experiments/content-providers/spec.md). | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
 | `reserve-capacity` | `0`, meaning the built-in 4,194,304 (1<<22). | Reserve size in chunks; sets the base that `reserve-capacity-doubling` multiplies. Sizes the reserve to a disk, or drives radius behaviour in testing. A node's storage radius follows its reserve against this capacity. | `main` | [#283](https://github.com/crtahlin/wasp/issues/283) |
 
 The storer's shutdown wait is also adjustable, but only as `Options.ShutdownTimeout`
@@ -116,8 +117,9 @@ in the Go API, not as a node setting. Its default is 3 seconds, as in Bee
 
 ## API endpoints wasp adds
 
-Both groups sit in the business-debug route group, next to Bee's `/stake`
-endpoints.
+The stake and probe endpoints sit in the business-debug route group, next to Bee's
+`/stake` endpoints. The content-providers endpoints sit in the main API group, next
+to `/pins`, and answer 403 unless `providers-enable` is on.
 
 **Table: HTTP endpoints wasp adds to Bee v2.8.2**
 
@@ -127,6 +129,11 @@ endpoints.
 | `POST /stake/legacy?mode=withdraw\|migrate` | Recovers stake from every retired contract that holds some. | `main` | [#256](https://github.com/crtahlin/wasp/issues/256) |
 | `GET /stake/legacy/{id}`, `POST /stake/legacy/{id}?mode=withdraw\|migrate` | Reports recovery progress for one retired contract, or recovers from it. | `main` | [#256](https://github.com/crtahlin/wasp/issues/256) |
 | `GET /probesample/{depth}/{anchor}/{k}` | Measures the cost of a probe-based reserve sample. For benchmarking only; it does not change what the node submits in redistribution. | `main` | [#241](https://github.com/crtahlin/wasp/issues/241) |
+| `POST /wasp/providers/{reference}` | Announces a pinned reference as provided by this node. The provider records are stamped from the `Swarm-Postage-Batch-Id` batch; the content is not. Full nodes only. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
+| `DELETE /wasp/providers/{reference}` | Stops announcing a reference. The node stays listed until the last 12-hour window it wrote ends. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
+| `GET /wasp/providers` | Lists the references this node announces. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
+| `GET /wasp/providers/{reference}/lookup` | Looks up the providers of a reference and returns those whose records verify. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
+| `Wasp-Providers` request header on `GET /bzz`, `/bytes`, `/chunks` and `/feeds` | Names up to 8 provider overlays that the download tries first, with normal retrieval as the fallback. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
 
 The list of retired staking contracts in `pkg/config/legacy_staking.go` is seeded
 with the verified retired deployments, the two most recent per chain on Gnosis
@@ -146,6 +153,7 @@ on a node that has stake stranded in one of them. `stake-recovery-on-startup` is
 | Adds the read concurrency used to the reserve sample statistics. | v0.1.0 | | [#120](https://github.com/crtahlin/wasp/pull/120) |
 | Adds a log line when the index store stops accepting writes. | v0.1.2 | | [#180](https://github.com/crtahlin/wasp/pull/180) |
 | Adds Pebble's physical write bytes. | `main` | | [#218](https://github.com/crtahlin/wasp/pull/218) |
+| Adds `bee_retrieval_preferred_attempts`, `bee_retrieval_preferred_hits`, `bee_retrieval_preferred_misses`, `bee_retrieval_local_only_misses` and `bee_retrieval_local_only_limited`, for content providers. | `main` | | [#290](https://github.com/crtahlin/wasp/issues/290) |
 | Removes four hive ping metrics that Bee declares but never records. | v0.1.0 | Yes | [#138](https://github.com/crtahlin/wasp/issues/138) |
 
 ## Version, identity and packaging

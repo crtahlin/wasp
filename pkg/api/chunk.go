@@ -254,6 +254,13 @@ func (s *Service) chunkGetHandler(w http.ResponseWriter, r *http.Request) {
 		address = v
 	}
 
+	r, perr := s.withProviders(r, nil)
+	if perr != nil {
+		loggerV1.Debug("invalid providers header", "error", perr)
+		jsonhttp.BadRequest(w, perr.Error())
+		return
+	}
+
 	chunk, err := s.storer.Download(cache).Get(r.Context(), address)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {

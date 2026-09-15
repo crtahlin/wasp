@@ -94,6 +94,9 @@ type Options struct {
 	// Connect connects to a provider found by a lookup, without forcing past
 	// a full bin. It may be nil.
 	Connect func(ctx context.Context, addr *bzz.Address) error
+	// Resolve returns a peer's address from the address book, for dialling
+	// an overlay named in a download hint. It may be nil.
+	Resolve func(overlay swarm.Address) (*bzz.Address, error)
 	// Store keeps the announced content keys across restarts.
 	Store storage.StateStorer
 }
@@ -282,6 +285,38 @@ func (s *Service) Discover(ctx context.Context, k []byte, set Adder) {
 				}
 			}
 			set.Add(r.Address.Overlay)
+		}
+	}()
+}
+
+// ConnectHints connects, in the background, to the overlays named in a
+// download hint that the address book knows. It stops when ctx is done or the
+// service closes.
+func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
+	if s.opts.Resolve == nil || s.opts.Connect == nil || s.ctx.Err() != nil {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stop := context.AfterFunc(s.ctx, cancel)
+		defer stop()
+
+		for _, o := range overlays {
+			if o.Equal(s.opts.Overlay) {
+				continue
+			}
+			addr, err := s.opts.Resolve(o)
+			if err != nil {
+				s.logger.Debug("hinted provider not in the address book", "peer_address", o, "error", err)
+				continue
+			}
+			if err := s.opts.Connect(ctx, addr); err != nil {
+				s.logger.Debug("connect to hinted provider failed", "peer_address", o, "error", err)
+			}
 		}
 	}()
 }

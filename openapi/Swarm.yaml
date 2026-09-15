@@ -220,6 +220,12 @@ paths:
       tags:
         - Bytes
       parameters:
+        - in: header
+          name: wasp-providers
+          schema:
+            type: string
+          required: false
+          description: "wasp: comma-separated hex overlays of up to 8 content providers that the download tries first, with normal retrieval as the fallback. Honoured only when the node runs with providers-enable."
         - in: path
           name: address
           schema:
@@ -482,6 +488,12 @@ paths:
       tags:
         - BZZ
       parameters:
+        - in: header
+          name: wasp-providers
+          schema:
+            type: string
+          required: false
+          description: "wasp: comma-separated hex overlays of up to 8 content providers that the download tries first, with normal retrieval as the fallback. Honoured only when the node runs with providers-enable."
         - in: path
           name: address
           schema:
@@ -614,6 +626,12 @@ paths:
       tags:
         - BZZ
       parameters:
+        - in: header
+          name: wasp-providers
+          schema:
+            type: string
+          required: false
+          description: "wasp: comma-separated hex overlays of up to 8 content providers that the download tries first, with normal retrieval as the fallback. Honoured only when the node runs with providers-enable."
         - in: path
           name: address
           schema:
@@ -1155,6 +1173,12 @@ paths:
       tags:
         - Feed
       parameters:
+        - in: header
+          name: wasp-providers
+          schema:
+            type: string
+          required: false
+          description: "wasp: comma-separated hex overlays of up to 8 content providers that the lookup tries first, with normal retrieval as the fallback. Honoured only when the node runs with providers-enable."
         - in: path
           name: owner
           schema:
@@ -1276,6 +1300,142 @@ paths:
           $ref: "SwarmCommon.yaml#/components/responses/400"
         "404":
           $ref: "SwarmCommon.yaml#/components/responses/404"
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        default:
+          description: Default response
+
+  "/wasp/providers":
+    get:
+      summary: "List announced content (wasp)"
+      description: "The references this node announces as a content provider. Answers 403 unless the node runs with providers-enable."
+      tags:
+        - Providers
+      responses:
+        "200":
+          description: The announced references
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  announcements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        reference:
+                          $ref: "SwarmCommon.yaml#/components/schemas/SwarmReference"
+                        batchID:
+                          $ref: "SwarmCommon.yaml#/components/schemas/BatchID"
+                        windows:
+                          type: array
+                          description: The 12-hour windows whose records are written
+                          items:
+                            type: integer
+        "403":
+          description: Content providers are off
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        default:
+          description: Default response
+
+  "/wasp/providers/{reference}":
+    post:
+      summary: "Announce pinned content (wasp)"
+      description: "Announces that this node provides the referenced content, which must be pinned first with POST /pins/{reference}. The node writes a provider record and a pointer entry for each 12-hour window, stamped from the given batch; the content itself is not stamped. Full nodes only. Answers 403 unless the node runs with providers-enable."
+      tags:
+        - Providers
+      parameters:
+        - in: path
+          name: reference
+          schema:
+            $ref: "SwarmCommon.yaml#/components/schemas/SwarmReference"
+          required: true
+          description: Root hash of pinned content
+        - in: header
+          schema:
+            $ref: "SwarmCommon.yaml#/components/parameters/SwarmPostageBatchId"
+          name: swarm-postage-batch-id
+          required: true
+          description: Postage batch that stamps the provider records
+      responses:
+        "201":
+          description: Announced
+        "400":
+          $ref: "SwarmCommon.yaml#/components/responses/400"
+        "403":
+          description: Content providers are off
+        "404":
+          $ref: "SwarmCommon.yaml#/components/responses/404"
+        "422":
+          description: Batch not usable yet or does not exist
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        default:
+          description: Default response
+    delete:
+      summary: "Stop announcing content (wasp)"
+      description: "Stops announcing the reference. The node stays listed until the last 12-hour window it wrote ends. The pin stays."
+      tags:
+        - Providers
+      parameters:
+        - in: path
+          name: reference
+          schema:
+            $ref: "SwarmCommon.yaml#/components/schemas/SwarmReference"
+          required: true
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: Content providers are off
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        default:
+          description: Default response
+
+  "/wasp/providers/{reference}/lookup":
+    get:
+      summary: "Look up providers of content (wasp)"
+      description: "Reads the pointer index of the reference for the current 12-hour window and returns the providers whose records verify. Answers 403 unless the node runs with providers-enable."
+      tags:
+        - Providers
+      parameters:
+        - in: path
+          name: reference
+          schema:
+            $ref: "SwarmCommon.yaml#/components/schemas/SwarmReference"
+          required: true
+      responses:
+        "200":
+          description: The verified providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        overlay:
+                          type: string
+                          description: Overlay address of the provider
+                        underlays:
+                          type: array
+                          items:
+                            type: string
+                          description: Network addresses the provider signed into its record
+                        owner:
+                          type: string
+                          description: Ethereum address that owns the record
+                        capability:
+                          type: string
+                          enum: [full, partial]
+        "403":
+          description: Content providers are off
         "500":
           $ref: "SwarmCommon.yaml#/components/responses/500"
         default:
@@ -1486,6 +1646,12 @@ paths:
       tags:
         - Chunk
       parameters:
+        - in: header
+          name: wasp-providers
+          schema:
+            type: string
+          required: false
+          description: "wasp: comma-separated hex overlays of up to 8 content providers that the retrieval tries first, with normal retrieval as the fallback. Honoured only when the node runs with providers-enable."
         - in: path
           name: address
           schema:

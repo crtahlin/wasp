@@ -89,6 +89,7 @@ const (
 	optionWarmUpTime                       = "warmup-time"
 	optionNameMainNet                      = "mainnet"
 	optionNameRetrievalCaching             = "cache-retrieval"
+	optionNameProvidersEnable              = "providers-enable"
 	optionNameResync                       = "resync"
 	optionNamePProfBlock                   = "pprof-profile"
 	optionNamePProfMutex                   = "pprof-mutex"
@@ -411,6 +412,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Duration(optionWarmUpTime, time.Minute*5, "maximum node warmup duration; proceeds when stable or after this time")
 	cmd.Flags().Bool(optionNameMainNet, true, "triggers connect to main net bootnodes.")
 	cmd.Flags().Bool(optionNameRetrievalCaching, true, "enable forwarded content caching")
+	cmd.Flags().Bool(optionNameProvidersEnable, false, "content providers: announce pinned content through /wasp/providers, look up providers for larger downloads, honour the Wasp-Providers download header, and answer local-only requests from peers. Off by default. Announcing costs stamp slots and publishes which content this node holds; lookups cost extra retrievals, some of them unpaid work for the nodes that forward them. See docs/experiments/content-providers/spec.md")
 	cmd.Flags().Bool(optionNameResync, false, "forces the node to resync postage contract data")
 	cmd.Flags().Bool(optionNamePProfBlock, false, "enable pprof block profile")
 	cmd.Flags().Bool(optionNamePProfMutex, false, "enable pprof mutex profile")

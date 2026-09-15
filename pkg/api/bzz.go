@@ -535,8 +535,15 @@ func (s *Service) serveReference(logger log.Logger, address swarm.Address, pathV
 		rLevel = *headers.RLevel
 	}
 
+	r, perr := s.withProviders(r, address.Bytes())
+	if perr != nil {
+		logger.Debug("invalid providers header", "error", perr)
+		jsonhttp.BadRequest(w, perr.Error())
+		return
+	}
+
 	ctx := r.Context()
-	ls := loadsave.NewReadonly(s.storer.Download(cache), s.storer.Cache(), rLevel)
+	ls := loadsave.NewReadonly(s.providerGetter(ctx, s.storer.Download(cache)), s.storer.Cache(), rLevel)
 	feedDereferenced := false
 
 	ctx, err := getter.SetConfigInContext(ctx, headers.Strategy, headers.FallbackMode, headers.ChunkRetrievalTimeout, logger)
@@ -746,6 +753,13 @@ func (s *Service) downloadHandler(logger log.Logger, w http.ResponseWriter, r *h
 		cache = *headers.Cache
 	}
 
+	r, perr := s.withProviders(r, reference.Bytes())
+	if perr != nil {
+		logger.Debug("invalid providers header", "error", perr)
+		jsonhttp.BadRequest(w, perr.Error())
+		return
+	}
+
 	ctx := r.Context()
 	ctx, err := getter.SetConfigInContext(ctx, headers.Strategy, headers.FallbackMode, headers.ChunkRetrievalTimeout, logger)
 	if err != nil {
@@ -763,9 +777,9 @@ func (s *Service) downloadHandler(logger log.Logger, w http.ResponseWriter, r *h
 		l      int64
 	)
 	if rootCh != nil {
-		reader, l, err = joiner.NewJoiner(ctx, s.storer.Download(cache), s.storer.Cache(), reference, rootCh)
+		reader, l, err = joiner.NewJoiner(ctx, s.providerGetter(ctx, s.storer.Download(cache)), s.storer.Cache(), reference, rootCh)
 	} else {
-		reader, l, err = joiner.New(ctx, s.storer.Download(cache), s.storer.Cache(), reference, rLevel)
+		reader, l, err = joiner.New(ctx, s.providerGetter(ctx, s.storer.Download(cache)), s.storer.Cache(), reference, rLevel)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound) {
