@@ -83,9 +83,14 @@ These findings decide which gaps are worth closing. Each was checked in the code
   light peers. As an illustration, 100 viewers of a 5 Mbit/s stream need up to
   500 Mbit/s from that one node, if all of them fetch through it. No light node can
   take any of that load, because light nodes have no connections to each other.
-- A light node's cache can only save its full peer a fetch from farther away. The
-  full peer usually already has the chunk: it cached it when it relayed it
-  (finding 1).
+- A light node sends each chunk request to whichever full peer is closest to that
+  chunk, so its downloads are spread over several full peers. Each of them caches
+  only the chunks it relayed, and none holds the whole file; the light node may be
+  the only nearby node that does. Its cache could save a full peer a fetch from
+  farther away, but its uploads would still pass through a full peer, so they
+  cannot relieve that peer's upload to its light peers. (Corrected after review:
+  an earlier version said the full peer usually already holds what the light node
+  holds.)
 
 **3. Stock nodes store only stamped chunks.**
 - Anything a light node or any other node writes into Swarm needs a stamp, or the
