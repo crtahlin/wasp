@@ -30,6 +30,10 @@ The terms of [spec.md](spec.md) apply. In addition:
   tree, so that a download can rebuild chunks it cannot retrieve. The level
   (0 none, 1 MEDIUM, up to 4 PARANOID) is chosen at upload with the
   `Swarm-Redundancy-Level` header.
+- **Redundancy decoder**: the component that fetches the children of one chunk of
+  an erasure-coded tree, and rebuilds missing ones from the parity chunks.
+- **Prefetch**: the decoder's own fetching of those children, which it starts as
+  soon as it is created, before anything asks for them.
 
 ## What is measured
 
@@ -125,48 +129,64 @@ success here.
 9. **Overdraft spills** (spec.md, Measurement, Metrics) cannot be counted
    directly. They are derived as described under "What each run records".
 10. **Test content is uploaded without erasure coding** (`Swarm-Redundancy-Level:
-    0`), and one extra condition measures the default.
+    0`), and two extra conditions measure the default.
     - By default an upload is erasure coded at level MEDIUM
-      (`pkg/file/redundancy/level.go:181`).
-    - A download of such content fetches the children of every chunk of the tree,
-      the root included, through a redundancy decoder. Each decoder starts a
-      prefetch as soon as it is created
-      (`pkg/file/redundancy/getter/getter.go:81`), from a fresh background context
-      (`getter.go:242`) that carries no preferred set. The download's own request
-      for a child then waits for that prefetch (`getter.go:159-163`).
-    - Phase 1 preference therefore reaches little more than the root chunk of
-      erasure-coded content. The spec lists carrying the preferred set into this
-      path as phase 2 work (spec.md, Phases). Because it is the default path, it
-      is filed as [#299](https://github.com/crtahlin/wasp/issues/299).
+      (`pkg/file/redundancy/level.go:181`, applied to `/bytes` at
+      `pkg/api/bytes.go:48`).
+    - A download of such content fetches the children of each chunk through a
+      redundancy decoder. The decoder's prefetch starts as soon as the decoder is
+      created (`pkg/file/redundancy/getter/getter.go:81`), from a fresh background
+      context that carries no preferred set (`getter.go:242`).
+    - Each child goes to whichever side claims it first (`getter.go:128`): the
+      prefetch, without preference, or the download's own request, with it.
+    - After a decoder has succeeded, later reads of its children go through a
+      fallback getter that uses the download's context
+      (`pkg/file/redundancy/getter/redecoder.go:41-45`,
+      `pkg/file/joiner/joiner.go:99-121`). With `Swarm-Cache: false` the prefetched
+      chunks were not stored, so those reads fetch them a second time.
+    - Phase 1 preference therefore reaches only part of the chunks of
+      erasure-coded content, a part that depends on timing, and some chunks are
+      fetched twice. Content without erasure coding never uses a decoder
+      (`joiner.go:92-93`). The spec lists carrying the preferred set into the
+      prefetch as phase 2 work (spec.md, Phases). Because the prefetch is on the
+      default path, it is filed as
+      [#299](https://github.com/crtahlin/wasp/issues/299).
     - So conditions 1 to 6 use content without erasure coding, which is what phase
-      1 was built for. Condition **3m**, a hint to P for a file uploaded at the
-      default level, runs three times in the SWAP block to measure the gap.
+      1 was built for. Conditions **2m** (no provider) and **3m** (hint to P) use
+      files at the default level, three runs each in the SWAP block, to measure
+      the share of chunks that reaches P and the speed.
     - Content B is tested at both levels (see Content).
 
 ## Postage
 
 - **Batch A**, depth 20, bought by P for about 4 days. It stamps content A and all
   provider records, including the records that announce content B.
-  - The runs upload about 175,000 chunks, 193,000 with a margin of 10% for
+  - The runs upload about 188,000 chunks, 207,000 with a margin of 10% for
     repeated runs.
   - At depth 20 each bucket holds 16 chunks. At depth 19 it would hold 8, and
     some buckets would overflow before the runs end.
 - **Batches B and B2**, depth 17, each bought by P for the contract's minimum
   validity (17,280 blocks, about 24 hours) plus 10%. B stamps content B at the
-  default level and B2 content B without erasure coding. One file per batch, so
-  that no bucket (2 chunks at depth 17) overflows. Both are left to expire.
+  default level and B2 content B without erasure coding.
+  - With one file of about 1,100 chunks per batch, a bucket (2 chunks at depth 17)
+    overflowing is unlikely, about 1 in 20 per file. If an upload reports a full
+    bucket, a new batch is bought and the file uploaded again.
+  - Both are left to expire.
 
 ## Content
 
 **Content A**, one fresh file per run:
 - 16 MiB of random bytes. Without erasure coding that is 4,096 data chunks,
-  32 intermediate chunks and a root, 4,129 chunks in all. The condition 3m file
-  has more, and its count is taken from its upload tag.
+  32 intermediate chunks and a root, 4,129 chunks in all.
+- The files of conditions 2m and 3m, at the default level, split into about 4,453
+  chunks. That includes 313 parity chunks and 2 root replicas, which a download
+  does not normally fetch. A download needs 4,132 of them: 4,096 data chunks,
+  35 intermediate chunks and the root.
 - P uploads it through `POST /bytes` with `Swarm-Pin: true`,
-  `Swarm-Redundancy-Level: 0` (level 1, MEDIUM, in condition 3m) and batch A.
-  It waits until the upload tag reports `synced` plus `seen` equal to `split`,
-  then 60 s more. If that takes more than 20 minutes, the run is invalid: a chunk
-  that cannot be synced never reaches the count.
+  `Swarm-Redundancy-Level: 0` (level 1, MEDIUM, in conditions 2m and 3m) and
+  batch A. It waits until the upload tag reports `synced` plus `seen` equal to
+  `split`, then 60 s more. If that takes more than 20 minutes, the run is invalid:
+  a chunk that cannot be synced never reaches the count.
 - Q has never requested it. Q downloads it with `GET /bytes/{reference}` and
   `Swarm-Cache: false`, and checks its SHA-256 against P's copy.
 - **Only the files of condition 5 are announced.** P announces each with
@@ -194,9 +214,21 @@ measurement:
   itself.
 - Both are tested after their batches have expired and at least 1 hour more has
   passed, so that the reserves holding them have dropped them.
-- Expected from the code (difference 10): with a hint, B-0 arrives and B-default
-  does not, because B-default's chunks below the root are fetched without the
-  preferred set.
+- **Success is judged by bytes and SHA-256, not by HTTP status.** Once the root
+  arrives, the response starts with status 200 (`pkg/api/bzz.go:825`), and a
+  failure later ends the body early.
+- **Expected from the code:** with a hint, B-0 arrives. B-default is expected to
+  fail:
+  - its root arrives from P, fetched with the download's context
+    (`joiner.go:134-138`);
+  - the chunks the prefetch claims are fetched without the preferred set and are
+    not found. The decoder's first strategy tolerates no error
+    (`getter.go:219-222`), and its fallback, which also fetches the parity
+    chunks, fails because they are lost too (`getter.go:227-233`);
+  - the download's waiting reads then return not found (`getter.go:109-111`,
+    `165-169`), and the failed decoder is not retried (`joiner.go:74-76`);
+  - this is not certain, because a prefetch request can still reach P as an
+    ordinary peer.
 
 **Lookup files:** fresh 1 MiB files, uploaded by P pinned, because a reference
 must be pinned to be announced.
@@ -213,7 +245,7 @@ Within each block:
 2. **Q with `providers-enable: true`:**
    - three rounds, each running conditions 2, 3, 5 and 6 once, in an order rotated
      by one position per round;
-   - in the SWAP block only, condition 3m, three runs;
+   - in the SWAP block only, conditions 2m and 3m, three runs each, alternating;
    - then condition 4, three runs, with S running.
 
 **After each change of Q's settings**, which is a restart, Q waits at least
@@ -221,9 +253,9 @@ Within each block:
 before the restart.
 
 **Drift over time.** Condition 1 always runs soonest after a restart, and
-conditions 3m and 4 always run last in a block. Any drift of node state over time
-therefore falls on those conditions more than on the others. Results report this
-next to their numbers.
+conditions 2m, 3m and 4 always run last in a block. Any drift of node state over
+time therefore falls on those conditions more than on the others. Results report
+this next to their numbers.
 
 **Lookup cost**, in the pseudosettle block with `providers-enable: true`:
 - three lookups, through Q's `GET /wasp/providers/{reference}/lookup`, of lookup
@@ -259,10 +291,11 @@ As in the spec, with the differences above:
 | 1 | `providers-enable: false` | none | level 0 |
 | 2 | on | none known | level 0 |
 | 3 | on | hint to P | level 0 |
-| 3m | on | hint to P | level 1, MEDIUM; SWAP block only |
 | 4 | on | hint to S, a stock node | level 0 |
 | 5 | on | P found by discovery | level 0 |
 | 6 | on | hint to P, which holds about half of the file | level 0 |
+| 2m | on | none known | level 1, MEDIUM; SWAP block only |
+| 3m | on | hint to P | level 1, MEDIUM; SWAP block only |
 
 ## What each run records
 
@@ -297,12 +330,22 @@ of P's other traffic, so they are context, not the measure.
   - it also includes the few requests Q relays for others through P in the same
     interval;
   - it is reported next to the preferred hits, which count only the winning
-    preferred attempts.
-- **Overdraft skips** (spec's "overdraft spills"): about 4,129 minus the preferred
-  attempts, in condition 3. A preferred attempt is counted only after
-  `prepareCredit` succeeds (`pkg/retrieval/preferred.go:224-232`), so a chunk
-  whose provider was overdrawn has no attempt. In condition 5 the same
-  difference also includes the chunks fetched before discovery found P.
+    preferred attempts;
+  - in conditions 2m and 3m it is reported against the 4,132 chunks a download
+    needs. Some chunks are fetched twice there (difference 10), so the request
+    count is reported next to it.
+- **Overdraft skips** (spec's "overdraft spills"):
+  - A preferred attempt is counted only after `prepareCredit` succeeds
+    (`pkg/retrieval/preferred.go:224-232`), so a chunk whose provider was
+    overdrawn has no attempt.
+  - A run's preferred attempts can exceed 4,129, because the root is also
+    requested as replicas and intermediate chunks are requested again on each
+    read.
+  - Overdraft skips are therefore estimated as the median preferred attempts of
+    condition 3 in the SWAP block, where no overdraft is expected, minus the
+    run's attempts.
+  - In condition 5 the same difference also includes the chunks fetched before
+    discovery found P.
 - **Lost attempts:** preferred attempts minus hits minus misses. These are mostly
   slow answers that came after normal retrieval had already delivered the chunk,
   which are paid for but not used. A few are slow misses or stream errors, which
@@ -320,8 +363,8 @@ small share of a 16 MiB file. The SWAP block has no such limit.
 - the count the design implies: 8 slot reads, plus one record fetch per candidate
   found.
 
-**For content B:** success or failure, total time, and the deliveries by P as
-above.
+**For content B:** success or failure by bytes and SHA-256, total time, and the
+deliveries by P as above.
 
 ## When a run is invalid
 
@@ -343,10 +386,11 @@ As in the spec, judged on the SWAP block (difference 5). Any of:
   over condition 2, beyond the spread: the spreads overlap.
 - **The lookup costs more than it saves.** On a 16 MiB file, condition 5 is not
   faster than condition 2 beyond the spread.
-- **Availability fails.** Content B-0 still fails with a correct hint.
+- **Availability fails.** Content B-0 still does not arrive complete, by bytes and
+  SHA-256, with a correct hint.
 
 The first stops work on phase 2 onwards. The mechanism is still kept for
-availability if content B-0 works (spec.md, Measurement). Condition 3m and
+availability if content B-0 works (spec.md, Measurement). Conditions 2m and 3m and
 B-default are reported as the size of the gap in #299, not judged against these
 rules.
 
