@@ -399,7 +399,7 @@ publish what the operator has recently watched.
      (`pkg/file/redundancy/getter/getter.go:242`).
    - **Publisher lists.** A manifest metadata key naming a providers list chosen by
      the publisher.
-   - **Passive sharing.** [passive-sharing.md](passive-sharing.md) analyses three
+   - **Passive sharing.** [passive-sharing.md](passive-sharing.md) analyzes three
      additions:
      - requests to providers sent through a relaying peer, so a provider never
        learns the requester;
@@ -407,7 +407,8 @@ publish what the operator has recently watched.
      - chunk summaries between connected peers, which need no stamp and no
        reference.
 
-     Each needs its own spec change before code.
+     Each needs its own spec change before code, and all wait for the phase 1
+     measurement.
 3. **Phase 3, live streams.**
    - a provider mode that follows a feed and pins new segments ahead of viewers;
    - requesters track the feed index;
