@@ -26,6 +26,10 @@ The terms of [spec.md](spec.md) apply. In addition:
   and how many have reached their neighborhood (`synced`).
 - **Storage radius**: the proximity order that defines the neighborhood a full
   node stores.
+- **Erasure coding**: extra parity chunks added to each level of a file's chunk
+  tree, so that a download can rebuild chunks it cannot retrieve. The level
+  (0 none, 1 MEDIUM, up to 4 PARANOID) is chosen at upload with the
+  `Swarm-Redundancy-Level` header.
 
 ## What is measured
 
@@ -112,36 +116,57 @@ success here.
      overlays as the hint.
    - The gap is filed as [#297](https://github.com/crtahlin/wasp/issues/297).
 7. **Content B's first step runs condition 1 with P unreachable from Q** (see
-   Content B). Otherwise P, which holds the file pinned and is connected to Q,
-   could deliver it directly as an ordinary peer.
+   Content B). Otherwise P, which holds the files pinned and is connected to Q,
+   could deliver them directly as an ordinary peer.
 8. **The lookup-cost runs are made in the pseudosettle block only.** A lookup
    makes at most 24 chunk retrievals, spread over different chunk addresses and so
    over different peers. Each retrieval may try several peers, but the cost stays
    far below Q's free allowance with each peer, so settlement does not change it.
 9. **Overdraft spills** (spec.md, Measurement, Metrics) cannot be counted
    directly. They are derived as described under "What each run records".
+10. **Test content is uploaded without erasure coding** (`Swarm-Redundancy-Level:
+    0`), and one extra condition measures the default.
+    - By default an upload is erasure coded at level MEDIUM
+      (`pkg/file/redundancy/level.go:181`).
+    - A download of such content fetches the children of every chunk of the tree,
+      the root included, through a redundancy decoder. Each decoder starts a
+      prefetch as soon as it is created
+      (`pkg/file/redundancy/getter/getter.go:81`), from a fresh background context
+      (`getter.go:242`) that carries no preferred set. The download's own request
+      for a child then waits for that prefetch (`getter.go:159-163`).
+    - Phase 1 preference therefore reaches little more than the root chunk of
+      erasure-coded content. The spec lists carrying the preferred set into this
+      path as phase 2 work (spec.md, Phases). Because it is the default path, it
+      is filed as [#299](https://github.com/crtahlin/wasp/issues/299).
+    - So conditions 1 to 6 use content without erasure coding, which is what phase
+      1 was built for. Condition **3m**, a hint to P for a file uploaded at the
+      default level, runs three times in the SWAP block to measure the gap.
+    - Content B is tested at both levels (see Content).
 
 ## Postage
 
 - **Batch A**, depth 20, bought by P for about 4 days. It stamps content A and all
   provider records, including the records that announce content B.
-  - The runs upload about 162,000 chunks, 178,000 with a margin of 10% for
+  - The runs upload about 175,000 chunks, 193,000 with a margin of 10% for
     repeated runs.
   - At depth 20 each bucket holds 16 chunks. At depth 19 it would hold 8, and
     some buckets would overflow before the runs end.
-- **Batch B**, depth 17, bought by P for the contract's minimum validity
-  (17,280 blocks, about 24 hours) plus 10%. It stamps content B only, and is left
-  to expire.
+- **Batches B and B2**, depth 17, each bought by P for the contract's minimum
+  validity (17,280 blocks, about 24 hours) plus 10%. B stamps content B at the
+  default level and B2 content B without erasure coding. One file per batch, so
+  that no bucket (2 chunks at depth 17) overflows. Both are left to expire.
 
 ## Content
 
 **Content A**, one fresh file per run:
-- 16 MiB of random bytes: 4,096 data chunks, 32 intermediate chunks and a root,
-  4,129 chunks in all.
-- P uploads it through `POST /bytes` with `Swarm-Pin: true` and batch A. It waits
-  until the upload tag reports `synced` plus `seen` equal to `split`, then 60 s
-  more. If that takes more than 20 minutes, the run is invalid: a chunk that
-  cannot be synced never reaches the count.
+- 16 MiB of random bytes. Without erasure coding that is 4,096 data chunks,
+  32 intermediate chunks and a root, 4,129 chunks in all. The condition 3m file
+  has more, and its count is taken from its upload tag.
+- P uploads it through `POST /bytes` with `Swarm-Pin: true`,
+  `Swarm-Redundancy-Level: 0` (level 1, MEDIUM, in condition 3m) and batch A.
+  It waits until the upload tag reports `synced` plus `seen` equal to `split`,
+  then 60 s more. If that takes more than 20 minutes, the run is invalid: a chunk
+  that cannot be synced never reaches the count.
 - Q has never requested it. Q downloads it with `GET /bytes/{reference}` and
   `Swarm-Cache: false`, and checks its SHA-256 against P's copy.
 - **Only the files of condition 5 are announced.** P announces each with
@@ -161,12 +186,17 @@ success here.
   - So P holds 2,064 of X's 4,129 chunks, about half. The share of chunks that P
     serves is reported as measured.
 
-**Content B:**
-- One fresh 4 MiB file, uploaded by P with batch B and pinned, at the start of the
-  measurement.
-- Announced by P with batch A. P renews its records every window by itself.
-- Tested after batch B has expired and at least 1 hour more has passed, so that
-  the reserves holding it have dropped it.
+**Content B**, two fresh 4 MiB files, uploaded by P and pinned at the start of the
+measurement:
+- **B-default**, at the default level MEDIUM, with batch B: 1,120 chunks.
+- **B-0**, without erasure coding, with batch B2: 1,033 chunks.
+- Both are announced by P with batch A. P renews its records every window by
+  itself.
+- Both are tested after their batches have expired and at least 1 hour more has
+  passed, so that the reserves holding them have dropped them.
+- Expected from the code (difference 10): with a hint, B-0 arrives and B-default
+  does not, because B-default's chunks below the root are fetched without the
+  preferred set.
 
 **Lookup files:** fresh 1 MiB files, uploaded by P pinned, because a reference
 must be pinned to be announced.
@@ -183,6 +213,7 @@ Within each block:
 2. **Q with `providers-enable: true`:**
    - three rounds, each running conditions 2, 3, 5 and 6 once, in an order rotated
      by one position per round;
+   - in the SWAP block only, condition 3m, three runs;
    - then condition 4, three runs, with S running.
 
 **After each change of Q's settings**, which is a restart, Q waits at least
@@ -190,9 +221,9 @@ Within each block:
 before the restart.
 
 **Drift over time.** Condition 1 always runs soonest after a restart, and
-condition 4 always runs last in a block. Any drift of node state over time
-therefore falls on those two conditions more than on the others. Results report
-this next to their numbers.
+conditions 3m and 4 always run last in a block. Any drift of node state over time
+therefore falls on those conditions more than on the others. Results report this
+next to their numbers.
 
 **Lookup cost**, in the pseudosettle block with `providers-enable: true`:
 - three lookups, through Q's `GET /wasp/providers/{reference}/lookup`, of lookup
@@ -200,17 +231,18 @@ this next to their numbers.
 - three lookups of random references that nobody announced, which is the common
   case.
 
-**Content B**, after batch B has expired:
+**Content B**, after both of its batches have expired, for each of B-0 and
+B-default:
 1. **The network check.**
    - Q runs with `providers-enable: false`, and every packet from Q's machine to
      P's machine is dropped, so that P cannot deliver directly.
    - Three runs. The file must not arrive. If it does, forwarding nodes still hold
-     it, or P delivered it through a relay, and content B is reported as not
+     it, or P delivered it through a relay, and that file is reported as not
      testable.
 2. **The delay is restored and Q reconnects to P.** The delay is checked as for a
-   block, before and after this step. Then, with Q's settings of
-   each block in turn (`providers-enable: true`, first without and then with
-   SWAP), three runs each of:
+   block, before and after this step. Then, with Q's settings of each block in
+   turn (`providers-enable: true`, first without and then with SWAP), three runs
+   each of:
    - the hint to P;
    - the two-step lookup, then the download with its result as the hint.
 
@@ -222,14 +254,15 @@ this next to their numbers.
 
 As in the spec, with the differences above:
 
-| # | Q's setting | Provider for Q |
-|---|---|---|
-| 1 | `providers-enable: false` | none |
-| 2 | on | none known |
-| 3 | on | hint to P |
-| 4 | on | hint to S, a stock node |
-| 5 | on | P found by discovery |
-| 6 | on | hint to P, which holds about half of the file |
+| # | Q's setting | Provider for Q | Content |
+|---|---|---|---|
+| 1 | `providers-enable: false` | none | level 0 |
+| 2 | on | none known | level 0 |
+| 3 | on | hint to P | level 0 |
+| 3m | on | hint to P | level 1, MEDIUM; SWAP block only |
+| 4 | on | hint to S, a stock node | level 0 |
+| 5 | on | P found by discovery | level 0 |
+| 6 | on | hint to P, which holds about half of the file | level 0 |
 
 ## What each run records
 
@@ -277,8 +310,8 @@ of P's other traffic, so they are context, not the measure.
 
 **Expected limit.** Without SWAP, P can serve Q about 14 chunks per second once
 Q's allowance with P is used up, more for the chunks close to it, which cost less
-(spec.md, Hypothesis). In the pseudosettle block P will therefore serve only a small share
-of a 16 MiB file. The SWAP block has no such limit.
+(spec.md, Hypothesis). In the pseudosettle block P will therefore serve only a
+small share of a 16 MiB file. The SWAP block has no such limit.
 
 **For each lookup:**
 - its wall time;
@@ -310,10 +343,12 @@ As in the spec, judged on the SWAP block (difference 5). Any of:
   over condition 2, beyond the spread: the spreads overlap.
 - **The lookup costs more than it saves.** On a 16 MiB file, condition 5 is not
   faster than condition 2 beyond the spread.
-- **Availability fails.** Content B still fails with a correct hint.
+- **Availability fails.** Content B-0 still fails with a correct hint.
 
 The first stops work on phase 2 onwards. The mechanism is still kept for
-availability if content B works (spec.md, Measurement).
+availability if content B-0 works (spec.md, Measurement). Condition 3m and
+B-default are reported as the size of the gap in #299, not judged against these
+rules.
 
 ## Reporting
 
