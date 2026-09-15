@@ -7,6 +7,7 @@ package providers_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
@@ -28,6 +29,14 @@ import (
 type network struct {
 	mu     sync.Mutex
 	chunks map[string]swarm.Chunk
+	// onPut, when set, runs once after the next upload
+	onPut func()
+}
+
+func (n *network) setOnPut(f func()) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.onPut = f
 }
 
 func newNetwork() *network {
@@ -65,8 +74,13 @@ type session struct{ n *network }
 
 func (s *session) Put(_ context.Context, ch swarm.Chunk) error {
 	s.n.mu.Lock()
-	defer s.n.mu.Unlock()
 	s.n.chunks[ch.Address().ByteString()] = ch
+	hook := s.n.onPut
+	s.n.onPut = nil
+	s.n.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
 }
 
@@ -396,6 +410,73 @@ func TestEncryptedReferenceRefused(t *testing.T) {
 	k := append(swarm.RandAddress(t).Bytes(), swarm.RandAddress(t).Bytes()...)
 	if err := pa.Announce(context.Background(), k, batch); err == nil {
 		t.Fatal("an encrypted reference was announced; its record would publish the key")
+	}
+	if _, err := providers.NewSlotChunk(k, 1000, 0, nil); !errors.Is(err, providers.ErrInvalidRecord) {
+		t.Fatalf("a pointer slot for an encrypted reference: got %v, want ErrInvalidRecord", err)
+	}
+	if records, err := pa.Lookup(context.Background(), k); err != nil || len(records) != 0 {
+		t.Fatalf("lookup of an encrypted reference: %d records, error %v", len(records), err)
+	}
+}
+
+// TestWithdrawDuringPublish tests that a withdrawal made while the loop is
+// publishing a new window is not undone by the loop's save.
+func TestWithdrawDuringPublish(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	pa := newService(t, n, newNode(t, 1), c, nil)
+	k := swarm.RandAddress(t).Bytes()
+
+	if err := pa.Announce(context.Background(), k, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	c.set(midWindow(1001))
+	n.setOnPut(func() {
+		if err := pa.Withdraw(k); err != nil {
+			t.Error(err)
+		}
+	})
+	pa.RunOnce(context.Background())
+
+	announced, err := pa.Announced()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(announced) != 0 {
+		t.Fatal("a key withdrawn during the loop's publish was announced again")
+	}
+}
+
+// TestSaveKeepsNewerBatch tests that the loop does not write an older batch
+// over a newer announcement of the same key.
+func TestSaveKeepsNewerBatch(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	pa := newService(t, n, newNode(t, 1), c, nil)
+	k := swarm.RandAddress(t).Bytes()
+	newer := bytes.Repeat([]byte{2}, 32)
+
+	if err := pa.Announce(context.Background(), k, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	c.set(midWindow(1001))
+	n.setOnPut(func() {
+		if err := pa.Announce(context.Background(), k, newer); err != nil {
+			t.Error(err)
+		}
+	})
+	pa.RunOnce(context.Background())
+
+	announced, err := pa.Announced()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(announced) != 1 || !bytes.Equal(announced[0].BatchID, newer) {
+		t.Fatalf("announced %+v, want the newer batch kept", announced)
 	}
 }
 

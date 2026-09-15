@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
 	"github.com/ethersphere/bee/v2/pkg/providers"
+	"github.com/ethersphere/bee/v2/pkg/retrieval"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -34,6 +36,10 @@ type fakeProviders struct {
 	records    []*providers.Record
 	hints      []swarm.Address
 	discovered [][]byte
+	sets       []providers.Adder
+	// lookupHasSet records, per Discover, whether its context carried a
+	// preferred set
+	lookupHasSet []bool
 }
 
 func (f *fakeProviders) Announce(_ context.Context, k, batchID []byte) error {
@@ -63,10 +69,13 @@ func (f *fakeProviders) Lookup(context.Context, []byte) ([]*providers.Record, er
 	return f.records, nil
 }
 
-func (f *fakeProviders) Discover(_ context.Context, k []byte, _ providers.Adder) {
+func (f *fakeProviders) Discover(ctx context.Context, k []byte, set providers.Adder) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.discovered = append(f.discovered, k)
+	f.sets = append(f.sets, set)
+	// the lookup's own reads must not go to the download's preferred peers
+	f.lookupHasSet = append(f.lookupHasSet, retrieval.PreferredPeers(ctx) != nil)
 }
 
 func (f *fakeProviders) ConnectHints(_ context.Context, overlays []swarm.Address) {
@@ -282,6 +291,93 @@ func TestProvidersDiscoverAfterManyChunks(t *testing.T) {
 	}
 	if len(fake.hints) != 1 || !fake.hints[0].Equal(hint) {
 		t.Fatalf("hints %v, want the one named on /bytes", fake.hints)
+	}
+}
+
+// uploadProviderBytes uploads chunks worth of data through /bytes and returns
+// its reference.
+func uploadProviderBytes(t *testing.T, client *http.Client, chunks int, encrypt bool) swarm.Address {
+	t.Helper()
+	content := make([]byte, chunks*swarm.ChunkSize)
+	for i := range content {
+		content[i] = byte(i*13 + chunks)
+	}
+	var resp api.BytesPostResponse
+	jsonhttptest.Request(t, client, http.MethodPost, "/bytes", http.StatusCreated,
+		jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
+		jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
+		jsonhttptest.WithRequestHeader(api.SwarmRedundancyLevelHeader, "0"),
+		jsonhttptest.WithRequestHeader(api.SwarmEncryptHeader, strconv.FormatBool(encrypt)),
+		jsonhttptest.WithRequestBody(bytes.NewReader(content)),
+		jsonhttptest.WithUnmarshalJSONResponse(&resp),
+	)
+	return resp.Reference
+}
+
+// TestProvidersSharedSet tests that downloads of one reference without a hint
+// share one preferred set, that a hinted download gets its own, and that no
+// lookup runs with a download's preferred peers.
+func TestProvidersSharedSet(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeProviders{}
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:    mockstorer.New(),
+		Post:      mockpost.New(mockpost.WithAcceptAll()),
+		Providers: fake,
+	})
+	ref := uploadProviderBytes(t, client, 100, false)
+
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+ref.String(), http.StatusOK)
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+ref.String(), http.StatusOK)
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+ref.String(), http.StatusOK,
+		jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, swarm.RandAddress(t).String()),
+	)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.sets) != 3 {
+		t.Fatalf("%d lookups, want one per download", len(fake.sets))
+	}
+	if fake.sets[0] != fake.sets[1] {
+		t.Fatal("two downloads without a hint did not share a preferred set")
+	}
+	if fake.sets[2] == fake.sets[0] {
+		t.Fatal("a hinted download used the shared set")
+	}
+	for i, has := range fake.lookupHasSet {
+		if has {
+			t.Fatalf("lookup %d ran with the download's preferred peers", i)
+		}
+	}
+}
+
+// TestProvidersEncryptedReference tests that an encrypted reference is never
+// announced or looked up, and that downloading one starts no lookup.
+func TestProvidersEncryptedReference(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeProviders{}
+	st := mockstorer.New()
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:    st,
+		Post:      mockpost.New(mockpost.WithAcceptAll()),
+		Providers: fake,
+	})
+	ref := uploadProviderBytes(t, client, 100, true)
+	if len(ref.Bytes()) != 2*swarm.HashSize {
+		t.Fatalf("encrypted reference of %d bytes", len(ref.Bytes()))
+	}
+	pinProvided(t, st, ref)
+
+	jsonhttptest.Request(t, client, http.MethodPost, "/wasp/providers/"+ref.String(), http.StatusBadRequest, withProvidersBatch())
+	jsonhttptest.Request(t, client, http.MethodGet, "/wasp/providers/"+ref.String()+"/lookup", http.StatusBadRequest)
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+ref.String(), http.StatusOK)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.announced) != 0 || len(fake.discovered) != 0 {
+		t.Fatalf("encrypted reference reached the service: announced %d, looked up %d", len(fake.announced), len(fake.discovered))
 	}
 }
 

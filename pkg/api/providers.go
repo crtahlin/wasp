@@ -127,14 +127,18 @@ type providerSetEntry struct {
 }
 
 // providerSet returns the preferred set shared by all downloads of content
-// key k for providerSetTTL, so that discovered providers, and the providers
-// dropped for missing chunks, carry over from one request to the next.
+// key k, so that discovered providers, and the providers dropped for missing
+// chunks, carry over from one request to the next. A set is kept until
+// providerSetTTL after its last use; a provider is dropped during a use, so it
+// stays dropped for its full demotion period.
 func (s *Service) providerSet(k []byte) *retrieval.PreferredSet {
 	s.providerSetsMu.Lock()
 	defer s.providerSetsMu.Unlock()
 
 	now := time.Now()
 	if e, ok := s.providerSets[string(k)]; ok && now.Before(e.expires) {
+		e.expires = now.Add(providerSetTTL)
+		s.providerSets[string(k)] = e
 		return e.set
 	}
 	if s.providerSets == nil {

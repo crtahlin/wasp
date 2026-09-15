@@ -5,6 +5,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -259,6 +260,10 @@ func (s *Service) Announced() ([]Announcement, error) {
 // Lookup returns the verified providers of content key k in the current
 // window. Results, empty or not, are cached for lookupCacheTTL.
 func (s *Service) Lookup(ctx context.Context, k []byte) ([]*Record, error) {
+	// only plain references have records; see checkKey
+	if len(k) != swarm.HashSize {
+		return nil, nil
+	}
 	key := string(k)
 
 	s.mu.Lock()
@@ -599,12 +604,20 @@ func (s *Service) save(a Announcement) error {
 	return s.opts.Store.Put(announcedKey(a.Key), a)
 }
 
-// saveIfAnnounced saves a, unless it was withdrawn while the loop was
-// publishing it.
+// saveIfAnnounced saves a, unless it was withdrawn, or announced again with
+// another batch, while the loop was publishing it.
 func (s *Service) saveIfAnnounced(a Announcement) error {
 	s.annMu.Lock()
 	defer s.annMu.Unlock()
-	if !s.isAnnounced(a.Key) {
+
+	var cur Announcement
+	if err := s.opts.Store.Get(announcedKey(a.Key), &cur); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if !bytes.Equal(cur.BatchID, a.BatchID) {
 		return nil
 	}
 	return s.save(a)

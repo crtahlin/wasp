@@ -313,7 +313,8 @@ only. Forwarded requests never carry a preferred set.
 - **Demotion.** After 16 misses in a row from one provider for one K, the requester
   drops that provider for that K for 10 minutes. An invalid chunk from a provider
   drops it at once.
-- **Sharing.** Downloads of the same K share one preferred set for 10 minutes, so
+- **Sharing.** Downloads of the same K share one preferred set, kept until 10 minutes after
+  its last use, so
   discovered providers and dropped providers carry over from one request to the
   next. An explicit hint applies to its own request only, so one client's hint
   never steers another client's downloads.

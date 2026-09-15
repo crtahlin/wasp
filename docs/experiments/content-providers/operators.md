@@ -52,9 +52,10 @@ providers directly with the `Wasp-Providers` header (up to 8 hex overlays).
 
 What it costs you:
 
-- **Up to 24 extra retrievals per reference,** repeated at most every 10 minutes
-  while downloads of it continue. Some of them are unpaid work for the nodes that
-  forward them.
+- **Up to 24 extra retrievals per reference,** usually repeated at most once every
+  10 minutes while downloads of it continue. Downloads that start at the same
+  moment can each run one. Some of them are unpaid work for the nodes that forward
+  them.
 - **The provider learns what you download.** It sees that a request comes from
   your node itself, not forwarded for someone else.
 

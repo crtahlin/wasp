@@ -293,6 +293,69 @@ func TestPreferredOnlyConnected(t *testing.T) {
 	}
 }
 
+// TestPreferredMissStopsTimer tests that a preferred attempt that misses before
+// preferredWait does not leave its timer to start a second normal attempt.
+func TestPreferredMissStopsTimer(t *testing.T) {
+	t.Parallel()
+
+	var (
+		chunk        = testingc.FixtureChunk("0033")
+		clientAddr   = swarm.RandAddress(t)
+		providerAddr = swarm.RandAddress(t)
+		holder1      = swarm.RandAddress(t)
+		holder2      = swarm.RandAddress(t)
+		pricer       = pricermock.NewMockService(defaultPrice, defaultPrice)
+	)
+
+	// a holder that answers after 600 ms: after the 500 ms preferred timer,
+	// before the 1 s preemptive attempt
+	slowHolder := func(addr swarm.Address) p2p.ProtocolSpec {
+		st := &testStorer{ChunkStore: inmemchunkstore.New()}
+		if err := st.Put(context.Background(), chunk); err != nil {
+			t.Fatal(err)
+		}
+		spec := createRetrieval(t, addr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false).Protocol()
+		handler := spec.StreamSpecs[0].Handler
+		spec.StreamSpecs[0].Handler = func(ctx context.Context, p p2p.Peer, s p2p.Stream) error {
+			time.Sleep(600 * time.Millisecond)
+			return handler(ctx, p, s)
+		}
+		return spec
+	}
+
+	provider := createRetrieval(t, providerAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	provider.SetProvidersEnabled(true)
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{
+			providerAddr.String(): provider.Protocol(),
+			holder1.String():      slowHolder(holder1),
+			holder2.String():      slowHolder(holder2),
+		}),
+	)
+	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		topologymock.NewTopologyDriver(topologymock.WithPeers(providerAddr, holder1, holder2)), log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	client.SetProvidersEnabled(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(providerAddr))
+	if _, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts := 0
+	for _, h := range []swarm.Address{holder1, holder2} {
+		if records, err := recorder.Records(h, "retrieval", "1.4.0", "retrieval"); err == nil {
+			attempts += len(records)
+		}
+	}
+	if attempts != 1 {
+		t.Fatalf("%d normal attempts, want 1: the missed preferred attempt's timer started another", attempts)
+	}
+}
+
 // TestPreferredInvalidChunkDemotes tests that a provider that delivers data
 // not matching the chunk address is dropped at once, and that the chunk is
 // then retrieved normally.
