@@ -7,7 +7,7 @@ is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
   on 2026-09-10.
-- **wasp described:** `main` at `2b9233f5`, 2026-09-10. The latest wasp release is
+- **wasp described:** `main` at `bb4182ac`, 2026-09-16. The latest wasp release is
   v0.1.3.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
 
@@ -67,6 +67,7 @@ For every change in full, run `git log --first-parent main`.
 | Pull-sync during sampling | Historical syncing continues while the node computes its reserve sample, the proof of storage for a redistribution round. | Historical syncing pauses while the sample runs. Push-sync and retrieval continue. | `main` | | [#23](https://github.com/crtahlin/wasp/issues/23) |
 | Advertised address behind NAT | Rebuilt on every handshake from how each peer sees the node, so it changes with every NAT port mapping. The node re-signs and re-advertises it until it can lose all its peers. | Pinned once a public address is seen, and changed only after a sustained run of handshakes shows a different public IP. No change for a node with `nat-addr` set. | `main` | | [#225](https://github.com/crtahlin/wasp/pull/225) |
 | Push-sync on a node using reserve capacity doubling | Decides whether to store a pushed chunk directly from the lowered storage radius. | Decides from the committed depth, the storage radius plus the doubling, so its receipts are never shallower than the network radius. No change for a node without doubling. | `main` | | [#222](https://github.com/crtahlin/wasp/pull/222) |
+| Verifying a received cheque | Asks the chain for the chequebook's issuer, balance and paid out total on every cheque, while holding a node-wide lock. That is three calls, about 0.3 s, per cheque. | Reads the issuer once per chequebook and keeps it, and reuses the balance and paid out total for 30 seconds. The signature, beneficiary and increasing payout checks are unchanged. Within those 30 seconds a cheque from a chequebook drained by someone else can be accepted, and one from a chequebook just topped up can be refused. | `main` | Yes | [#301](https://github.com/crtahlin/wasp/issues/301), [#302](https://github.com/crtahlin/wasp/issues/302) |
 
 ## Existing Bee settings that behave differently
 
@@ -154,6 +155,7 @@ on a node that has stake stranded in one of them. `stake-recovery-on-startup` is
 | Adds a log line when the index store stops accepting writes. | v0.1.2 | | [#180](https://github.com/crtahlin/wasp/pull/180) |
 | Adds Pebble's physical write bytes. | `main` | | [#218](https://github.com/crtahlin/wasp/pull/218) |
 | Adds `bee_retrieval_preferred_attempts`, `bee_retrieval_preferred_hits`, `bee_retrieval_preferred_misses`, `bee_retrieval_local_only_misses` and `bee_retrieval_local_only_limited`, for content providers. | `main` | | [#290](https://github.com/crtahlin/wasp/issues/290) |
+| Adds `bee_chequestore_chain_reads` and `bee_chequestore_chain_reads_avoided`, chain calls made and not made while verifying received cheques. | `main` | | [#301](https://github.com/crtahlin/wasp/issues/301), [#302](https://github.com/crtahlin/wasp/issues/302) |
 | Removes four hive ping metrics that Bee declares but never records. | v0.1.0 | Yes | [#138](https://github.com/crtahlin/wasp/issues/138) |
 
 ## Version, identity and packaging

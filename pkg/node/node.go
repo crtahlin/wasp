@@ -1643,6 +1643,9 @@ func NewBee(
 		if swapService != nil {
 			apiService.MustRegisterMetrics(swapService.Metrics()...)
 		}
+		if chequeStoreMetrics, ok := chequeStore.(metrics.Collector); ok {
+			apiService.MustRegisterMetrics(chequeStoreMetrics.Metrics()...)
+		}
 
 		apiService.Configure(signer, tracer, api.Options{
 			CORSAllowedOrigins: o.CORSAllowedOrigins,

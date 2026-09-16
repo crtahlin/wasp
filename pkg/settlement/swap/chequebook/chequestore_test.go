@@ -55,11 +55,11 @@ func TestReceiveCheque(t *testing.T) {
 		factory,
 		chainID,
 		beneficiary,
+		// the second cheque from this chequebook makes no chain call: the issuer
+		// is stored and the liquidity values are still valid, so a fourth call
+		// would fail the sequence as unexpected
 		transactionmock.New(
 			transactionmock.WithABICallSequence(
-				transactionmock.ABICall(&chequebookABI, chequebookAddress, common.BytesToHash(issuer.Bytes()).Bytes(), "issuer"),
-				transactionmock.ABICall(&chequebookABI, chequebookAddress, cumulativePayout2.FillBytes(make([]byte, 32)), "balance"),
-				transactionmock.ABICall(&chequebookABI, chequebookAddress, big.NewInt(0).FillBytes(make([]byte, 32)), "paidOut", beneficiary),
 				transactionmock.ABICall(&chequebookABI, chequebookAddress, common.BytesToHash(issuer.Bytes()).Bytes(), "issuer"),
 				transactionmock.ABICall(&chequebookABI, chequebookAddress, cumulativePayout2.FillBytes(make([]byte, 32)), "balance"),
 				transactionmock.ABICall(&chequebookABI, chequebookAddress, big.NewInt(0).FillBytes(make([]byte, 32)), "paidOut", beneficiary),
