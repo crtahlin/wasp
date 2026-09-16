@@ -182,6 +182,20 @@ has been drained by someone else since the last reading.
 - The same exposure already exists between the check and the moment a cheque is
   cashed, which can be much later. The check guards against an obviously worthless
   cheque; it is not a guarantee of payment.
+- **A separate risk, which does not expire: a wrong but well-formed issuer is
+  kept for good.** The guard above catches an entry that is missing, zero or
+  unparseable. It does not catch one that decodes to a valid address which is
+  not the issuer. Only a chain endpoint answering wrongly can produce that, but
+  if it does, every later cheque from that chequebook fails with
+  `ErrChequeInvalid` for as long as the entry exists, and there is no tool or
+  documented procedure for removing it from the statestore. Upstream recovers by
+  itself on the next cheque, because it reads the issuer every time; a node
+  running this change does not. That asymmetry, not the 30 seconds, is the part
+  of this change that is permanent.
+- The in-memory liquidity map is not pruned, so an entry outlives its validity
+  until the process ends. It is bounded by the chequebooks that have paid this
+  node since it started, each gated by `factory.VerifyChequebook`, at a few tens
+  of bytes each, so it is recorded here rather than guarded.
 
 ## Protocol impact
 
@@ -233,6 +247,53 @@ about 0.3 s, and condition 4 lands near condition 2.
 beyond the spread, or no rise in cheques accepted per second node-wide. Either
 would mean the chain calls are not what they appear to cost, and the change would
 be reverted rather than kept.
+
+**Amended on 2026-09-16, after the measurement** ([results](results.md)). The
+rule above is left exactly as it was written, because a criterion changed after
+seeing the numbers has to be visible as one. It could not be applied:
+
+- Its first figure was measured and did not move.
+- Its second figure was never exercised. Reaching it needs several peers paying
+  at once; the bench managed about 1 cheque a second against a ceiling near 3.3,
+  so nothing ever queued.
+- Its inference does not hold. The rule reads "not what they appear to cost" as
+  "cheap, so this does not matter". The calls are not free: at least about
+  0.05 s each on a fast endpoint, and about 0.55 s on a slow one, where removing
+  them is worth about 42% of the time it takes to accept a cheque.
+
+**The gain this spec claims is still unproven.** The node-wide rise this spec
+set out to show was never measured, and it is absent from the criterion below,
+which would otherwise let the change pass on a test that omits the thing it was
+for. It is left out only because this bench cannot generate the load, not
+because it stopped mattering. It stays open as
+[#312](https://github.com/crtahlin/wasp/issues/312), and the central claim in
+[#300](https://github.com/crtahlin/wasp/issues/300) should not be treated as
+established until that runs.
+
+**The criterion this change was judged by.** It applies to this experiment and
+is not a rule for others:
+
+- **The benefit shows where the calls are dear.** Met: about 42% at 0.55 s a
+  call ([results](results.md)), on thin samples, nine cheques across four runs,
+  two of those runs holding a single cheque. This is the only one of the three
+  that could have failed and did not, so its thinness is the thinness of the
+  decision.
+- **Nothing measurably worse was detected.** Met, at a sample size that could
+  only have caught a regression larger than the run-to-run spread, which ran
+  0.117 to 0.867 s for the patched build against 0.228 to 0.865 s for stock.
+- **Chain reads per cheque fall.** Met, about 93%. This restates the change and
+  could only fail if the implementation were broken, so it belongs in the test
+  plan below; it is listed for completeness, not as a test.
+
+What a chain call costs at the time must be stated beside any future figure for
+this experiment, because the size of the effect follows it.
+
+**Decision, 2026-09-16: kept**, on resource use rather than on the gain this
+spec claimed. What was accepted, stated rather than bounded by reference: a 30
+second window in which a drained chequebook can pass, which is itself a widening
+of a gap that stays open until a cheque is cashed; and, separately and
+permanently, a wrong but well-formed cached issuer would block that chequebook
+for good where upstream recovers on its own.
 
 ## Rollout and rollback
 

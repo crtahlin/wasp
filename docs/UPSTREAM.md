@@ -68,9 +68,17 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#176](https://github.com/crtahlin/wasp/issues/176) | A write-stalled index store has no in-process recovery | done | `fix/176-write-pause-log-line` | [`150d644c`](https://github.com/crtahlin/wasp/commit/150d644c) |
 | [#282](https://github.com/crtahlin/wasp/issues/282) | Research: can a light node serve its cache to offload retrieval bandwidth from full nodes? | open | - | - |
 | [#300](https://github.com/crtahlin/wasp/issues/300) | swap: three chain calls per received cheque cap how fast one peer can serve another | open | - | - |
-| [#301](https://github.com/crtahlin/wasp/issues/301) | chequebook: read the chequebook issuer once instead of on every cheque | done | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
-| [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
+| [#301](https://github.com/crtahlin/wasp/issues/301) | chequebook: read the chequebook issuer once instead of on every cheque | done, neutral | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
+| [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done, neutral (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#303](https://github.com/crtahlin/wasp/issues/303) | accounting: allow more than one payment in flight per peer | open | - | - |
 | [#304](https://github.com/crtahlin/wasp/issues/304) | accounting: each cheque clears only a slice of the debt | open | - | - |
+
+#301 and #302 are done, and they settle only half of what #300 says. Its per
+peer half stands: the three chain calls were confirmed directly, and the rate at
+which one peer can serve another was measured in #290. Its node-wide half, the
+cost across all of a node's peers at once, was never exercised, so #300 stays
+open and the work needed to answer it is
+[#312](https://github.com/crtahlin/wasp/issues/312). A reader should not take
+the two closed rows as evidence for that half.
 
 Generated with help of AI.

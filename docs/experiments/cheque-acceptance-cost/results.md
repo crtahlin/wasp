@@ -93,9 +93,17 @@ written.**
 absence of any measured harm, and **amend the criterion** so that it states what
 a chain call costs at the time of measurement and judges the change against
 that. Amending a criterion is not the same as meeting it, and this document does
-not claim the original was met. Whether to keep or revert is the operator's
-decision, which is why the ledger records this as having no measurable effect in
-normal operation rather than as validated.
+not claim the original was met. The operator decided on 2026-09-16 to keep it,
+on resource use rather than on the gain the spec claimed. Two things were
+accepted: a 30 second window in which a drained chequebook can pass, itself a
+widening of a gap that stays open until a cheque is cashed, and, permanently, a
+wrong but well-formed cached issuer that would block that chequebook for good
+where upstream recovers on its own. The criterion was amended in the spec at the
+same time and marked as amended after the measurement, and the node-wide gain
+the spec claimed remains unproven and open as
+[#312](https://github.com/crtahlin/wasp/issues/312). The ledger records this as
+having no measurable effect in normal operation rather than as validated,
+because that is what the main comparison showed.
 
 ## Setup
 
