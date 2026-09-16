@@ -7,7 +7,7 @@ is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
   on 2026-09-10.
-- **wasp described:** `main` at `bb4182ac`, 2026-09-16. The latest wasp release is
+- **wasp described:** `main` at `a89a3a83`, 2026-09-16. The latest wasp release is
   v0.1.3.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
 
