@@ -20,7 +20,7 @@ commits below are wasp's own.
 - **Commit** links the merge commit on `main`.
 
 Derived from the experiment ledger ([`experiments/INDEX.md`](experiments/INDEX.md))
-and the git history on 2026-09-11, against the upstream base
+and the git history, last refreshed on 2026-09-16, against the upstream base
 `v2.8.2`. Two issues (#73, #76) were closed not planned. Wasp issue numbers can
 collide with upstream Bee pull-request numbers in the shared history, so the
 commits here were resolved from fork-only merges, not by issue number alone.
@@ -62,5 +62,6 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#167](https://github.com/crtahlin/wasp/issues/167) | kademlia's bounded dial wait ignores shutdown | done | `fix/167-shutdown-aware-connector-wait` | [`c5feed0b`](https://github.com/crtahlin/wasp/commit/c5feed0b) |
 | [#173](https://github.com/crtahlin/wasp/issues/173) | The store read benchmarks charge harness overhead to the engine | done | `fix/173-store-read-benchmark-overhead` | [`fcb110f0`](https://github.com/crtahlin/wasp/commit/fcb110f0) |
 | [#176](https://github.com/crtahlin/wasp/issues/176) | A write-stalled index store has no in-process recovery | done | `fix/176-write-pause-log-line` | [`150d644c`](https://github.com/crtahlin/wasp/commit/150d644c) |
+| [#300](https://github.com/crtahlin/wasp/issues/300) | Three chain calls per received cheque cap how fast one peer can serve another | open | - | - |
 
 Generated with help of AI.
