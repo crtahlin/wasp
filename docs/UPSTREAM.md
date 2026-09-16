@@ -63,5 +63,9 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#173](https://github.com/crtahlin/wasp/issues/173) | The store read benchmarks charge harness overhead to the engine | done | `fix/173-store-read-benchmark-overhead` | [`fcb110f0`](https://github.com/crtahlin/wasp/commit/fcb110f0) |
 | [#176](https://github.com/crtahlin/wasp/issues/176) | A write-stalled index store has no in-process recovery | done | `fix/176-write-pause-log-line` | [`150d644c`](https://github.com/crtahlin/wasp/commit/150d644c) |
 | [#300](https://github.com/crtahlin/wasp/issues/300) | Three chain calls per received cheque cap how fast one peer can serve another | open | - | - |
+| [#301](https://github.com/crtahlin/wasp/issues/301) | Read the chequebook issuer once instead of on every cheque | open | - | - |
+| [#302](https://github.com/crtahlin/wasp/issues/302) | Do not make cheque acceptance wait for the liquidity check | open | - | - |
+| [#303](https://github.com/crtahlin/wasp/issues/303) | Allow more than one payment in flight per peer | open | - | - |
+| [#304](https://github.com/crtahlin/wasp/issues/304) | Each cheque clears only a slice of the debt | open | - | - |
 
 Generated with help of AI.
