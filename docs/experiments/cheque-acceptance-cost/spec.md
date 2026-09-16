@@ -55,9 +55,9 @@ Measured on the bench (#290):
   peer" to "registering payment sent" in the sender's log;
 - in one 16 MiB download, 9 cheques went to one peer, about one every **1.2 s**,
   each clearing about 6,400,000 units, roughly 21 chunks;
-- so one peer served another at about **34 chunks a second**: 14 from the free
-  allowance and 20 from cheques. The same download pulled about 800 chunks a
-  second in total, spread over roughly 120 peers.
+- so one peer served another at about **34 chunks a second**: about 14 from the
+  free allowance and about 18 from cheques. The same download pulled about 800
+  chunks a second in total, spread over roughly 120 peers.
 
 Two costs follow:
 
@@ -71,8 +71,9 @@ Two costs follow:
 
 Neither of the first two calls has to be on the path that accepts a cheque:
 
-- **The issuer is fixed** for the life of a chequebook. The contract sets it at
-  construction and exposes it read-only, and the code's own comment says so.
+- **The issuer is fixed** for the life of a chequebook. The contract's interface
+  exposes `issuer` as a read-only value and offers no way to change it, and the
+  code's own comment says it does not change.
   Reading it once per chequebook weakens nothing: the signature is still checked
   against that issuer.
 - **The liquidity check is a snapshot** that can be false a moment after it is
@@ -175,8 +176,8 @@ has been drained by someone else since the last reading.
   4 MB. At the rate this spec expects afterwards, about 39 chunks a second, it is
   about 1,200 chunks, 4.8 MB.
 - If #303 and #304 later lift the accounting gates, the same 30 s covers whatever
-  the link then carries: at 800 chunks a second that is 24,000 chunks, about
-  100 MB. **The constant must be revisited when those land**, and this spec says so
+  the link then carries. Taking the 800 chunks a second of a whole download, which
+  assumes one provider served all of it, that is 24,000 chunks, about 100 MB. **The constant must be revisited when those land**, and this spec says so
   rather than leaving it to be discovered.
 - The same exposure already exists between the check and the moment a cheque is
   cashed, which can be much later. The check guards against an obviously worthless
