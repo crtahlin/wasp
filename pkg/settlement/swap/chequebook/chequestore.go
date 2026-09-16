@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethersphere/bee/v2/pkg/crypto"
@@ -21,6 +22,15 @@ import (
 const (
 	// prefix for the persistence key
 	lastReceivedChequePrefix = "swap_chequebook_last_received_cheque_"
+	// prefix for the persistence key of a chequebook's issuer. It must not begin
+	// with lastReceivedChequePrefix, which LastCheques iterates over, reading an
+	// address out of every key it finds.
+	issuerPrefix = "swap_chequebook_issuer_"
+	// chequeLiquidityValidity is how long a chequebook's balance and paid out
+	// total are reused before they are read from the chain again. Reading them
+	// for every cheque puts three chain calls on the path that accepts one,
+	// which is what limits how fast debt clears with a peer.
+	chequeLiquidityValidity = 30 * time.Second
 )
 
 var (
@@ -56,6 +66,19 @@ type chequeStore struct {
 	transactionService transaction.Service
 	beneficiary        common.Address // the beneficiary we expect in cheques sent to us
 	recoverChequeFunc  RecoverChequeFunc
+	metrics            metrics
+	timeNow            func() time.Time
+	// liquidity is what each chequebook's contract last reported. It is a cache,
+	// so it is empty again after a restart, and is read under lock.
+	liquidity map[common.Address]liquidity
+}
+
+// liquidity is what a chequebook could pay this beneficiary when it was last
+// read from the chain, and when that was.
+type liquidity struct {
+	balance        *big.Int
+	alreadyPaidOut *big.Int
+	readAt         time.Time
 }
 
 type RecoverChequeFunc func(cheque *SignedCheque, chainID int64) (common.Address, error)
@@ -76,12 +99,20 @@ func NewChequeStore(
 		transactionService: transactionService,
 		beneficiary:        beneficiary,
 		recoverChequeFunc:  recoverChequeFunc,
+		metrics:            newMetrics(),
+		timeNow:            time.Now,
+		liquidity:          make(map[common.Address]liquidity),
 	}
 }
 
 // lastReceivedChequeKey computes the key where to store the last cheque received from a chequebook.
 func lastReceivedChequeKey(chequebook common.Address) string {
 	return fmt.Sprintf("%s_%x", lastReceivedChequePrefix, chequebook)
+}
+
+// issuerKey computes the key where to store the issuer of a chequebook.
+func issuerKey(chequebook common.Address) string {
+	return fmt.Sprintf("%s_%x", issuerPrefix, chequebook)
 }
 
 // LastCheque returns the last cheque we received from a specific chequebook.
@@ -159,11 +190,8 @@ func (s *chequeStore) ReceiveCheque(ctx context.Context, cheque *SignedCheque, e
 		return nil, ErrChequeValueTooLow
 	}
 
-	// blockchain calls below
-	contract := newChequebookContract(cheque.Chequebook, s.transactionService)
-
-	// this does not change for the same chequebook
-	expectedIssuer, err := contract.Issuer(ctx)
+	// the issuer is read from the chain only the first time, see issuerOf
+	expectedIssuer, err := s.issuerOf(ctx, cheque.Chequebook)
 	if err != nil {
 		return nil, err
 	}
@@ -178,14 +206,9 @@ func (s *chequeStore) ReceiveCheque(ctx context.Context, cheque *SignedCheque, e
 		return nil, ErrChequeInvalid
 	}
 
-	// basic liquidity check
-	// could be omitted as it is not particularly useful
-	balance, err := contract.Balance(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	alreadyPaidOut, err := contract.PaidOut(ctx, s.beneficiary)
+	// basic liquidity check, from values read at most once per
+	// chequeLiquidityValidity, see liquidityOf
+	balance, alreadyPaidOut, err := s.liquidityOf(ctx, cheque.Chequebook)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +224,66 @@ func (s *chequeStore) ReceiveCheque(ctx context.Context, cheque *SignedCheque, e
 	}
 
 	return amount, nil
+}
+
+// issuerOf returns the chequebook's issuer, reading it from the chain only the
+// first time. A chequebook cannot change its issuer, so the value is kept for
+// good. An entry that is missing, zero or unreadable counts as absent, so that
+// one bad entry cannot reject every later cheque from that chequebook.
+func (s *chequeStore) issuerOf(ctx context.Context, chequebook common.Address) (common.Address, error) {
+	var stored common.Address
+	err := s.store.Get(issuerKey(chequebook), &stored)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return common.Address{}, err
+	}
+	if err == nil && stored != (common.Address{}) {
+		s.metrics.ChainReadsAvoided.Inc()
+		return stored, nil
+	}
+
+	issuer, err := newChequebookContract(chequebook, s.transactionService).Issuer(ctx)
+	if err != nil {
+		return common.Address{}, err
+	}
+	s.metrics.ChainReads.Inc()
+
+	if err := s.store.Put(issuerKey(chequebook), issuer); err != nil {
+		return common.Address{}, err
+	}
+
+	return issuer, nil
+}
+
+// liquidityOf returns what the chequebook could pay this beneficiary, reading
+// the chain at most once per chequeLiquidityValidity. Both values come from the
+// same reading, so a cash-out by this node moves them together and cannot make
+// the check answer wrongly.
+func (s *chequeStore) liquidityOf(ctx context.Context, chequebook common.Address) (*big.Int, *big.Int, error) {
+	if l, ok := s.liquidity[chequebook]; ok && s.timeNow().Sub(l.readAt) < chequeLiquidityValidity {
+		s.metrics.ChainReadsAvoided.Add(2)
+		return l.balance, l.alreadyPaidOut, nil
+	}
+
+	contract := newChequebookContract(chequebook, s.transactionService)
+
+	balance, err := contract.Balance(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	alreadyPaidOut, err := contract.PaidOut(ctx, s.beneficiary)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.metrics.ChainReads.Add(2)
+
+	s.liquidity[chequebook] = liquidity{
+		balance:        balance,
+		alreadyPaidOut: alreadyPaidOut,
+		readAt:         s.timeNow(),
+	}
+
+	return balance, alreadyPaidOut, nil
 }
 
 // RecoverCheque recovers the issuer ethereum address from a signed cheque
