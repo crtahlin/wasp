@@ -261,6 +261,112 @@ Raw data:
 | 20:03:08 | 2 | 3 | 0.488 | 5.299 | 123 | 0 | 0 | 0 | 0 | 4129 |
 | 20:04:22 | 3 | 3 | 0.312 | 4.858 | 123 | 787 | 789 | 787 | 2 | 4131 |
 
+## Exploratory: payment-threshold sweep
+
+**Outside the fixed method, and written before its runs** (measurement.md,
+"Exploratory: provider payment-threshold sweep"). It does not change the result
+judged by the method's rules.
+
+**What ran.** Three of the four planned steps: 13,500,000 (the default),
+27,000,000 and 54,000,000. At each step P was restarted, settled for 15 minutes
+and until it had at least 100 peers, and Q's accounting was read to confirm the
+threshold it had received. The 108,000,000 step did not run, for the reason
+below, so the only measurement at that threshold is the earlier one in Table 4,
+taken in a different session.
+
+**Table 5: SWAP, P at three payment thresholds, three runs each**
+
+| Threshold | Condition | Time to first byte, s | Total, s | Chunks from P | Share of file |
+|---|---|---|---|---|---|
+| 13,500,000 | 2, no provider known | 0.49 (0.44-0.57) | 7.05 (6.95-8.81) | 0 | 0% |
+| 13,500,000 | 3, hint to P | 0.46 (0.43-0.48) | 6.80 (6.68-7.35) | 176 (164-235) | 4.3% |
+| 27,000,000 | 2, no provider known | 0.71 (0.65-0.76) | 8.63 (7.96-9.24) | 0 | 0% |
+| 27,000,000 | 3, hint to P | 0.31 (0.31-0.58) | 8.10 (7.90-8.74) | 453 (407-486) | 11.1% |
+| 54,000,000 | 2, no provider known | 0.90 (0.70-1.21) | 10.79 (8.16-13.39) | 0 | 0% |
+| 54,000,000 | 3, hint to P | 0.308 and 0.308 | 9.46 and 9.57 | 1261 and 1405 | 31% and 34% |
+
+The 54,000,000 step has **two** runs of condition 3, not three. Its figures are
+both runs, not a median.
+
+**What it shows:**
+- **The provider's share rises with the threshold**, from about 4% of the file at
+  the default to about 11% at twice the default and about a third at four times
+  it. The direction is clear and it matches the explanation in "Why the
+  provider's share is small".
+- **Time to first byte is the steadiest effect.** With a hint it was 0.308 s and
+  0.308 s at 54,000,000, and 0.307 s to 0.312 s in the earlier session at
+  108,000,000, while the controls in the same blocks ranged from 0.44 s to
+  1.21 s. The hint saves the search for a source, which is a fixed cost and does
+  not depend on the threshold.
+- **Total time is not settled by this sweep.** Condition 3 is faster than
+  condition 2 in every block, but the control spreads are wide, and at
+  54,000,000 the three controls ran 8.16 s, 10.79 s and 13.39 s.
+
+**Two cautions about the chunk counts, which matter more than the counts:**
+- **Counts from different blocks are not comparable.** Credit available over a
+  download is roughly the threshold plus a part that grows with how long the
+  download lasts, so a slower download lets a provider deliver more at the same
+  threshold. The blocks got slower as the campaign went on: the same condition
+  took 5.3 s in the earlier session and 10.79 s at the 54,000,000 step.
+- **Dividing by the duration does not repair this.** Delivery is roughly a fixed
+  amount plus a rate, not a pure rate, so chunks per second is a rough
+  normalization and not a quantity that should be equal across blocks. It is
+  reported here only to show the size of the effect: about 26 chunks a second at
+  the default, 52 at 27,000,000, 133 to 147 at 54,000,000, and about 178 in the
+  earlier 108,000,000 session.
+
+Taken together, the 54,000,000 step showing a larger **share** than the earlier
+108,000,000 session is explained by its slower downloads, not by a provider doing
+better with less credit. This sweep does not establish how the share behaves
+between 54,000,000 and the maximum.
+
+**Why it stopped early.** P's postage batch filled up. All three of P's batches
+report a utilization ratio of 1, and each is immutable, so an upload fails when
+any of its chunks falls in a bucket that is already full. Every run uploads a
+fresh 16 MB file, and the campaign had done dozens. The first failure was the
+third run of the 54,000,000 step, which returned no reference at all. The run was
+correctly marked invalid, and no bad row reached the data.
+
+**A harness defect this exposed, which cost the time.** When the upload returns
+no reference it also returns no tag, and the wait-for-sync helper was then called
+with no argument. Under `set -u` an unbound argument kills only the subshell of
+the command substitution inside the loop, not the loop, so the helper ran its
+full 240 iterations at 5 seconds each: 20 minutes per failed upload, with a
+retry behind it. The only symptom in the log was an unexplained repeated
+"unbound variable" line with no timestamp. The helper now returns straight away
+when it is given no tag. This is bench tooling, not node code.
+
+P's default payment threshold was restored afterwards, and the node was confirmed
+running on it.
+
+**What a follow-up must state:** a provider that raises its threshold extends more
+unsecured credit to every peer, not only to the peer it wants to help. That is the
+cost to the provider, and it is the reason this is not simply a setting to
+recommend.
+
+**Raw rows**, in the order they ran. The 54,000,000 step has no third run of
+condition 3.
+
+| Threshold | Cond | Round | TTFB s | Total s | From provider |
+|---|---|---|---|---|---|
+| 13,500,000 | 2 | 1 | 0.565 | 8.813 | 0 |
+| 13,500,000 | 3 | 1 | 0.482 | 7.348 | 235 |
+| 13,500,000 | 2 | 2 | 0.444 | 7.051 | 0 |
+| 13,500,000 | 3 | 2 | 0.427 | 6.677 | 164 |
+| 13,500,000 | 2 | 3 | 0.488 | 6.954 | 0 |
+| 13,500,000 | 3 | 3 | 0.458 | 6.797 | 176 |
+| 27,000,000 | 2 | 1 | 0.764 | 9.240 | 0 |
+| 27,000,000 | 3 | 1 | 0.307 | 8.735 | 453 |
+| 27,000,000 | 2 | 2 | 0.653 | 8.629 | 0 |
+| 27,000,000 | 3 | 2 | 0.308 | 8.095 | 407 |
+| 27,000,000 | 2 | 3 | 0.714 | 7.962 | 0 |
+| 27,000,000 | 3 | 3 | 0.580 | 7.899 | 486 |
+| 54,000,000 | 2 | 1 | 1.212 | 13.391 | 0 |
+| 54,000,000 | 3 | 1 | 0.308 | 9.463 | 1261 |
+| 54,000,000 | 2 | 2 | 0.895 | 10.789 | 0 |
+| 54,000,000 | 3 | 2 | 0.308 | 9.574 | 1405 |
+| 54,000,000 | 2 | 3 | 0.700 | 8.156 | 0 |
+
 ## Raw data
 
 One row per run, in the order they ran. "From provider" counts log lines naming P,
