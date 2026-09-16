@@ -11,16 +11,20 @@ commits below are wasp's own.
 
 - **Status** is `done` when the change is merged on `main`, with the ledger's
   outcome added where it has one (`validated` measured on a real node,
-  `neutral` no measurable effect). `not planned` means the issue was closed
+  `neutral` no measurable effect). A `done` row carrying neither word is merged
+  but not yet measured, so the issue itself can still be open. `open` means no
+  wasp change has merged for it yet. `not planned` means the issue was closed
   without a wasp change. `(via #N)` or `(bundled with #N)` means the fix
   landed inside another issue's pull request.
 - **Branch** is the fork branch the work was built on. Fork branches are never
-  deleted, so each one still exists. A dash means the fix shared another issue's
-  branch.
-- **Commit** links the merge commit on `main`.
+  deleted, so each one still exists. A dash means the issue has no branch of its
+  own: the fix shared another issue's branch, the issue is still open, or no
+  wasp change was made.
+- **Commit** links the merge commit on `main`. A dash means no wasp change has
+  merged.
 
 Derived from the experiment ledger ([`experiments/INDEX.md`](experiments/INDEX.md))
-and the git history, last refreshed on 2026-09-16, against the upstream base
+and the git history on 2026-09-16, against the upstream base
 `v2.8.2`. Two issues (#73, #76) were closed not planned. Wasp issue numbers can
 collide with upstream Bee pull-request numbers in the shared history, so the
 commits here were resolved from fork-only merges, not by issue number alone.
@@ -62,10 +66,11 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#167](https://github.com/crtahlin/wasp/issues/167) | kademlia's bounded dial wait ignores shutdown | done | `fix/167-shutdown-aware-connector-wait` | [`c5feed0b`](https://github.com/crtahlin/wasp/commit/c5feed0b) |
 | [#173](https://github.com/crtahlin/wasp/issues/173) | The store read benchmarks charge harness overhead to the engine | done | `fix/173-store-read-benchmark-overhead` | [`fcb110f0`](https://github.com/crtahlin/wasp/commit/fcb110f0) |
 | [#176](https://github.com/crtahlin/wasp/issues/176) | A write-stalled index store has no in-process recovery | done | `fix/176-write-pause-log-line` | [`150d644c`](https://github.com/crtahlin/wasp/commit/150d644c) |
-| [#300](https://github.com/crtahlin/wasp/issues/300) | Three chain calls per received cheque cap how fast one peer can serve another | open | - | - |
-| [#301](https://github.com/crtahlin/wasp/issues/301) | Read the chequebook issuer once instead of on every cheque | open | - | - |
-| [#302](https://github.com/crtahlin/wasp/issues/302) | Do not make cheque acceptance wait for the liquidity check | open | - | - |
-| [#303](https://github.com/crtahlin/wasp/issues/303) | Allow more than one payment in flight per peer | open | - | - |
-| [#304](https://github.com/crtahlin/wasp/issues/304) | Each cheque clears only a slice of the debt | open | - | - |
+| [#282](https://github.com/crtahlin/wasp/issues/282) | Research: can a light node serve its cache to offload retrieval bandwidth from full nodes? | open | - | - |
+| [#300](https://github.com/crtahlin/wasp/issues/300) | swap: three chain calls per received cheque cap how fast one peer can serve another | open | - | - |
+| [#301](https://github.com/crtahlin/wasp/issues/301) | chequebook: read the chequebook issuer once instead of on every cheque | done | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
+| [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
+| [#303](https://github.com/crtahlin/wasp/issues/303) | accounting: allow more than one payment in flight per peer | open | - | - |
+| [#304](https://github.com/crtahlin/wasp/issues/304) | accounting: each cheque clears only a slice of the debt | open | - | - |
 
 Generated with help of AI.
