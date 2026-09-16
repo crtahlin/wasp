@@ -231,21 +231,23 @@ func (s *chequeStore) ReceiveCheque(ctx context.Context, cheque *SignedCheque, e
 // good. An entry that is missing, zero or unreadable counts as absent, so that
 // one bad entry cannot reject every later cheque from that chequebook.
 func (s *chequeStore) issuerOf(ctx context.Context, chequebook common.Address) (common.Address, error) {
+	// An entry this node cannot read counts as absent, whatever went wrong with
+	// it: a store that has lost the key, and one that returns something that is
+	// not an address, both mean the same thing here. Returning the error instead
+	// would reject every later cheque from this chequebook, because nothing
+	// would ever write the entry again. A store that is broken for writing still
+	// reports it, through the Put below.
 	var stored common.Address
-	err := s.store.Get(issuerKey(chequebook), &stored)
-	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		return common.Address{}, err
-	}
-	if err == nil && stored != (common.Address{}) {
+	if err := s.store.Get(issuerKey(chequebook), &stored); err == nil && stored != (common.Address{}) {
 		s.metrics.ChainReadsAvoided.Inc()
 		return stored, nil
 	}
 
+	s.metrics.ChainReads.Inc()
 	issuer, err := newChequebookContract(chequebook, s.transactionService).Issuer(ctx)
 	if err != nil {
 		return common.Address{}, err
 	}
-	s.metrics.ChainReads.Inc()
 
 	if err := s.store.Put(issuerKey(chequebook), issuer); err != nil {
 		return common.Address{}, err
@@ -261,21 +263,25 @@ func (s *chequeStore) issuerOf(ctx context.Context, chequebook common.Address) (
 func (s *chequeStore) liquidityOf(ctx context.Context, chequebook common.Address) (*big.Int, *big.Int, error) {
 	if l, ok := s.liquidity[chequebook]; ok && s.timeNow().Sub(l.readAt) < chequeLiquidityValidity {
 		s.metrics.ChainReadsAvoided.Add(2)
-		return l.balance, l.alreadyPaidOut, nil
+		// copies, so that a caller changing them cannot reach what is kept here
+		return new(big.Int).Set(l.balance), new(big.Int).Set(l.alreadyPaidOut), nil
 	}
 
 	contract := newChequebookContract(chequebook, s.transactionService)
 
+	// counted before the call, so that a call which fails still shows what it
+	// cost the node
+	s.metrics.ChainReads.Inc()
 	balance, err := contract.Balance(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	s.metrics.ChainReads.Inc()
 	alreadyPaidOut, err := contract.PaidOut(ctx, s.beneficiary)
 	if err != nil {
 		return nil, nil, err
 	}
-	s.metrics.ChainReads.Add(2)
 
 	s.liquidity[chequebook] = liquidity{
 		balance:        balance,
@@ -283,7 +289,7 @@ func (s *chequeStore) liquidityOf(ctx context.Context, chequebook common.Address
 		readAt:         s.timeNow(),
 	}
 
-	return balance, alreadyPaidOut, nil
+	return new(big.Int).Set(balance), new(big.Int).Set(alreadyPaidOut), nil
 }
 
 // RecoverCheque recovers the issuer ethereum address from a signed cheque
