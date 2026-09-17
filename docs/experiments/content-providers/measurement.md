@@ -418,6 +418,41 @@ threshold.
 - **Not judged** by the negative-result rules, which stand on the fixed method.
 - **P's default threshold is restored** at the end.
 
+## Measured: the chunk price and the settlement regime
+
+**Taken 2026-09-17, outside the fixed method, on the SWAP block with the
+requester running `0.1.3-324v2-dev` and 113 to 118 peers.** Three sole-source
+runs of the 4,194,304-byte content, at the shipped lookahead buffer, with every
+counter read before and after the run.
+
+**The chunk price, which had been estimated throughout this work and never
+read.** `bee_retrieval_chunk_price` is a summary observed in `prepareCredit`, so
+it counts credit decisions node-wide including relayed retrievals, not
+deliveries from one peer:
+
+| Run | Mean price | Decisions |
+|---|---|---|
+| 1 | 306,735 | 245 |
+| 2 | 306,454 | 2,403 |
+| 3 | 309,141 | 1,769 |
+
+The estimate of 310,000, from `(MaxPO - proximity + 1) x 10,000` with an
+expected proximity of 1, was right to about 1%. **Use the measured figure from
+now on and read the counter in every run.**
+
+**The settlement counters were also read, and they cannot answer the question
+they were first used for.** `bee_swap_total_sent` and
+`bee_pseudosettle_total_sent_pseudosettlements` are unlabelled and therefore
+node-wide, while the free time-based allowance they invite comparison with is
+per peer. The per-peer question is answered instead from Table 6 in
+[results.md](results.md), whose "chunks from P" is one peer's deliveries by
+construction. Recorded here so the mistake is not repeated: **a node-wide
+counter cannot be compared with a per-peer allowance.**
+
+**Every sole-source row now records the balance with the provider before and
+after the run.** A comparison whose arms start from different balances measures
+the balance, which is how the first shipped-buffer comparison went wrong.
+
 ## Reporting
 
 `results.md` gives, per block and condition:
