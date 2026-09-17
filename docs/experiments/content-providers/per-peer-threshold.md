@@ -19,11 +19,12 @@ supplies every overdraft figure quoted below.
 while writing this document and tagged `affects-upstream`. It is not a blocker,
 and Design 3 says how this change stays correct while it stands.
 
-**This is revision 4.** Three adversarial reviews found thirty-nine defects
+**This is revision 5.** Four adversarial reviews found forty-nine defects
 between them. Revision 3 removed the lowering step, which was the source of most
-of them. Revision 4 replaces the cost model with a measurement, because the
-third review showed it rested on a settlement regime nobody had checked. Earlier
-claims that were wrong are marked where they appear rather than quietly removed.
+of them. Revision 4 replaced the cost model with a measurement, and revision 5
+replaces that measurement's evidence, because the fourth review showed it
+compared a node-wide quantity against a per-peer one. Earlier claims that were
+wrong are marked where they appear rather than quietly removed.
 
 ## Terms
 
@@ -175,33 +176,45 @@ reconnect with the debt erased and take it again. The second draft concluded
 from that that the setting gives away unbounded bandwidth. Also false, and for a
 reason the third draft got only half right.
 
-**What the bench actually does.** Three sole-source runs of 1.03 to 2.30 s each,
-with every counter read before and after:
-
-| | Run 1 | Run 2 | Run 3 |
-|---|---|---|---|
-| Measured mean chunk price | 306,735 | 306,454 | 309,141 |
-| Chunks priced | 245 | 2,403 | 1,769 |
-| Pseudosettlements sent | 1, worth 4,690,000 | 1, worth 4,630,000 | 1, worth 23,250,000 |
-| Cheques sent | 1, worth 13,150,000 | 2, worth 26,910,000 | 2, worth 40,230,000 |
-| **Total settled** | **17,840,000** | **31,540,000** | **63,480,000** |
-
-Two things follow, and both matter more than anything the earlier drafts argued.
-
-**The price is 306,454 to 309,141, not an estimate.** Every analysis in this work
-has used 310,000, derived from the pricer's formula
+**The price is measured now, not estimated.** Every analysis in this work has
+used 310,000, derived from the pricer's formula
 `(MaxPO - proximity(peer, chunk) + 1) x 10,000` (`pkg/pricer/pricer.go:34-35`)
-with an expected proximity of 1. `bee_retrieval_chunk_price` is a summary that
-had never been read. The estimate was right to about 1%, and it is now a
-measurement.
+with an expected proximity of 1. `bee_retrieval_chunk_price` is a summary
+(`pkg/retrieval/metrics.go:26`) observed in `prepareCredit`
+(`pkg/retrieval/retrieval.go:495`) that had never been read. Over three
+sole-source runs the mean is **306,735**, **306,454** and **309,141** across 245,
+2,403 and 1,769 credit decisions. The estimate was right to about 1%. Note it
+counts credit decisions node-wide, including relayed retrievals, not deliveries
+from one peer.
 
-**The bench is not refresh-bound, and cheques dominate.** Settlement ran at
-roughly 15,000,000 to 28,000,000 units a second with the provider, of which the
-free time-based allowance can supply at most 4,500,000. So **the payment
-threshold behaves as an in-flight window that recycles as settlement clears it**,
-not as a stock of free credit that has to last the download. That is why a
-provider can serve 452 chunks, about 140,000,000 units at the measured price,
-against a window of at most 18,000,000.
+**And the threshold recycles, which is provable per peer from Table 6.** An
+earlier version of this section argued it from
+`bee_swap_total_sent` and `bee_pseudosettle_total_sent_pseudosettlements`.
+**That argument was wrong and is withdrawn**: both are unlabelled counters
+incremented for any peer (`pkg/settlement/swap/swap.go:155`,
+`pkg/settlement/pseudosettle/pseudosettle.go:355`), so they are node-wide, while
+the free allowance they were compared against is per peer, computed from a
+per-peer timestamp (`pseudosettle.go:155-168`). Against 117 peers the node-wide
+free ceiling is about 527,000,000 a second, so the comparison supported the
+opposite of the conclusion drawn from it.
+
+The right evidence was already published. Table 6's "chunks from P" is one
+peer's deliveries, so it is per peer by construction. At the measured price, and
+against the whole credit that peer could supply without a cheque, which is the
+window plus every unit of free allowance the run could produce:
+
+| Threshold, run time | Chunks from P | Debt to P | Window + all free allowance | Ratio |
+|---|---|---|---|---|
+| 13,500,000, 6.80 s | 176 | 53,985,360 | 48,600,000 | 1.11x |
+| 27,000,000, 8.10 s | 453 | 138,950,955 | 67,950,000 | 2.04x |
+| 54,000,000, 9.46 s | 1,261 | 386,792,835 | 101,070,000 | **3.83x** |
+| 54,000,000, 9.57 s | 1,405 | 430,962,675 | 101,565,000 | **4.24x** |
+
+**At the value this spec proposes to use, nearly four times more credit was
+consumed with one peer than the window and the free allowance together could
+supply.** Cheques cleared the rest, during the download. So the payment
+threshold behaves as an in-flight window that recycles as settlement clears it,
+not as a stock of free credit that has to last.
 
 **So what a larger threshold buys is a wider window, not free bandwidth.** The
 sustained rate is set by how fast debt clears, and on this bench debt clears
@@ -312,7 +325,8 @@ wire, so ordering is the sender's job:
 
 **There is a third announcer, outside `pkg/accounting` entirely.**
 `pricing.Service.init` announces the node-wide threshold on connect, from the
-pricing protocol's own connect handlers (`pkg/pricing/pricing.go:110-121`). Its
+pricing protocol's own connect handlers, registered as both `ConnectIn` and
+`ConnectOut` (`pkg/pricing/pricing.go:73-74`, announcing at `:116`). Its
 13,500,000 and a raise's 54,000,000 are concurrent, absolute and unacknowledged,
 on separate fresh streams. **If the connect announce lands second the peer keeps
 13,500,000 for the life of the connection**, while this node has consumed a
@@ -324,9 +338,8 @@ a stale **lower** value landing last is permanent. All three announcers go
 through the queue, which is more than "one exported method", and section 6 says
 so.
 
-**(b) A failed announce releases the budget and lowers what we believe we
-granted, but does NOT lower `disconnectLimit`.** `AnnouncePaymentThreshold` does not wait
-for a reply: it writes the message and closes the stream
+**(b) A failed announce changes nothing.** `AnnouncePaymentThreshold` does not
+wait for a reply: it writes the message and closes the stream
 (`pricing.go:143-149`), with no reply and no acknowledgement. **So an error
 never distinguishes "the peer did not get it" from "the peer got it and the
 transport failed afterwards".** Lowering `disconnectLimit` in the second case
@@ -348,10 +361,14 @@ section 4 does not cover. It would also break monotonicity: the next growth
 announce would carry a value below one the peer may already hold, absolute and
 uncorrectable.
 
-**So a failed announce changes exactly one thing: the budget accounting.** The
-node records that the delta is no longer counted against the budget and leaves
-both upstream fields alone. The peer keeps whatever it received, which is either
-the old value or the new one, and both are safe.
+**So a failed announce changes nothing at all.** An earlier draft released the
+budget slot, which contradicted the budget's own definition as the sum of
+granted deltas across connections currently holding a grant: after an announce
+error the node cannot know whether the peer holds the grant, and 3(b) has
+already resolved that same ambiguity conservatively for both upstream fields.
+Resolving it the same way for the budget removes the question of what the
+per-peer slot marker becomes, which had no good answer either. The error is
+logged; the grant stays counted until the connection ends.
 
 **(c) Announced values are clamped to at least the node-wide
 `payment-threshold`.** That value is itself forced to at least
@@ -417,9 +434,18 @@ So:
   guard would free the slot twice. And `Connect` and `Disconnect` are both
   dispatched with `go` and no ordering (`pseudosettle.go:115`, `:125`), so on a
   fast reconnect a stale `Disconnect` can run after the new `Connect` and free a
-  slot the new connection is holding. **The release is therefore keyed to the
-  same `connected` transition that guards `:1502`, and the per-peer state
-  carries a connection epoch** so a stale teardown cannot touch a live grant.
+  slot the new connection is holding. **Keying the release to the same
+  `connected` transition that guards `:1502` fixes the double run and does not
+  fix the race**, and an earlier draft claimed a connection epoch would. It
+  cannot: `Accounting.Disconnect` takes only an address, and its caller has only
+  a `p2p.Peer`, which libp2p builds without a connection identity
+  (`pkg/p2p/libp2p/libp2p.go:1257`), so there is nothing to compare an epoch
+  against. **The race is therefore not fixed and the cost is stated instead**:
+  on a fast reconnect a stale teardown can free a slot the new connection holds,
+  so the budget can drift low until restart. The same interleaving already
+  blocklists the new connection in unmodified upstream code, which is a
+  candidate for `affects-upstream` once someone verifies it rather than reasons
+  it, and this change does not make it worse.
 - **There is no idle timeout and no eviction**, so `providerCreditIdle` is gone
   along with the argument about how long a download takes.
 
@@ -605,8 +631,11 @@ The provider is restarted only when a provider-side setting changes, which is
 between arms 2, 3 and the control, and every arm is run after the same settling
 period, so page-cache state is matched across the comparison as rule 7 requires.
 
-Recorded per run: bytes and SHA-256, the `curl` exit code where 18 means
-truncated, total time, time to first byte, chunks delivered by the provider,
+The section 2 price measurement, and this measurement's rows, are written into
+[measurement.md](measurement.md) with their block, date and peer count, so a
+later reader can tell which block a figure came from. Recorded per run: bytes
+and SHA-256, the `curl` exit code where 18 means truncated, total time, time to
+first byte, chunks delivered by the provider,
 `bee_retrieval_preferred_attempts`, `bee_retrieval_preferred_overdrafts` and
 `bee_accounting_accounting_blocks_count` on the requester as **before-and-after
 scrape differences**, and on the provider the balance owed by the requester at
@@ -625,10 +654,16 @@ is **overdrafts per preferred attempt**, and it is compared against arm 1's
 in-session value, not against the 311 to 429 from another block, which are
 quoted only as an order of magnitude.
 
-5. **Cold.** Both builds, restart, settle, one run, three cycles each, balance
-   at zero at the start of every run. Today stock delivers nothing in three of
-   three and the #324 fix delivers one read unit in one of three, so **this is
-   the arm with the most room to move and the least prior art.**
+5. **Cold**, run as arms 1 and 2 again rather than as new builds: the change
+   built, with the setting unset and then set, on the same sole-source content at
+   the shipped lookahead buffer. Each cycle restarts the node, settles for 15
+   minutes and until it has at least 100 peers as the Table 6 sweep did,
+   confirms the balance with the provider reads zero, then runs **once**. Three
+   cycles each, which is three runs per condition under rule 7. Today, with the
+   setting unset, the node delivers one **read unit**, the 262,144-byte unit the
+   API reads in, on one cycle of three, and stock delivers nothing on three of
+   three. **This is the arm with the most room to move**, because a node that has
+   settled nothing has no accumulated headroom at all.
 
 **Pre-registered predictions.**
 
@@ -637,16 +672,24 @@ quoted only as an order of magnitude.
   `overdrafts / (overdrafts + attempts)`, bounded in 0 to 1. It is **not**
   overdrafts per attempt, which an earlier draft used: the two counters are
   incremented at disjoint sites, `PreferredOverdrafts` only when `prepareCredit`
-  refuses and `PreferredAttempts` only when it succeeds, so that ratio's
-  denominator moves with the effect under test. If the rate does not fall, the
-  announced threshold was not the constraint and nothing else here follows.
-- **Arm 2 completes in under 30 s.** This is the prediction that separates the
-  two models of what the threshold is. If it behaves as an in-flight window,
-  which section 2's measurements say it does on this bench, arm 2 should finish
-  in seconds. If it is a cumulative ceiling cleared only by the free allowance,
-  1,033 chunks at 14.5 chunks a second is about 71 s. An earlier draft predicted
-  nothing about arm 2's total time, which left the two indistinguishable.
-- **Arm 5 delivers more than zero on at least two cycles of three.**
+  refuses with `ErrOverdraft` and `PreferredAttempts` only when it succeeds, so
+  that ratio's denominator moves with the effect under test. The denominator is
+  therefore decisions that resolved as a grant or an overdraft, not all
+  decisions: `prepareCredit` can fail for other reasons and then neither counter
+  moves. Relayed retrievals do not contaminate it, since they never touch the
+  preferred path. If the rate does not fall, the announced threshold was not the
+  constraint and nothing else here follows.
+- **Arm 2 completes in under 30 s.** Section 2 has already excluded the
+  cumulative-ceiling model on this bench, so this confirms rather than
+  discriminates, and is worth stating because no earlier draft predicted arm 2's
+  total time at all. The window model predicts a time of the order of the 15.9 s
+  prefetch-off completion, so 30 s carries about a factor of two of headroom.
+  The ceiling model, at the value under test, predicts
+  `1,033 x 306,735 = 316,857,255` units against `54,000,000 + t x 4,500,000`,
+  which is **58 s**. An earlier draft said 71 s, which is the figure for the
+  13,500,000 control rather than for arm 2.
+- **Arm 5 with the setting set delivers more than zero on at least two cycles
+  of three**, against one of three with it unset.
 - Arm 3 is indistinguishable from arm 2 on bytes and within the spread on total
   time. A large gap either way means something other than the announced value
   differs between them, and the design is not understood.
@@ -691,8 +734,8 @@ Unit tests in `package accounting_test` and `package retrieval_test`:
   never the earlier;
 - **upstream's growth path goes through the same queue**, so a growth announce
   and a raise announce to one peer cannot be reordered;
-- **a failed announce releases the budget and lowers `paymentThresholdForPeer`,
-  and leaves `disconnectLimit` raised**;
+- **a failed announce changes nothing**: `paymentThresholdForPeer`,
+  `disconnectLimit` and the budget are all untouched, and the error is logged;
 - every announced value is at least the node-wide `payment-threshold`;
 - an ordinary hit, with no local-only header, raises nothing;
 - a local-only **miss** raises nothing, so the miss path cannot buy credit;
