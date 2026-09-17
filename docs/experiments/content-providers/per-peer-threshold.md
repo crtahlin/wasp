@@ -19,11 +19,11 @@ supplies every overdraft figure quoted below.
 while writing this document and tagged `affects-upstream`. It is not a blocker,
 and Design 3 says how this change stays correct while it stands.
 
-**This is revision 3.** Two adversarial reviews found twenty-four defects
-between them, and the design changed rather than being patched: there is no
-longer any lowering step. Section 4 says why that is the right answer and not a
-retreat. Earlier claims that were wrong are marked where they appear, rather
-than quietly removed.
+**This is revision 4.** Three adversarial reviews found thirty-nine defects
+between them. Revision 3 removed the lowering step, which was the source of most
+of them. Revision 4 replaces the cost model with a measurement, because the
+third review showed it rested on a settlement regime nobody had checked. Earlier
+claims that were wrong are marked where they appear rather than quietly removed.
 
 ## Terms
 
@@ -160,71 +160,98 @@ reference, not a chunk (`:202`). Asking "is this chunk pinned" therefore means
 one index read per pinned collection, on the hit path of every retrieval. That
 is not viable.
 
-### 2. What the operator is agreeing to, stated correctly at the third attempt
+### 2. What the operator is agreeing to, now measured rather than reasoned
 
-This section has now been wrong twice in opposite directions, so both errors are
-recorded.
+This section has been wrong twice in opposite directions, and the third attempt
+replaced reasoning about constants with reasoning about a regime nobody had
+checked. So it is now written from measurement.
 
-**The first draft said a total credit budget makes the worst case "a fixed
-number the operator chose".** False. `Connect` resets the peer ledger: it writes
-zero to the balance key (`:1435`), zeroes `shadowReservedBalance` (`:1427`) and
-`ghostBalance` (`:1428`), and re-initialises `paymentThresholdForPeer` and
-`disconnectLimit` from the node-wide values (`:1431`, `:1433`). So a peer can
-take a grant, consume it, disconnect, reconnect with the debt erased, and take
-it again. No budget bounds that cumulatively.
+**The two earlier errors, kept so they are not repeated.** The first draft said
+a total credit budget makes the worst case "a fixed number the operator chose".
+False: `Connect` resets the peer ledger, writing zero to the balance key
+(`pkg/accounting/accounting.go:1435`) and zeroing `shadowReservedBalance`
+(`:1427`) and `ghostBalance` (`:1428`), so a peer can take a grant, disconnect,
+reconnect with the debt erased and take it again. The second draft concluded
+from that that the setting gives away unbounded bandwidth. Also false, and for a
+reason the third draft got only half right.
 
-**The second draft concluded from this that the setting is unbounded bandwidth
-given away. That over-corrected, and the correction matters more than the
-error.** A connected peer already receives forgiven debt at the refresh rate
-from any stock node, through pseudosettle, whose allowance is elapsed seconds
-times the refresh rate (`pkg/settlement/pseudosettle/pseudosettle.go:168`), that
-is 4,500,000 units a second for a full node, for free, for as long as it stays
-connected.
+**What the bench actually does.** Three sole-source runs of 1.03 to 2.30 s each,
+with every counter read before and after:
 
-Now price the reconnect loop against that. `Disconnect` blocklists the peer for
-`blocklistUntil(peer, 1)` seconds, which is latent debt plus the **node-wide**
-`payment-threshold`, divided by the refresh rate (`:1388`). Note it is the
-node-wide value in that formula and not the grant, which is easy to misread. At
-the default 13,500,000 with a fully consumed 54,000,000 grant as latent debt
-that is `(54,000,000 + 13,500,000) / 4,500,000` = **15 seconds**, and more once
-ghost balance is counted. So the loop yields at most 40,500,000 of extra credit
-per 15 seconds, about 2,700,000 a second, which is **below** the 4,500,000 a
-second the peer already gets by doing nothing.
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Measured mean chunk price | 306,735 | 306,454 | 309,141 |
+| Chunks priced | 245 | 2,403 | 1,769 |
+| Pseudosettlements sent | 1, worth 4,690,000 | 1, worth 4,630,000 | 1, worth 23,250,000 |
+| Cheques sent | 1, worth 13,150,000 | 2, worth 26,910,000 | 2, worth 40,230,000 |
+| **Total settled** | **17,840,000** | **31,540,000** | **63,480,000** |
 
-**So the honest statement is neither of the first two.** The grant raises the
-**burst** a peer may take before it has to pay or wait. It does not raise the
-sustained rate, which pseudosettle already caps at the refresh rate and which
-this change does not touch. An operator enabling this is agreeing to a larger
-burst per provider-requesting peer, bounded per connection and bounded in
-aggregate by the budget, on top of a sustained allowance every stock node
-already gives every peer.
+Two things follow, and both matter more than anything the earlier drafts argued.
 
-That is what the option's documentation must say, and it is why the feature is
-defensible rather than merely opt-in.
+**The price is 306,454 to 309,141, not an estimate.** Every analysis in this work
+has used 310,000, derived from the pricer's formula
+`(MaxPO - proximity(peer, chunk) + 1) x 10,000` (`pkg/pricer/pricer.go:34-35`)
+with an expected proximity of 1. `bee_retrieval_chunk_price` is a summary that
+had never been read. The estimate was right to about 1%, and it is now a
+measurement.
+
+**The bench is not refresh-bound, and cheques dominate.** Settlement ran at
+roughly 15,000,000 to 28,000,000 units a second with the provider, of which the
+free time-based allowance can supply at most 4,500,000. So **the payment
+threshold behaves as an in-flight window that recycles as settlement clears it**,
+not as a stock of free credit that has to last the download. That is why a
+provider can serve 452 chunks, about 140,000,000 units at the measured price,
+against a window of at most 18,000,000.
+
+**So what a larger threshold buys is a wider window, not free bandwidth.** The
+sustained rate is set by how fast debt clears, and on this bench debt clears
+mostly by cheque, which is payment. **The extra credit is repaid.** What the
+operator is accepting is the risk that a particular peer does not repay it,
+bounded per connection by the grant and in aggregate by the budget.
+
+That is a better case for the feature than either earlier draft made, and it is
+the first one resting on measurement.
+
+**Three things it does not say.**
+
+- **It is not a claim about other deployments.** A node with no chequebook
+  settles only by pseudosettle, at 4,500,000 units a second, and there the
+  threshold is much closer to a cumulative ceiling. The measurement below records
+  the bench's settlement configuration for exactly this reason, and the result
+  should not be read as a property of the protocol.
+- **Reconnect still erases the ledger**, so a peer can take the burst again after
+  the blocklist expires, `(latent debt + node-wide payment threshold) / refresh
+  rate` seconds, about 15 at a 54,000,000 grant with the defaults (`:1388`).
+  Note it is the node-wide value in that formula and not the grant.
+- **The free allowance has to be asked for.** Forgiveness happens in
+  pseudosettle's handler, on a payment the debtor initiates, reached from
+  `settle` (`:464`), and it is capped at the debt rather than banked
+  (`pkg/settlement/pseudosettle/pseudosettle.go:168`, `:174-178`). An earlier
+  draft said a peer receives it "by doing nothing", which is not so: any peer
+  that settles receives it, and every stock Bee does.
 
 The four things that bound the surface:
 
 1. **The operator opts in.** The threshold is a new setting whose default
-   disables the behaviour. Nothing changes for a node that does not set it.
+   disables the behaviour.
 2. **`providers-enable` must be on, and it is off by default**
    (`cmd/bee/cmd/cmd.go:415`, honoured at `pkg/retrieval/retrieval.go:175` and
    `:593`).
-3. **The budget**, which bounds how much extra credit is outstanding across all
-   raised connections at one time.
-4. **Reconnects are rate limited** by the accounting blocklist above and, far
-   more loosely, by libp2p's connection limiter. The second is listed for
-   completeness; it is not what bounds anything here.
+3. **The budget**, which bounds how much extra credit is granted across all
+   connections holding a raise at one time.
+4. **Reconnects are rate limited** by the accounting blocklist above.
 
 The existing local-only rate limits, 100 misses a second per peer and 1,000 a
 second in total (`pkg/retrieval/retrieval.go:119-120`), bound the **miss** path
-only, not the hit path, so they are not a bound on this change.
+only, so they are not a bound on this change.
 
 **The hardening is a separate issue, deliberately.** The requester already knows
 which root reference it is downloading, since the provider hint is attached per
 content key (`pkg/api/providers.go:129-134`). It could send that root in a second
-header, and the provider could check it with one `HasPin` read. It is not in
-this spec because it adds a header for a benefit only worth having if the
-measurement shows the feature is worth hardening.
+header, and the provider could check it with one `HasPin` read. It is not here
+because it adds a header for a benefit only worth having once the measurement
+shows the feature is worth hardening.
+
 
 ### 3. Raising it, and why the announce is the whole of it
 
@@ -283,12 +310,23 @@ wire, so ordering is the sender's job:
   unsent earlier one rather than queueing behind it;
 - an announce whose generation is stale when it is about to be sent is dropped.
 
-This forces upstream's growth path through the same queue, which is more than
-"one exported method", and section 6 says so.
+**There is a third announcer, outside `pkg/accounting` entirely.**
+`pricing.Service.init` announces the node-wide threshold on connect, from the
+pricing protocol's own connect handlers (`pkg/pricing/pricing.go:110-121`). Its
+13,500,000 and a raise's 54,000,000 are concurrent, absolute and unacknowledged,
+on separate fresh streams. **If the connect announce lands second the peer keeps
+13,500,000 for the life of the connection**, while this node has consumed a
+budget slot and raised its `disconnectLimit` for nothing: all of the cost, none
+of the benefit, and silent.
+
+So out-of-order delivery still matters even though raises are monotonic, because
+a stale **lower** value landing last is permanent. All three announcers go
+through the queue, which is more than "one exported method", and section 6 says
+so.
 
 **(b) A failed announce releases the budget and lowers what we believe we
-granted, but does NOT lower `disconnectLimit`.** `AnnouncePaymentThreshold` is
-fire-and-forget: it writes the message and closes the stream
+granted, but does NOT lower `disconnectLimit`.** `AnnouncePaymentThreshold` does not wait
+for a reply: it writes the message and closes the stream
 (`pricing.go:143-149`), with no reply and no acknowledgement. **So an error
 never distinguishes "the peer did not get it" from "the peer got it and the
 transport failed afterwards".** Lowering `disconnectLimit` in the second case
@@ -297,8 +335,23 @@ what this design exists to avoid. An earlier draft said "the delta is subtracted
 again and the budget released", which contradicted its own section 4.
 
 So the rollback is asymmetric, and it is safe in the direction that matters:
-this node stops believing it granted anything and frees the slot, while the
-tolerance that protects the peer stays where it is until the connection ends.
+this node stops counting the grant and frees the slot, while the tolerance that
+protects the peer stays where it is until the connection ends.
+
+**But the rollback must not write to `paymentThresholdForPeer` either**, and an
+earlier draft said it should. The growth path recomputes `disconnectLimit` from
+whatever that field holds (`:659`), and #333 means it can fire on every
+settlement after a reconnect. So a rollback that lowered the field would have
+the very next growth firing silently pull `disconnectLimit` down with it, which
+is the invited-debt blocklist this design exists to avoid, reached by a route
+section 4 does not cover. It would also break monotonicity: the next growth
+announce would carry a value below one the peer may already hold, absolute and
+uncorrectable.
+
+**So a failed announce changes exactly one thing: the budget accounting.** The
+node records that the delta is no longer counted against the budget and leaves
+both upstream fields alone. The peer keeps whatever it received, which is either
+the old value or the new one, and both are safe.
 
 **(c) Announced values are clamped to at least the node-wide
 `payment-threshold`.** That value is itself forced to at least
@@ -354,7 +407,19 @@ So:
 - **A second local-only hit changes nothing**, so at most one slot per peer
   follows from the rule rather than needing to be enforced separately.
 - **The budget slot is released on disconnect**, in `Disconnect` (`:1496`), and
-  the per-peer state this change adds is cleared in `Connect`.
+  the per-peer state this change adds is cleared in `Connect`. **Neither is
+  reliable without care**, and an earlier draft assumed both were.
+  `accounting.Disconnect` has one caller, pseudosettle's `terminate`
+  (`pkg/settlement/pseudosettle/pseudosettle.go:125`), registered as both
+  `DisconnectIn` and `DisconnectOut`, so an explicitly initiated disconnect runs
+  it twice; today that is harmless only because the body sits behind
+  `if accountingPeer.connected` (`:1502`), so a release placed outside that
+  guard would free the slot twice. And `Connect` and `Disconnect` are both
+  dispatched with `go` and no ordering (`pseudosettle.go:115`, `:125`), so on a
+  fast reconnect a stale `Disconnect` can run after the new `Connect` and free a
+  slot the new connection is holding. **The release is therefore keyed to the
+  same `connected` transition that guards `:1502`, and the per-peer state
+  carries a connection epoch** so a stale teardown cannot touch a live grant.
 - **There is no idle timeout and no eviction**, so `providerCreditIdle` is gone
   along with the argument about how long a download takes.
 
@@ -447,7 +512,13 @@ with the fingerprint unchanged and the `protocol-change` label is not needed.
 | Setting | Default | Meaning |
 |---|---|---|
 | `providers-payment-threshold` | `0`, disabled | The threshold announced to a full-node peer making local-only hits. Validated as either 0, or at least the node-wide `payment-threshold` and at most `maxPaymentThreshold`. |
-| `providers-credit-budget` | `0` | The most extra credit, summed over all connections holding a raise, outstanding at one time. Extra means the announced value minus the value it replaced. Validated as at least one grant's worth of extra when the threshold above is set, so a budget too small to admit anybody is refused rather than silently disabling the feature. |
+| `providers-credit-budget` | `0` | **The sum of granted deltas across connections currently holding a grant**, where a delta is the announced value minus the value it replaced. Validated as at least one grant's worth, so a budget too small to admit anybody is refused rather than silently disabling the feature. |
+
+**The budget counts what has been granted, not what is outstanding**, and an
+earlier draft's wording implied the second. A peer that takes a grant and uses
+none of it still holds its slot. That is the conservative direction, and saying
+it plainly is better than a word that suggests the node measures exposure it
+does not measure.
 
 **What raising `providers-payment-threshold` costs:** a larger burst of this
 node's bandwidth served to each admitted peer before it has to pay or wait, on
@@ -458,7 +529,8 @@ Problem table.
 **What raising `providers-credit-budget` costs:** more connections hold a raise
 at once, so more unsecured credit is outstanding simultaneously. What lowering
 it costs: provider downloads beyond the budget get the 4.3% behaviour. A budget
-large enough to admit every peer is the node-wide raise with extra steps, and
+large enough to admit every peer is the node-wide raise reached by a longer
+route, and
 the documentation says so.
 
 **Who pays.** Mostly this operator, but not only: an announced threshold also
@@ -500,6 +572,20 @@ lose on share. That is arithmetic, not block variance.
 
 The arms:
 
+**The value under test is 54,000,000**, matching the top row of the Problem
+table, with `providers-credit-budget` set to one grant's worth, that is
+54,000,000 minus the node-wide 13,500,000, or 40,500,000. The content is the
+4,194,304-byte sole-source file. An earlier draft never wrote any of these down,
+so "the same value" had no antecedent and no arm could be run from it.
+
+**The bench settles with cheques**, which the measurement records because the
+result is not portable without it: a node with no chequebook settles only by
+pseudosettle and the threshold is much closer to a cumulative ceiling there.
+
+**Every run records the balance with the provider before and after.** The
+correction to the #324 results turned on arms that started from different
+balances, and the cold case below exists because of it.
+
 1. **Control.** The change built, `providers-payment-threshold` unset.
    Sole-source content at the shipped lookahead buffer. **The in-session
    baseline**, which exists because comparing against the three truncations in
@@ -539,12 +625,28 @@ is **overdrafts per preferred attempt**, and it is compared against arm 1's
 in-session value, not against the 311 to 429 from another block, which are
 quoted only as an order of magnitude.
 
+5. **Cold.** Both builds, restart, settle, one run, three cycles each, balance
+   at zero at the start of every run. Today stock delivers nothing in three of
+   three and the #324 fix delivers one read unit in one of three, so **this is
+   the arm with the most room to move and the least prior art.**
+
 **Pre-registered predictions.**
 
 - **Primary: arm 2 completes with a matching SHA-256 where arm 1 truncates, and
-  overdrafts per preferred attempt fall to at most a tenth of arm 1's.** If that
-  ratio does not fall, the announced threshold was not the constraint and
-  nothing else in this document follows.
+  the refusal rate falls to at most a tenth of arm 1's.** The rate is
+  `overdrafts / (overdrafts + attempts)`, bounded in 0 to 1. It is **not**
+  overdrafts per attempt, which an earlier draft used: the two counters are
+  incremented at disjoint sites, `PreferredOverdrafts` only when `prepareCredit`
+  refuses and `PreferredAttempts` only when it succeeds, so that ratio's
+  denominator moves with the effect under test. If the rate does not fall, the
+  announced threshold was not the constraint and nothing else here follows.
+- **Arm 2 completes in under 30 s.** This is the prediction that separates the
+  two models of what the threshold is. If it behaves as an in-flight window,
+  which section 2's measurements say it does on this bench, arm 2 should finish
+  in seconds. If it is a cumulative ceiling cleared only by the free allowance,
+  1,033 chunks at 14.5 chunks a second is about 71 s. An earlier draft predicted
+  nothing about arm 2's total time, which left the two indistinguishable.
+- **Arm 5 delivers more than zero on at least two cycles of three.**
 - Arm 3 is indistinguishable from arm 2 on bytes and within the spread on total
   time. A large gap either way means something other than the announced value
   differs between them, and the design is not understood.
