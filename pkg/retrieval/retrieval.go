@@ -268,37 +268,46 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 
 				if len(candidates) > 0 {
 					peer := candidates[0]
-					if err := s.retrievePreferred(ctx, spanCtx, quit, chunkAddr, peer, skip, resultC); err != nil {
-						// An overdraft clears by itself after overDraftRefresh,
-						// so keep the peer and come back to it. Consuming the
-						// candidate here made a transient refusal permanent,
-						// which stopped downloads of content only this peer
-						// held (#324). Any other reason, such as the peer not
-						// being connected, will not clear, so drop it.
-						if errors.Is(err, accounting.ErrOverdraft) && readmits[peer.ByteString()] < maxOverdraftReadmits {
-							readmits[peer.ByteString()]++
-							s.metrics.PreferredReadmits.Inc()
-							if preferredTimer == nil {
-								preferredTimer = time.NewTimer(overDraftRefresh)
-							} else {
-								preferredTimer.Reset(overDraftRefresh)
-							}
-							preferredTimerC = preferredTimer.C
-							continue
-						}
+					err := s.retrievePreferred(ctx, spanCtx, quit, chunkAddr, peer, skip, resultC)
+					switch {
+					case err == nil:
+						// started, fall past this block to the bookkeeping below
+					case errors.Is(err, accounting.ErrOverdraft) && readmits[peer.ByteString()] < maxOverdraftReadmits:
+						// Keep the peer for a later attempt, but do NOT wait for
+						// its credit here. Ordinary selection is tried straight
+						// away instead: where other peers hold the chunk that
+						// costs nothing, and where none do it exhausts and the
+						// loop returns to this peer once its overDraftRefresh
+						// skip has expired.
+						//
+						// Waiting here instead cost about 3x on content the
+						// network also holds, because the wait was paid on every
+						// chunk while another peer could have served it at once.
+						// Consuming the candidate, which is what the code did
+						// before #324, made the refusal permanent and stopped
+						// downloads of content only this peer held.
+						readmits[peer.ByteString()]++
+						s.metrics.PreferredReadmits.Inc()
+					default:
+						// will not clear by itself, for example a peer that is
+						// not connected: drop it for this chunk
 						candidates = candidates[1:]
 						retry()
 						continue
 					}
-					candidates = candidates[1:]
-					inflight++
-					if preferredTimer == nil {
-						preferredTimer = time.NewTimer(preferredWait)
-					} else {
-						preferredTimer.Reset(preferredWait)
+					if err == nil {
+						candidates = candidates[1:]
+						inflight++
+						if preferredTimer == nil {
+							preferredTimer = time.NewTimer(preferredWait)
+						} else {
+							preferredTimer.Reset(preferredWait)
+						}
+						preferredTimerC = preferredTimer.C
+						continue
 					}
-					preferredTimerC = preferredTimer.C
-					continue
+					// overdrafted and kept: no continue, so ordinary selection
+					// below runs now rather than after a wait
 				}
 
 				fullSkip := append(skip.ChunkPeers(chunkAddr), s.errSkip.ChunkPeers(chunkAddr)...)
