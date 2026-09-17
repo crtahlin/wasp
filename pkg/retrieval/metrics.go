@@ -31,6 +31,14 @@ type metrics struct {
 	PreferredAttempts prometheus.Counter
 	PreferredHits     prometheus.Counter
 	PreferredMisses   prometheus.Counter
+	// PreferredOverdrafts counts preferred attempts refused for credit. Until
+	// #324 this branch incremented nothing, so an operator could not see a
+	// provider being refused; accounting_blocks_count is node-wide and cannot
+	// attribute a refusal to one peer.
+	PreferredOverdrafts prometheus.Counter
+	// PreferredReadmits counts preferred peers kept for a later attempt after
+	// an overdraft, rather than dropped for that chunk.
+	PreferredReadmits prometheus.Counter
 	LocalOnlyMisses   prometheus.Counter
 	LocalOnlyLimited  prometheus.Counter
 }
@@ -123,6 +131,18 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "preferred_misses",
 			Help:      "Preferred attempts that did not deliver the chunk.",
+		}),
+		PreferredOverdrafts: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "preferred_overdrafts",
+			Help:      "Preferred attempts refused because the peer could not be credited.",
+		}),
+		PreferredReadmits: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "preferred_readmits",
+			Help:      "Preferred peers kept for a later attempt after an overdraft.",
 		}),
 		LocalOnlyMisses: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,

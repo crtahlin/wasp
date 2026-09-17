@@ -148,6 +148,10 @@ const (
 	skiplistDur          = time.Minute
 	originSuffix         = "_origin"
 	maxOriginErrors      = 32
+	// maxOverdraftReadmits is how many times one preferred peer may be kept for
+	// a later attempt at the same chunk after being refused credit. Bounded so
+	// a peer that never regains credit cannot livelock the request.
+	maxOverdraftReadmits = 8
 	maxMultiplexForwards = 2
 )
 
@@ -201,6 +205,10 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		// normal peer selection, and the timer that starts the next attempt
 		// when a preferred attempt is slow
 		candidates := s.preferredCandidates(preferredPeers, chunkAddr, s.errSkip.ChunkPeers(chunkAddr))
+		// how many times each preferred peer has been kept after an overdraft,
+		// bounded by maxOverdraftReadmits so a peer that never regains credit
+		// cannot hold the request open (#324)
+		readmits := make(map[string]int, len(candidates))
 		var (
 			preferredTimer  *time.Timer
 			preferredTimerC <-chan time.Time
@@ -260,19 +268,46 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 
 				if len(candidates) > 0 {
 					peer := candidates[0]
-					candidates = candidates[1:]
-					if !s.retrievePreferred(ctx, spanCtx, quit, chunkAddr, peer, skip, resultC) {
+					err := s.retrievePreferred(ctx, spanCtx, quit, chunkAddr, peer, skip, resultC)
+					switch {
+					case err == nil:
+						// started, fall past this block to the bookkeeping below
+					case errors.Is(err, accounting.ErrOverdraft) && readmits[peer.ByteString()] < maxOverdraftReadmits:
+						// Keep the peer for a later attempt, but do NOT wait for
+						// its credit here. Ordinary selection is tried straight
+						// away instead: where other peers hold the chunk that
+						// costs nothing, and where none do it exhausts and the
+						// loop returns to this peer once its overDraftRefresh
+						// skip has expired.
+						//
+						// Waiting here instead cost about 3x on content the
+						// network also holds, because the wait was paid on every
+						// chunk while another peer could have served it at once.
+						// Consuming the candidate, which is what the code did
+						// before #324, made the refusal permanent and stopped
+						// downloads of content only this peer held.
+						readmits[peer.ByteString()]++
+						s.metrics.PreferredReadmits.Inc()
+					default:
+						// will not clear by itself, for example a peer that is
+						// not connected: drop it for this chunk
+						candidates = candidates[1:]
 						retry()
 						continue
 					}
-					inflight++
-					if preferredTimer == nil {
-						preferredTimer = time.NewTimer(preferredWait)
-					} else {
-						preferredTimer.Reset(preferredWait)
+					if err == nil {
+						candidates = candidates[1:]
+						inflight++
+						if preferredTimer == nil {
+							preferredTimer = time.NewTimer(preferredWait)
+						} else {
+							preferredTimer.Reset(preferredWait)
+						}
+						preferredTimerC = preferredTimer.C
+						continue
 					}
-					preferredTimerC = preferredTimer.C
-					continue
+					// overdrafted and kept: no continue, so ordinary selection
+					// below runs now rather than after a wait
 				}
 
 				fullSkip := append(skip.ChunkPeers(chunkAddr), s.errSkip.ChunkPeers(chunkAddr)...)
