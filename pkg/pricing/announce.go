@@ -8,6 +8,7 @@ import (
 	"context"
 	"math/big"
 	"sync"
+	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
@@ -122,24 +123,62 @@ func (a *announceSerial) next(peer swarm.Address) *big.Int {
 // announceSerialised sends paymentThreshold to peer, serialised against any
 // other announcement to the same peer.
 //
-// When no announcement to that peer is in flight, the caller sends, and keeps
-// sending while newer values arrive, so the error of the first send is returned
-// as before. When one is in flight, the value is left for that sender to pick
-// up and this returns nil at once: the caller's value will be sent, and
-// reporting an error for a send it did not make would be wrong.
+// The caller sends its OWN value and nothing else, and gets back the error of
+// its own send. Two reasons, both learned the hard way.
+//
+// An error from someone else's send must not reach this caller. init returns
+// this error from ConnectIn, and libp2p disconnects the peer on any non-nil
+// return from a connect handler (pkg/p2p/libp2p/libp2p.go:693-696). A caller
+// that looped would hand init a failure that had nothing to do with the connect
+// announcement, and the peer would be dropped for it.
+//
+// And a caller must not loop while holding a lock. notifyPaymentThresholdUpgrade
+// in pkg/accounting announces while holding the per-peer lock, and PrepareDebit
+// blocks on that same lock, so every extra send is another five seconds of
+// stalled chunk deliveries to that peer. Looping would have made the very
+// regression this work exists to remove worse rather than better.
+//
+// So anything queued behind this send is handed to a fresh goroutine, which
+// carries no caller's lock and no caller's context.
 func (s *Service) announceSerialised(ctx context.Context, peer swarm.Address, paymentThreshold *big.Int) error {
 	v := s.announce.begin(peer, paymentThreshold)
 	if v == nil {
+		// Coalesced into a send already in flight. That sender will deliver
+		// this value, so there is nothing to report here: an error from a send
+		// this caller did not make is not this caller's to return.
 		return nil
 	}
 
-	var firstErr error
-	for v != nil {
-		err := s.sendAnnouncement(ctx, peer, v)
-		if firstErr == nil {
-			firstErr = err
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			// Release the send slot even if sendAnnouncement panics, so one
+			// bad send cannot wedge every later announcement to this peer.
+			if next := s.announce.next(peer); next != nil {
+				s.drain(peer, next)
+			}
 		}
+	}()
+
+	err := s.sendAnnouncement(ctx, peer, v)
+
+	if next := s.announce.next(peer); next != nil {
+		handedOff = true
+		go s.drain(peer, next)
+	}
+	return err
+}
+
+// drain sends the values queued behind an announcement, until none is left.
+// It runs without any caller's lock and on its own context, because the caller
+// that queued the work may be holding the per-peer accounting lock.
+func (s *Service) drain(peer swarm.Address, v *big.Int) {
+	for v != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.sendAnnouncement(ctx, peer, v); err != nil {
+			s.logger.Debug("announcing queued payment threshold", "error", err, "peer_address", peer, "value", v)
+		}
+		cancel()
 		v = s.announce.next(peer)
 	}
-	return firstErr
 }

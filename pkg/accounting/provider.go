@@ -46,7 +46,8 @@ import (
 // concurrent PrepareDebit for that peer for as long as the stream takes, up to
 // five seconds, and under a lookahead prefetch that is many requests at once.
 func (a *Accounting) GrantProviderCredit(peer swarm.Address, fullNode bool) {
-	if a.providerThreshold == nil || a.providerThreshold.Sign() == 0 {
+	threshold := a.configuredProviderThreshold()
+	if threshold.Sign() == 0 {
 		return // the operator has not turned this on
 	}
 
@@ -62,7 +63,9 @@ func (a *Accounting) GrantProviderCredit(peer swarm.Address, fullNode bool) {
 
 	accountingPeer := a.getAccountingPeer(peer)
 
-	delta, ok := a.providerGrantDelta(accountingPeer)
+	// What the grant would cost, read under the peer lock and then released so
+	// the budget can be reserved without holding it.
+	delta, ok := a.providerGrantDelta(accountingPeer, threshold)
 	if !ok {
 		return
 	}
@@ -72,12 +75,22 @@ func (a *Accounting) GrantProviderCredit(peer swarm.Address, fullNode bool) {
 		return
 	}
 
-	announce, ok := a.applyProviderGrant(accountingPeer, delta)
+	// The delta is recomputed under the lock that applies it, because the
+	// growth path can raise paymentThresholdForPeer in between and #333 makes
+	// it fire on every settlement after a reconnect. Adding a stale delta on
+	// top of a grown value would announce above the configured threshold, and
+	// could carry it past maxPaymentThreshold, which this feature refuses to
+	// attempt. The reserved amount is the ceiling: applying less is fine and
+	// the difference is given straight back.
+	announce, applied, ok := a.applyProviderGrant(accountingPeer, threshold, delta)
 	if !ok {
 		// Another call granted while the budget was being reserved. Give the
 		// reservation back rather than counting it twice.
 		a.releaseProviderBudget(delta)
 		return
+	}
+	if refund := new(big.Int).Sub(delta, applied); refund.Sign() > 0 {
+		a.releaseProviderBudget(refund)
 	}
 
 	a.metrics.ProviderGrants.Inc()
@@ -94,7 +107,7 @@ func (a *Accounting) GrantProviderCredit(peer swarm.Address, fullNode bool) {
 // providerGrantDelta reports how much this peer's threshold would have to rise
 // to reach the configured provider value, and whether a grant should be made at
 // all. It holds the per-peer lock and nothing else.
-func (a *Accounting) providerGrantDelta(accountingPeer *accountingPeer) (*big.Int, bool) {
+func (a *Accounting) providerGrantDelta(accountingPeer *accountingPeer, threshold *big.Int) (*big.Int, bool) {
 	accountingPeer.lock.Lock()
 	defer accountingPeer.lock.Unlock()
 
@@ -105,10 +118,9 @@ func (a *Accounting) providerGrantDelta(accountingPeer *accountingPeer) (*big.In
 		return nil, false // already granted on this connection
 	}
 
-	// Take the larger of the configured value and whatever the peer already
-	// has, so a peer the growth path has already carried above the provider
+	// A peer the growth path has already carried to or above the configured
 	// value is left alone.
-	delta := new(big.Int).Sub(a.providerThreshold, accountingPeer.paymentThresholdForPeer)
+	delta := new(big.Int).Sub(threshold, accountingPeer.paymentThresholdForPeer)
 	if delta.Sign() <= 0 {
 		return nil, false
 	}
@@ -118,12 +130,24 @@ func (a *Accounting) providerGrantDelta(accountingPeer *accountingPeer) (*big.In
 // applyProviderGrant raises the peer's threshold and the disconnect limit
 // derived from it, records the delta, and returns the value to announce. It
 // holds the per-peer lock and does no I/O.
-func (a *Accounting) applyProviderGrant(accountingPeer *accountingPeer, delta *big.Int) (*big.Int, bool) {
+func (a *Accounting) applyProviderGrant(accountingPeer *accountingPeer, threshold, reserved *big.Int) (announce, applied *big.Int, ok bool) {
 	accountingPeer.lock.Lock()
 	defer accountingPeer.lock.Unlock()
 
 	if !accountingPeer.connected || accountingPeer.providerGrant != nil {
-		return nil, false
+		return nil, nil, false
+	}
+
+	// Recomputed here, not carried in: the growth path may have raised the
+	// threshold since it was measured.
+	delta := new(big.Int).Sub(threshold, accountingPeer.paymentThresholdForPeer)
+	if delta.Sign() <= 0 {
+		return nil, nil, false // growth has already carried it there
+	}
+	if delta.Cmp(reserved) > 0 {
+		// Cannot exceed what the budget admitted. It only shrinks in practice,
+		// since the growth path only raises, but the ceiling is explicit.
+		delta = new(big.Int).Set(reserved)
 	}
 
 	// Mutate in place. The growth path reassigns this pointer while Connect and
@@ -138,7 +162,18 @@ func (a *Accounting) applyProviderGrant(accountingPeer *accountingPeer, delta *b
 
 	accountingPeer.providerGrant = new(big.Int).Set(delta)
 
-	return new(big.Int).Set(accountingPeer.paymentThresholdForPeer), true
+	return new(big.Int).Set(accountingPeer.paymentThresholdForPeer), new(big.Int).Set(delta), true
+}
+
+// configuredProviderThreshold reads the configured value under the mutex that
+// writes it, so a reader cannot see a half-assigned pointer.
+func (a *Accounting) configuredProviderThreshold() *big.Int {
+	a.providerBudgetMu.Lock()
+	defer a.providerBudgetMu.Unlock()
+	if a.providerThreshold == nil {
+		return new(big.Int)
+	}
+	return new(big.Int).Set(a.providerThreshold)
 }
 
 // reserveProviderBudget takes delta from the budget if it fits. It holds only

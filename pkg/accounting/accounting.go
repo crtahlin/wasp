@@ -1421,6 +1421,16 @@ func (a *Accounting) Connect(peer swarm.Address, fullNode bool) {
 	accountingPeer := a.getAccountingPeer(peer)
 	zero := big.NewInt(0)
 
+	// wasp #327: any grant this peer held on a previous connection, given back
+	// after the per-peer lock is released. The budget lock is never held with a
+	// peer lock, in either order.
+	var orphanedGrant *big.Int
+	defer func() {
+		if orphanedGrant != nil {
+			a.releaseProviderBudget(orphanedGrant)
+		}
+	}()
+
 	accountingPeer.lock.Lock()
 	defer accountingPeer.lock.Unlock()
 
@@ -1444,8 +1454,13 @@ func (a *Accounting) Connect(peer swarm.Address, fullNode bool) {
 	accountingPeer.thresholdGrowAt.Set(thresholdGrowStep)
 	accountingPeer.disconnectLimit.Set(disconnectLimit)
 	// wasp #327: a grant belongs to one connection. Connect knows nothing about
-	// it otherwise, so a reconnecting peer would carry a stale delta.
-	accountingPeer.providerGrant = nil
+	// it otherwise, so a reconnecting peer would carry a stale delta. The
+	// budget it held is given back after this lock is released, below: Connect
+	// and Disconnect are both dispatched with go and unordered, so on a fast
+	// reconnect Connect can run first, and clearing without releasing would
+	// strand the delta for the life of the process. Enough of those and the
+	// budget admits nobody and the feature stops working in silence.
+	orphanedGrant = clearProviderGrant(accountingPeer)
 
 	err := a.store.Put(peerBalanceKey(peer), zero)
 	if err != nil {

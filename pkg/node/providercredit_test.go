@@ -65,6 +65,14 @@ func TestProviderCreditSettings(t *testing.T) {
 			wantErr:   true,
 		},
 		{
+			// Equal means every delta is zero, so the feature reads as
+			// configured and grants nothing.
+			name:      "equal to the node-wide threshold grants nothing",
+			threshold: "13500000",
+			budget:    "13500000",
+			wantErr:   true,
+		},
+		{
 			name:      "not a number",
 			threshold: "fifty four million",
 			budget:    "40500000",

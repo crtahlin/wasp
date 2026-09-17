@@ -42,6 +42,12 @@ func (g *grantRecorder) count() int {
 	return len(g.peers)
 }
 
+func (g *grantRecorder) fullNodeAt(i int) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.full[i]
+}
+
 // serveWithHeaders runs one retrieval against a holder that has the chunk, with
 // the given stream headers, and returns what the holder's grant recorder saw.
 func serveWithHeaders(t *testing.T, providersOn bool, headers p2p.Headers) *grantRecorder {
@@ -128,5 +134,68 @@ func TestProviderCreditNeedsProvidersEnabled(t *testing.T) {
 	grants := serveWithHeaders(t, false, p2p.Headers{retrieval.LocalOnlyHeader: []byte{1}})
 	if n := grants.count(); n != 0 {
 		t.Fatalf("credit was granted with providers-enable off, %d times", n)
+	}
+}
+
+// TestProviderCreditPassesNodeType. The grant decision must come from the
+// request rather than from the accounting record, because Connect sets that
+// field from a goroutine and may not have run when the first request arrives.
+// This checks the value reaches accounting at all; the decision itself is
+// tested in pkg/accounting.
+func TestProviderCreditPassesNodeType(t *testing.T) {
+	t.Parallel()
+
+	grants := serveWithHeaders(t, true, p2p.Headers{retrieval.LocalOnlyHeader: []byte{1}})
+	if grants.count() != 1 {
+		t.Fatalf("%d grants, want 1", grants.count())
+	}
+	if !grants.fullNodeAt(0) {
+		t.Fatal("the handler reported the peer as a light node; the grant decision would be skipped for a full node")
+	}
+}
+
+// TestProviderCreditNotGrantedOnLocalOnlyMiss. A miss is answered before the
+// grant is reached, so the miss path cannot buy credit. Without that, any peer
+// could ask for chunks this node does not have and still be granted.
+func TestProviderCreditNotGrantedOnLocalOnlyMiss(t *testing.T) {
+	t.Parallel()
+
+	clientAddr := swarm.RandAddress(t)
+	holderAddr := swarm.RandAddress(t)
+	pricer := pricermock.NewMockService(defaultPrice, defaultPrice)
+
+	// The holder is given an EMPTY store, so the request is a miss.
+	grants := &grantRecorder{}
+	holder := createRetrieval(t, holderAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, nil, nil,
+		log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	holder.SetProvidersEnabled(true)
+	holder.SetProviderCreditor(grants)
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{
+			holderAddr.String(): holder.Protocol(),
+		}),
+	)
+
+	chunk := testingc.FixtureChunk("0033")
+	stream, err := recorder.NewStream(context.Background(), holderAddr,
+		p2p.Headers{retrieval.LocalOnlyHeader: []byte{1}}, "retrieval", "1.4.0", "retrieval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := protobuf.NewWriter(stream)
+	if err := w.WriteMsgWithContext(context.Background(), &pb.Request{Addr: chunk.Address().Bytes()}); err != nil {
+		t.Fatal(err)
+	}
+	// The holder answers the miss and resets the stream, so a read error here
+	// is the expected outcome rather than a failure.
+	r := protobuf.NewReader(stream)
+	var d pb.Delivery
+	_ = r.ReadMsgWithContext(context.Background(), &d)
+	_ = stream.FullClose()
+
+	if n := grants.count(); n != 0 {
+		t.Fatalf("a local-only MISS granted credit %d times; the miss path must not buy credit", n)
 	}
 }

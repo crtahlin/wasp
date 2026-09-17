@@ -32,8 +32,11 @@ func providerCreditSettings(o *Options, paymentThreshold *big.Int) (threshold, b
 		return new(big.Int), new(big.Int), nil
 	}
 
-	if threshold.Cmp(paymentThreshold) < 0 {
-		return nil, nil, fmt.Errorf("providers-payment-threshold %s is below payment-threshold %s, so it would lower what a peer is granted rather than raise it", threshold, paymentThreshold)
+	// Strictly above, not merely at: equal means every grant computes a delta
+	// of zero and is skipped, so the feature would read as configured and do
+	// nothing, which is the failure every refusal here exists to prevent.
+	if threshold.Cmp(paymentThreshold) <= 0 {
+		return nil, nil, fmt.Errorf("providers-payment-threshold %s is not above payment-threshold %s, so no peer would ever be granted anything", threshold, paymentThreshold)
 	}
 	if threshold.Cmp(big.NewInt(maxPaymentThreshold)) > 0 {
 		return nil, nil, fmt.Errorf("providers-payment-threshold %s is above the maximum generally accepted value %d", threshold, maxPaymentThreshold)

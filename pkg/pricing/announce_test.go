@@ -9,9 +9,12 @@ import (
 	"context"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
 	"github.com/ethersphere/bee/v2/pkg/p2p/protobuf"
 	"github.com/ethersphere/bee/v2/pkg/p2p/streamtest"
 	"github.com/ethersphere/bee/v2/pkg/pricing"
@@ -61,17 +64,33 @@ func thresholdsSent(t *testing.T, recorder *streamtest.Recorder, peer swarm.Addr
 	return out
 }
 
-// TestAnnounceSerialisedKeepsCallOrder is the property the serialiser exists
-// for. The announcement carries an absolute value with no sequence number and
-// no acknowledgement, and the wire cannot be changed (rule 6), so without this
-// two announcements to one peer can be delivered in either order and the peer
-// keeps whichever it processes last, for good.
+// blockingStreamer lets a test hold the first announcement open, so a second
+// caller genuinely arrives while one is in flight. Without that, the tests
+// below pass with no serialiser at all: sequential sends are already ordered.
+type blockingStreamer struct {
+	inner   p2p.Streamer
+	hold    chan struct{} // closed to release the held send
+	entered chan struct{} // closed once the first send has started
+	once    sync.Once
+	n       atomic.Int32
+}
+
+func (b *blockingStreamer) NewStream(ctx context.Context, addr swarm.Address, h p2p.Headers, protocol, version, stream string) (p2p.Stream, error) {
+	if b.n.Add(1) == 1 {
+		b.once.Do(func() { close(b.entered) })
+		<-b.hold
+	}
+	return b.inner.NewStream(ctx, addr, h, protocol, version, stream)
+}
+
+// TestAnnounceSerialisedDropsStaleValue is the property the serialiser exists
+// for, and the one the spec calls the residual risk of the whole design: while
+// one announcement is in flight, newer values arrive, and the peer must end on
+// the newest rather than on one that overtook it.
 //
-// What the serialiser can promise is call order: a value announced after
-// another reaches the peer after it, or not at all. It cannot know which value
-// is semantically newest, and it must not try: after a reconnect the lower
-// node-wide value is the correct one to send.
-func TestAnnounceSerialisedKeepsCallOrder(t *testing.T) {
+// It fails without the serialiser: every caller would open its own stream and
+// the arrival order would be whatever the scheduler chose.
+func TestAnnounceSerialisedDropsStaleValue(t *testing.T) {
 	t.Parallel()
 
 	peer := swarm.MustParseHexAddress("9ee7add7")
@@ -82,32 +101,88 @@ func TestAnnounceSerialisedKeepsCallOrder(t *testing.T) {
 		streamtest.WithProtocols(recipient.Protocol()),
 		streamtest.WithBaseAddr(peer),
 	)
-	payer := pricing.New(recorder, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
+	blocker := &blockingStreamer{inner: recorder, hold: make(chan struct{}), entered: make(chan struct{})}
+	payer := pricing.New(blocker, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
 
-	// The sequence a provider grant produces: the connect announcement of the
-	// node-wide default, a growth step, then the grant. The grant is called
-	// last and must therefore reach the peer last.
-	const grant = 54_000_000
-	for _, v := range []int64{13_500_000, 18_000_000, grant} {
+	// First caller: starts sending and is held inside the stream.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = payer.AnnouncePaymentThreshold(context.Background(), peer, big.NewInt(13_500_000))
+	}()
+	<-blocker.entered
+
+	// Three more values arrive while that send is in flight. They must
+	// coalesce, and the last one called must be the one that survives.
+	const newest = 54_000_000
+	for _, v := range []int64{18_000_000, 27_000_000, newest} {
 		if err := payer.AnnouncePaymentThreshold(context.Background(), peer, big.NewInt(v)); err != nil {
-			t.Fatal(err)
+			t.Fatalf("a coalesced caller reported an error for a send it did not make: %v", err)
 		}
 	}
 
-	sent := thresholdsSent(t, recorder, peer)
-	if len(sent) == 0 {
-		t.Fatal("nothing was announced at all")
+	close(blocker.hold)
+	<-done
+
+	// The queued value is drained on its own goroutine, so wait for it.
+	var sent []*big.Int
+	for range 200 {
+		sent = thresholdsSent(t, recorder, peer)
+		if len(sent) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if last := sent[len(sent)-1]; last.Int64() != grant {
-		t.Fatalf("the last announcement was %d, want the last value called, %d; an older value overtook a newer one and the peer would keep the older one for good", last.Int64(), grant)
+
+	if len(sent) < 2 {
+		t.Fatalf("only %d announcements reached the peer; the values queued behind the held send were never delivered", len(sent))
+	}
+	if len(sent) == 4 {
+		t.Fatal("all four values were sent, so nothing coalesced: the serialiser is not taking effect")
+	}
+	if last := sent[len(sent)-1].Int64(); last != newest {
+		t.Fatalf("the peer ended on %d, want the newest value %d; a stale value overtook a newer one and the peer would keep it for good", last, newest)
 	}
 }
 
-// TestAnnounceSerialisedCoalesces checks that a value arriving while a send is
-// in flight replaces one already waiting rather than queueing behind it. A
-// burst is exactly what the growth path produces after a reconnect (#333), and
-// without coalescing that is one stream per value.
-func TestAnnounceSerialisedCoalesces(t *testing.T) {
+// TestAnnounceSerialisedCallerGetsOwnError checks the attribution a peer
+// disconnect hangs on. init returns this error from ConnectIn, and libp2p
+// disconnects the peer on any non-nil return, so a caller must never be handed
+// a failure from somebody else's send.
+func TestAnnounceSerialisedCallerGetsOwnError(t *testing.T) {
+	t.Parallel()
+
+	peer := swarm.MustParseHexAddress("9ee7add7")
+	recipient := pricing.New(nil, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
+	recipient.SetPaymentThresholdObserver(&lockedObserver{})
+
+	recorder := streamtest.New(
+		streamtest.WithProtocols(recipient.Protocol()),
+		streamtest.WithBaseAddr(peer),
+	)
+	blocker := &blockingStreamer{inner: recorder, hold: make(chan struct{}), entered: make(chan struct{})}
+	payer := pricing.New(blocker, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
+
+	go func() {
+		_ = payer.AnnouncePaymentThreshold(context.Background(), peer, big.NewInt(13_500_000))
+	}()
+	<-blocker.entered
+
+	// This caller is coalesced into the in-flight send. Whatever happens to
+	// that send, this one must not report an error, because reporting one here
+	// would disconnect the peer.
+	err := payer.AnnouncePaymentThreshold(context.Background(), peer, big.NewInt(54_000_000))
+	close(blocker.hold)
+
+	if err != nil {
+		t.Fatalf("a coalesced caller returned %v; init returns this from ConnectIn and libp2p would disconnect the peer for a send this caller never made", err)
+	}
+}
+
+// TestAnnounceSerialisedUncontendedStillSends guards the obvious regression:
+// serialising must not swallow an announcement that had nothing to contend
+// with. This is what init does on every connect.
+func TestAnnounceSerialisedUncontendedStillSends(t *testing.T) {
 	t.Parallel()
 
 	peer := swarm.MustParseHexAddress("9ee7add7")
@@ -120,46 +195,7 @@ func TestAnnounceSerialisedCoalesces(t *testing.T) {
 	)
 	payer := pricing.New(recorder, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
 
-	const n = 32
-	var wg sync.WaitGroup
-	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_ = payer.AnnouncePaymentThreshold(context.Background(), peer, big.NewInt(int64(10_000_000+i)))
-		}(i)
-	}
-	wg.Wait()
-
-	sent := thresholdsSent(t, recorder, peer)
-	if len(sent) > n {
-		t.Fatalf("%d announcements were sent for %d values; the serialiser must coalesce, never multiply", len(sent), n)
-	}
-	for _, v := range sent {
-		if v.Int64() < 10_000_000 || v.Int64() >= 10_000_000+n {
-			t.Fatalf("%d was announced but never asked for", v.Int64())
-		}
-	}
-}
-
-// TestAnnounceSerialisedOneAtATime is the narrow property the two tests above
-// rest on, checked directly rather than through the network: while one caller
-// is sending to a peer, another caller for the same peer does not also send.
-func TestAnnounceSerialisedOneAtATime(t *testing.T) {
-	t.Parallel()
-
-	peer := swarm.MustParseHexAddress("9ee7add7")
-	recipient := pricing.New(nil, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
-	recipient.SetPaymentThresholdObserver(&lockedObserver{})
-
-	recorder := streamtest.New(
-		streamtest.WithProtocols(recipient.Protocol()),
-		streamtest.WithBaseAddr(peer),
-	)
-	payer := pricing.New(recorder, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
-
-	// One announcement on its own must still be sent, so that serialising does
-	// not simply drop everything.
+	// One announcement on its own must still be sent, and exactly once.
 	if err := payer.AnnouncePaymentThreshold(context.Background(), peer, big.NewInt(54_000_000)); err != nil {
 		t.Fatal(err)
 	}

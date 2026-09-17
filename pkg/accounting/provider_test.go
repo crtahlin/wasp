@@ -6,10 +6,12 @@ package accounting_test
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/accounting"
 	"github.com/ethersphere/bee/v2/pkg/log"
@@ -27,6 +29,7 @@ type announceRecorder struct {
 	peers   []swarm.Address
 	during  func()
 	entered atomic.Int32
+	err     error // when set, every announcement fails
 }
 
 func (p *announceRecorder) AnnouncePaymentThreshold(_ context.Context, peer swarm.Address, t *big.Int) error {
@@ -38,7 +41,7 @@ func (p *announceRecorder) AnnouncePaymentThreshold(_ context.Context, peer swar
 	defer p.mu.Unlock()
 	p.got = append(p.got, new(big.Int).Set(t))
 	p.peers = append(p.peers, peer)
-	return nil
+	return p.err
 }
 
 func (p *announceRecorder) values() []*big.Int {
@@ -73,6 +76,21 @@ func newProviderAccounting(t *testing.T, budget int64) (*accounting.Accounting, 
 	}
 	acc.SetProviderCredit(big.NewInt(provThreshold), big.NewInt(budget))
 	return acc, rec
+}
+
+// currentThresholdGiven reads the disconnect limit derived from the granted
+// threshold, which is what PeerInfo exposes of it.
+func currentThresholdGiven(t *testing.T, acc *accounting.Accounting, peer swarm.Address) *big.Int {
+	t.Helper()
+	info, err := acc.PeerAccounting()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pi, ok := info[peer.String()]
+	if !ok {
+		t.Fatalf("no accounting record for %s", peer)
+	}
+	return pi.CurrentThresholdGiven
 }
 
 func thresholdGiven(t *testing.T, acc *accounting.Accounting, peer swarm.Address) *big.Int {
@@ -349,7 +367,12 @@ func TestProviderGrantAnnouncesOutsideThePeerLock(t *testing.T) {
 			if err != nil {
 				t.Errorf("a debit during the announcement failed: %v", err)
 			}
-		case <-context.Background().Done():
+		case <-time.After(5 * time.Second):
+			// A real deadline. An earlier version waited on
+			// context.Background().Done(), which is a nil channel and never
+			// fires, so announcing under the peer lock hung the whole package
+			// until the ten-minute panic instead of failing here.
+			t.Error("a debit could not proceed while an announcement was in flight, so the announcement is being made under the per-peer lock; every concurrent delivery to this peer would stall behind it")
 		}
 	}
 
@@ -357,5 +380,87 @@ func TestProviderGrantAnnouncesOutsideThePeerLock(t *testing.T) {
 
 	if rec.entered.Load() != 1 {
 		t.Fatalf("the announcement ran %d times, want 1", rec.entered.Load())
+	}
+}
+
+// TestProviderGrantRaisesDisconnectLimit. The spec requires the two to move
+// together, and an earlier version of these tests asserted only the threshold.
+// A raise that forgot the limit would blocklist exactly the peers it meant to
+// help, because Apply blocklists on a balance crossing it.
+func TestProviderGrantRaisesDisconnectLimit(t *testing.T) {
+	t.Parallel()
+
+	acc, _ := newProviderAccounting(t, provBudget)
+	peer := swarm.MustParseHexAddress("00112233")
+	acc.Connect(peer, true)
+
+	before := currentThresholdGiven(t, acc, peer)
+	acc.GrantProviderCredit(peer, true)
+	after := currentThresholdGiven(t, acc, peer)
+
+	if after.Cmp(before) <= 0 {
+		t.Fatalf("the disconnect limit did not move with the threshold: %s then %s", before, after)
+	}
+}
+
+// TestProviderGrantFailedAnnounceChangesNothing. A failed announcement cannot
+// tell "the peer did not get it" from "the peer got it and the transport failed
+// afterwards", so the spec resolves that ambiguity by changing nothing at all.
+func TestProviderGrantFailedAnnounceChangesNothing(t *testing.T) {
+	t.Parallel()
+
+	rec := &announceRecorder{err: errors.New("stream reset")}
+	acc, err := accounting.NewAccounting(
+		testPaymentThreshold, testPaymentTolerance, testPaymentEarly,
+		log.Noop, mock.NewStateStore(), rec,
+		big.NewInt(testRefreshRate), testLightFactor, p2pmock.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc.SetProviderCredit(big.NewInt(provThreshold), big.NewInt(provBudget))
+
+	peer := swarm.MustParseHexAddress("00112233")
+	acc.Connect(peer, true)
+	acc.GrantProviderCredit(peer, true)
+
+	// The grant stands: the peer may well have received it.
+	if got := thresholdGiven(t, acc, peer); got.Int64() != provThreshold {
+		t.Fatalf("after a failed announcement the threshold given is %s, want it left at %d", got, provThreshold)
+	}
+
+	// And the slot stays taken, so the budget still reflects what was granted.
+	second := swarm.MustParseHexAddress("44556677")
+	acc.Connect(second, true)
+	acc.GrantProviderCredit(second, true)
+	if got := thresholdGiven(t, acc, second); got.Int64() != testPaymentThreshold.Int64() {
+		t.Fatal("a second peer was granted after a failed announcement, so the budget was released when it should not have been")
+	}
+}
+
+// TestProviderGrantBudgetReleasedOnReconnect. Connect and Disconnect are
+// dispatched with go and unordered, so a fast reconnect can run Connect first.
+// Clearing the grant there without releasing the budget would strand the delta
+// for the life of the process, and enough of those disable the feature in
+// silence.
+func TestProviderGrantBudgetReleasedOnReconnect(t *testing.T) {
+	t.Parallel()
+
+	acc, rec := newProviderAccounting(t, provBudget)
+	first := swarm.MustParseHexAddress("00112233")
+	second := swarm.MustParseHexAddress("44556677")
+
+	acc.Connect(first, true)
+	acc.GrantProviderCredit(first, true)
+
+	// Reconnect without a Disconnect in between, which is the racing order.
+	acc.Connect(first, true)
+
+	// The slot the first connection held must be back.
+	acc.Connect(second, true)
+	acc.GrantProviderCredit(second, true)
+
+	if n := len(rec.values()); n != 2 {
+		t.Fatalf("%d grants, want 2: Connect cleared the grant without returning its budget, so the slot is stranded", n)
 	}
 }
