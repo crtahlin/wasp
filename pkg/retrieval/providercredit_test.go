@@ -1,0 +1,132 @@
+// Copyright 2026 The Wasp Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package retrieval_test
+
+import (
+	"context"
+	"sync"
+	"testing"
+
+	accountingmock "github.com/ethersphere/bee/v2/pkg/accounting/mock"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/p2p/protobuf"
+	"github.com/ethersphere/bee/v2/pkg/p2p/streamtest"
+	pricermock "github.com/ethersphere/bee/v2/pkg/pricer/mock"
+	"github.com/ethersphere/bee/v2/pkg/retrieval"
+	"github.com/ethersphere/bee/v2/pkg/retrieval/pb"
+	"github.com/ethersphere/bee/v2/pkg/storage/inmemchunkstore"
+	testingc "github.com/ethersphere/bee/v2/pkg/storage/testing"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+)
+
+// grantRecorder records every grant the handler asks for.
+type grantRecorder struct {
+	mu    sync.Mutex
+	peers []swarm.Address
+	full  []bool
+}
+
+func (g *grantRecorder) GrantProviderCredit(peer swarm.Address, fullNode bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.peers = append(g.peers, peer)
+	g.full = append(g.full, fullNode)
+}
+
+func (g *grantRecorder) count() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.peers)
+}
+
+// serveWithHeaders runs one retrieval against a holder that has the chunk, with
+// the given stream headers, and returns what the holder's grant recorder saw.
+func serveWithHeaders(t *testing.T, providersOn bool, headers p2p.Headers) *grantRecorder {
+	t.Helper()
+
+	chunk := testingc.FixtureChunk("0033")
+	clientAddr := swarm.RandAddress(t)
+	holderAddr := swarm.RandAddress(t)
+	pricer := pricermock.NewMockService(defaultPrice, defaultPrice)
+
+	st := &testStorer{ChunkStore: inmemchunkstore.New()}
+	if err := st.Put(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+
+	grants := &grantRecorder{}
+	holder := createRetrieval(t, holderAddr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	holder.SetProvidersEnabled(providersOn)
+	holder.SetProviderCreditor(grants)
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{
+			holderAddr.String(): holder.Protocol(),
+		}),
+	)
+
+	// Drive the holder's handler through a stream carrying the headers, which
+	// is what the preferred path does. Going through a full preferred-set
+	// download would exercise the same hook with much more machinery in the
+	// way.
+	stream, err := recorder.NewStream(context.Background(), holderAddr, headers, "retrieval", "1.4.0", "retrieval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := protobuf.NewWriter(stream)
+	if err := w.WriteMsgWithContext(context.Background(), &pb.Request{Addr: chunk.Address().Bytes()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The handler runs on the other side of the recorder, so wait for its
+	// answer rather than racing it.
+	r := protobuf.NewReader(stream)
+	var d pb.Delivery
+	if err := r.ReadMsgWithContext(context.Background(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Err != "" {
+		t.Fatalf("the holder refused the request: %s", d.Err)
+	}
+	_ = stream.FullClose()
+
+	return grants
+}
+
+// TestProviderCreditGrantedOnLocalOnlyHit is the hook this change adds. The
+// handler read the local-only header only on a miss, and the hit path is where
+// a provider actually serves and credit is consumed.
+func TestProviderCreditGrantedOnLocalOnlyHit(t *testing.T) {
+	t.Parallel()
+
+	grants := serveWithHeaders(t, true, p2p.Headers{retrieval.LocalOnlyHeader: []byte{1}})
+	if n := grants.count(); n != 1 {
+		t.Fatalf("%d grants for one local-only hit, want 1", n)
+	}
+}
+
+// TestProviderCreditNotGrantedOnOrdinaryHit. An ordinary retrieval is not a
+// provider request and must buy nothing.
+func TestProviderCreditNotGrantedOnOrdinaryHit(t *testing.T) {
+	t.Parallel()
+
+	grants := serveWithHeaders(t, true, nil)
+	if n := grants.count(); n != 0 {
+		t.Fatalf("an ordinary hit granted credit %d times, want 0", n)
+	}
+}
+
+// TestProviderCreditNeedsProvidersEnabled. The feature gate is off by default
+// and everything hangs off it.
+func TestProviderCreditNeedsProvidersEnabled(t *testing.T) {
+	t.Parallel()
+
+	grants := serveWithHeaders(t, false, p2p.Headers{retrieval.LocalOnlyHeader: []byte{1}})
+	if n := grants.count(); n != 0 {
+		t.Fatalf("credit was granted with providers-enable off, %d times", n)
+	}
+}
