@@ -199,6 +199,46 @@ persistent with one peer, which could slow the ordinary case.
 
 **Reject** if the download still truncates, or if content A regresses.
 
+### Amendment after measurement
+
+Results: [overdraft-retry-results.md](overdraft-retry-results.md).
+
+**The rule above was written on a single-cause model and the measurement refuted
+it.** It says "a sole-source download" as though there were one, and there are
+two, which differ by whether the lookahead prefetch is on. The whole result
+turns on that distinction, so the rule is restated rather than reinterpreted:
+
+- **With the prefetch off**, one chunk in flight at a time, the rule is met.
+  Grouped by whether credit was refused at all, stock completed 0 of 2 refused
+  runs and the fix completed 1 of 1. That is short of rule 7's three per
+  condition and is a pointer, not a result.
+- **At the shipped lookahead buffer** the download still truncates, so the rule
+  is not met. It does deliver 31.2% of the file against stock's 6.2%, and
+  against stock's 0% on a first attempt after a restart, exactly
+  five times as many whole read units, and about eight times as fast while it
+  lasts.
+- **Content A does not regress**, which was the second clause. The medians are
+  4.30 s and 2,325,064 B/s for the fix against 5.22 s and 1,917,504 B/s for
+  stock, and the fix is inside stock's range at its fast end.
+
+**What the amendment does not do is call the first clause satisfied.** The
+residual failure has a different cause from the one this spec addresses, and
+attributing it here is the point of the amendment. This change removes a
+transient refusal turning into a permanent one. It does not remove the refusal,
+and with the prefetch on there are hundreds of refusals per download, each of
+which now falls through to peers that do not hold the chunk. Falling through is
+what keeps content A fast, so it is not a mistake to be tuned away; the two
+cases pull in opposite directions and the requester cannot tell which it is in.
+
+The refusal itself is [#327](https://github.com/crtahlin/wasp/issues/327), which
+carries the pre-registered prediction that this arm completes once the provider
+grants the requester a large enough credit window, with the overdraft counter
+falling towards zero as the evidence that the threshold was the constraint.
+
+**So this is accepted as a necessary part with its own measured effect, not as
+the fix for #313.** #313 stays open until the sole-source download completes at
+the shipped buffer.
+
 ## Test plan
 
 Unit tests in `package retrieval_test`:

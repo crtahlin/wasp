@@ -1,9 +1,9 @@
-Title: A stalled log sink deadlocks peer connectivity — node reports healthy with zero peers and never recovers
+Title: A stalled log sink deadlocks peer connectivity, node reports healthy with zero peers and never recovers
 
 ### Context
 
 - Bee 2.8.1 (`2.8.1-7cf53193`), light node, macOS on arm64, launched by Swarm Desktop
-- Observed and diagnosed on 2.8.1. I have not reproduced it on a later release, so I am reporting what I saw. The code involved is `pkg/log/logger.go` and `pkg/pricing/pricing.go`, and neither looked to have changed since — worth checking whether it still applies to current versions.
+- Observed and diagnosed on 2.8.1. I have not reproduced it on a later release, so I am reporting what I saw. The code involved is `pkg/log/logger.go` and `pkg/pricing/pricing.go`, and neither looked to have changed since, worth checking whether it still applies to current versions.
 - Node uptime at the time of capture: the fault had been in place 105 minutes
 
 ### Summary
@@ -17,7 +17,7 @@ gauges.
 The node stays up, serves its API and reports `{"status":"ok"}` while holding
 zero peers. Only a restart recovers it.
 
-This is not specific to Swarm Desktop. Any stalled consumer produces it — a full
+This is not specific to Swarm Desktop. Any stalled consumer produces it, a full
 disk, a paused container, an unread pipe, a stalled journal. Swarm Desktop is
 just where I hit it, because it pipes bee's stdout and stderr over unix sockets
 and stopped draining them.
@@ -78,7 +78,7 @@ a terminal or a file. The parent had stopped reading them.
 The chain:
 
 1. The consumer stops reading; the socket buffer fills.
-2. `pricing.(*Service).init` logs a Warning during `Connect` — it fires whenever
+2. `pricing.(*Service).init` logs a Warning during `Connect`; it fires whenever
    `AnnouncePaymentThreshold` returns an error, which is common as peers go bad.
 3. `logger.go:245` does a bare `l.sink.Write(buf)` with no timeout, no bounded
    buffer and no drop path, so it blocks for ever.
@@ -121,7 +121,7 @@ func TestLoggerBlocksOnAStalledSink(t *testing.T) {
 }
 ```
 
-Result — nothing reads `r`, the pipe fills, and the logger stops for good:
+Result. Nothing reads `r`, the pipe fills, and the logger stops for good:
 
 ```
 log calls completed: 368 after 2s, 368 after 7s

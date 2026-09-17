@@ -22,14 +22,14 @@ the Ethersphere organisation, or any Bee contributor.
 
 Do not report issues with this software to the upstream project. Do not
 represent it as an official Bee release. Do not assume that a fix present here
-has been reviewed to upstream's standards — by construction, it has not.
+has been reviewed to upstream's standards; by construction, it has not.
 
 ## Specific risks of running this
 
 **Financial loss through staking.** A Swarm node with stake at risk can lose it
 if it misbehaves during a redistribution round. This software carries changes
 that have not been through upstream's review or integration testing, so the
-probability of misbehaviour is higher than for stock Bee — and the failure mode
+probability of misbehaviour is higher than for stock Bee, and the failure mode
 may be one nobody has seen before. **Do not stake an amount you are not prepared
 to lose on a node running this software.**
 
@@ -57,7 +57,7 @@ defaults, or be withdrawn. Experiments that fail are reverted.
 - Do not run it as your only node.
 - Do not run it on a node holding data you cannot lose.
 - Do not run it staked, unless the stake is expendable.
-- Keep upstream Bee installed and know how to roll back to it — the packages are
+- Keep upstream Bee installed and know how to roll back to it, the packages are
   drop-in replacements in both directions.
 - Read [`docs/experiments/INDEX.md`](docs/experiments/INDEX.md) to see what is
   actually in the build you are installing.

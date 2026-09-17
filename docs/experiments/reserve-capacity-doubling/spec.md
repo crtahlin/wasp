@@ -130,7 +130,7 @@ the cap removed and nothing else changed:
 |---|---|---|
 | 0 | 1 | 1 |
 | 1 | 0 | 0 |
-| 4 | −3 | **253** |
+| 4 | -3 | **253** |
 
 At 253 the guard `if r >= ps.shallowReceiptTolerance` is false for any real
 radius, so `tolerance` stays 0 and **the node accepts every receipt however
@@ -305,7 +305,7 @@ The cap becomes configuration with 1 as the default, so no node changes what it
 does on merge. Rollback is setting it back to 1.
 
 The pushsync gate change is not configurable and applies to every node,
-including those with doubling 0 — for which it is a no-op, since
+including those with doubling 0, for which it is a no-op, since
 `committedDepth == radius` when `d == 0`.
 
 ## Documentation to add or update

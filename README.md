@@ -5,7 +5,7 @@
 An experimental downstream distribution of [Ethereum Swarm
 Bee](https://github.com/ethersphere/bee).
 
-> ### ⚠️ Read this before running it
+> ### WARNING: read this before running it
 >
 > This is **not** the Bee client. It is a personal fork carrying changes that
 > the upstream project has not adopted, has declined, or has not evaluated.
@@ -28,7 +28,7 @@ Bee](https://github.com/ethersphere/bee).
 ## What it is
 
 Upstream Bee is the reference implementation, and it is conservative for good
-reasons — it is the client most of the network runs. That conservatism means
+reasons: it is the client most of the network runs. That conservatism means
 some optimizations and fixes are not worth upstream's risk budget, even when
 they are worth an individual operator's.
 
@@ -37,8 +37,8 @@ branches: specified before they are written, developed one to a branch, tested,
 documented, measured on real nodes, and shipped in versioned releases.
 
 **It stays protocol-compatible with stock Bee.** These nodes are meant to run on
-the real Swarm network alongside everyone else's. The wire surface — protocol
-versions, the handshake, chunk geometry, network ID — is frozen and enforced by
+the real Swarm network alongside everyone else's. The wire surface (protocol
+versions, the handshake, chunk geometry, network ID) is frozen and enforced by
 a CI check on every pull request. See
 [`docs/agent-playbooks/protocol-compatibility.md`](docs/agent-playbooks/protocol-compatibility.md).
 
@@ -49,14 +49,14 @@ a CI check on every pull request. See
 - **Nothing is pushed back to `ethersphere/bee`.** This is deliberately not a
   GitHub fork, and the upstream remote is fetch-only. If a change here turns out
   to be worth upstreaming, it gets offered as a normal contribution, by a human,
-  on purpose — `scripts/export-patch.sh <slug>` generates a clean patch series
+  on purpose, `scripts/export-patch.sh <slug>` generates a clean patch series
   against current upstream for exactly that.
 - Versions are this fork's own line (`v0.1.0` onward) and do not mirror
   upstream's, so nothing here can be mistaken for an official release.
 
 ## Install
 
-Packages are drop-in replacements for upstream's `bee` package — same binary
+Packages are drop-in replacements for upstream's `bee` package, same binary
 path, same systemd unit, same `/etc/bee/bee.yaml`. They deliberately conflict
 with upstream's package, so installing one replaces the other.
 
@@ -77,8 +77,8 @@ Releases: <https://github.com/crtahlin/wasp/releases>
 
 - [`docs/DIFFERENCES.md`](docs/DIFFERENCES.md): every way wasp differs from the
   latest released Bee, kept current as either side changes
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is planned
-- [`docs/experiments/INDEX.md`](docs/experiments/INDEX.md) — what has landed, and
+- [`docs/ROADMAP.md`](docs/ROADMAP.md), what is planned
+- [`docs/experiments/INDEX.md`](docs/experiments/INDEX.md), what has landed, and
   what came of it, including the things that did not work
 
 Every experiment is one merge commit on `main`, so the history answers the
@@ -91,7 +91,7 @@ git diff <merge>^1 <merge>           # exactly what one of them changed
 
 ## Contributing
 
-The process is issue → spec → branch → pull request → merge, and it is not
+The process is issue -> spec -> branch -> pull request -> merge, and it is not
 optional. See [`AGENTS.md`](AGENTS.md) for the rules and
 [`docs/agent-playbooks/experiment-lifecycle.md`](docs/agent-playbooks/experiment-lifecycle.md)
 for the walkthrough. Upstream's [`CODING.md`](CODING.md) and

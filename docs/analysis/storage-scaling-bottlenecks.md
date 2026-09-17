@@ -13,8 +13,8 @@ backlog, imported so that those issues cite something a reader here can open.
 > `v2.8.1`**, and all were unchanged there.
 >
 > **Four have since changed in wasp, and the document does not know it.** Their
-> *values* are untouched — each became an option with its previous value as the
-> default — but a reader following the document to the code will not find the
+> *values* are untouched: each became an option with its previous value as the
+> default, but a reader following the document to the code will not find the
 > constant it names:
 >
 > | document says | wasp now | issue |
@@ -30,10 +30,10 @@ backlog, imported so that those issues cite something a reader here can open.
 > **Two of its arguments have since been measured and did not survive.** The
 > document treats the LevelDB block cache as materially undersized; measurement
 > put the gain from a 64x larger cache at 1.17x, because the OS page cache
-> already holds the index — see [#12](https://github.com/crtahlin/wasp/issues/12).
+> already holds the index, see [#12](https://github.com/crtahlin/wasp/issues/12).
 > It also reasons about raising `maxAllowedDoubling`; that turns out to change
 > pushsync receipt tolerance for every node and to make stock nodes reject
-> receipts from a high-doubling node, so it cannot be raised unilaterally — see
+> receipts from a high-doubling node, so it cannot be raised unilaterally, see
 > [#17](https://github.com/crtahlin/wasp/issues/17).
 >
 > Read it as the reasoning that generated the backlog, not as a current
@@ -53,8 +53,8 @@ This document analyzes the bottlenecks encountered when scaling Bee node storage
 ### Storage Capacity Configuration
 
 ```
---reserve-capacity-doubling 0  →  4,194,304 chunks (~17 GB)
---reserve-capacity-doubling 1  →  8,388,608 chunks (~34 GB)
+--reserve-capacity-doubling 0  ->  4,194,304 chunks (~17 GB)
+--reserve-capacity-doubling 1  ->  8,388,608 chunks (~34 GB)
 ```
 
 The option is currently capped at `maxAllowedDoubling = 1` in `pkg/node/node.go:195`.
@@ -83,7 +83,7 @@ maxChunksPerSecond = 1000  // ~4 MB/s total inbound sync rate
 **Impact**: Doubling storage capacity results in 2x longer sync time. The network cannot fill the additional capacity any faster.
 
 **Calculation**:
-- 250 chunks/sec/peer × 8 peers = 2000 chunks/sec theoretical max
+- 250 chunks/sec/peer x 8 peers = 2000 chunks/sec theoretical max
 - 4M chunks @ 2000/sec = ~33 minutes to fill base capacity
 - 8M chunks = ~66 minutes minimum
 

@@ -61,7 +61,7 @@ _binary__home_acud_repos_XKCP_build_temp_blob_avx2_bin_start
 Two builds of identical source on one machine therefore differ, purely because
 the working directories differ. Nothing references these symbols, so the script
 renames them to a canonical form. With that, the same source and toolchain
-produce the same bytes wherever the build ran — which is what makes `CHECKSUM`
+produce the same bytes wherever the build ran, which is what makes `CHECKSUM`
 mean something. Verified: two builds in different directories, byte-identical
 after normalisation.
 
@@ -69,7 +69,7 @@ after normalisation.
 
 The build also emits Plan 9 assembly glue under `go_keccak/`. **Do not copy it
 into this directory.** It declares an 8192-byte Go stack frame, while the blob
-needs up to 11484 bytes (times4) and 12229 (times8) — see issue #89. More
+needs up to 11484 bytes (times4) and 12229 (times8), see issue #89. More
 importantly, the stubs here deliberately do not use a Go stack frame at all:
 they run the blob on a pooled scratch stack, which is the fix for the memory
 corruption in issue #92. Copying the generated stub reinstates the crash.
@@ -87,7 +87,7 @@ under their `linux_amd64` names, refresh `CHECKSUM`, and run the tests.
 `CHECKSUM` pins the SHA-256 of each `.syso`, and `TestSysoChecksums` enforces
 it. Note what that test does and does not prove: it shows the files have not
 changed since they were pinned. It does not show they correspond to any
-particular source — that is what the reproducible rebuild above is for.
+particular source; that is what the reproducible rebuild above is for.
 
 ```bash
 cd pkg/keccak
@@ -96,5 +96,5 @@ go test -race ./pkg/keccak/... ./pkg/bmt/...
 ```
 
 `TestSysoChecksums` parses `CHECKSUM`, recomputes the digests of the on-disk
-`.syso` files, and fails the build if either drifts — that's the CI tripwire
+`.syso` files, and fails the build if either drifts, that's the CI tripwire
 that catches an accidental rebuild or a corrupted check-in.

@@ -1,6 +1,6 @@
 # A stalled log sink must not deadlock the node
 
-Issue: [#156](https://github.com/crtahlin/wasp/issues/156) ·
+Issue: [#156](https://github.com/crtahlin/wasp/issues/156),
 Upstream: [ethersphere/bee#5581](https://github.com/ethersphere/bee/issues/5581)
 
 ## Problem
@@ -12,7 +12,7 @@ if _, err = l.sink.Write(buf); err != nil {
 ```
 
 It is a bare, unbounded, synchronous write. The production sink is
-`cmd.OutOrStdout()` — `os.Stdout` — set once at `cmd/bee/cmd/cmd.go:540`, which
+`cmd.OutOrStdout()` (`os.Stdout`), set once at `cmd/bee/cmd/cmd.go:540`, which
 under systemd, Docker, or a desktop launcher is a pipe or a socket. When the
 consumer at the far end stops reading, the buffer fills and `write(2)` never
 returns.
@@ -36,7 +36,7 @@ Seven dial goroutines were stuck there, and kademlia's manage loop was blocked i
 peers, had made zero dial attempts, and reported `/health` `ok` throughout. Only
 a restart recovered it.
 
-**Table 1 — bench readings from the affected node, three samples 20s apart**
+**Table 1: bench readings from the affected node, three samples 20s apart**
 
 | reading | value |
 |---|---|
@@ -62,7 +62,7 @@ Log delivery and node liveness are wrongly coupled. If the sink is made bounded
 and non-blocking, a stalled consumer costs log lines and nothing else: dialling
 continues, the manage loop keeps cycling, and the node stays reachable.
 
-If that is wrong, the block is not only in the sink — some other unbounded wait
+If that is wrong, the block is not only in the sink, some other unbounded wait
 on the connect path would keep the loop blocked, and the kademlia test below would
 still fail after the change. That is a real possibility worth naming rather than
 assuming away, and it is what the end-to-end test is for.
@@ -78,7 +78,7 @@ if err := l.log(...); err != nil { fmt.Fprintln(os.Stderr, err) }
 ```
 
 at `logger.go:182`, `191`, `200` and `209`. Returning an error on drop turns
-every dropped line into an unbounded blocking write to `os.Stderr` — and under
+every dropped line into an unbounded blocking write to `os.Stderr`, and under
 `bee ... 2>&1 | consumer` that is the *same stalled pipe*. The bug would be
 rebuilt one level up, in the error path, where it is harder to find.
 
@@ -102,7 +102,7 @@ against today's code.
 key that `loggers` (a global `sync.Map`) deduplicates on.
 
 If `NewLogger` wraps afresh on every call, every call produces a new pointer, so
-dedup breaks and each call returns a *different* logger — each with **its own
+dedup breaks and each call returns a *different* logger, each with **its own
 drain goroutine**. Thirty-six call sites do `logger.WithName(...).Register()`.
 
 So: hash on the **original** sink, and keep a package-level map from underlying
@@ -130,7 +130,7 @@ logs during shutdown.
 ### Drop accounting
 
 Silent loss would be a milder member of the same family as `/health` reporting
-`ok` with zero peers — an instrument present and saying nothing. Three things:
+`ok` with zero peers, an instrument present and saying nothing. Three things:
 
 - a monotonic `Dropped()` counter;
 - a synthetic `dropped N log lines` line emitted into the stream once per stall
@@ -140,7 +140,7 @@ Silent loss would be a milder member of the same family as `/health` reporting
   already implements.
 
 Drop accounting must not depend on the hook firing. Hooks fire *after* the write
-at `logger.go:250`, so a stalled sink freezes the log metrics too — which is
+at `logger.go:250`, so a stalled sink freezes the log metrics too, which is
 why the counter lives in the sink.
 
 ### Shutdown
@@ -160,13 +160,13 @@ shutdown.
 
 ### Two existing call sites break, and both fail silently
 
-- `pkg/util/testutil/helpers.go:74-80` — `testutil.NewLogger(t)` sinks to
+- `pkg/util/testutil/helpers.go:74-80`, `testutil.NewLogger(t)` sinks to
   `t.Log` and registers **no** `t.Cleanup`. An async drain calling `t.Log` after
   the test returns panics with `Log in goroutine after Test... has completed`,
   and it would do so in random packages across the repository rather than in
   `pkg/log`. It takes the synchronous option; it is a debugging aid and blocking
   is fine there.
-- `pkg/log/example_test.go` — `Example()` compares exact stdout via
+- `pkg/log/example_test.go`, `Example()` compares exact stdout via
   `// Output:`. Async delivery makes that nondeterministic. Same treatment.
 
 ## Configuration, and why the default changes
@@ -189,17 +189,17 @@ breaking here, and worth saying out loud rather than quietly.
 The property is binary rather than numeric, so this is verified by test rather
 than by benchmark.
 
-- **`TestLoggerDoesNotBlockOnStalledSink`** — a logger built through the public
+- **`TestLoggerDoesNotBlockOnStalledSink`**: a logger built through the public
   API completes its calls when the writer never returns. Written against
   today's API so it compiles and fails on `main`.
-- **`TestKademliaDialsWhileLogSinkIsStalled`** — the property that actually
+- **`TestKademliaDialsWhileLogSinkIsStalled`**: the property that actually
   matters: dial attempts continue while the log consumer is stalled.
   `p2pMock` in `kademlia_test.go` already counts dials.
 
 Both are watched failing before any implementation begins. If either does not
 fail on `main`, it is not exercising the defect and the test is worthless.
 
-`testing/synctest` is the tool for both — already used in eight packages
+`testing/synctest` is the tool for both, already used in eight packages
 including `pkg/topology/kademlia`. Inside a bubble, `synctest.Wait()` returns
 once every other goroutine is durably blocked, which turns "hangs for ten
 minutes and then panics the package" into an instant, deterministic failure.

@@ -46,8 +46,8 @@ likely or less meaningful there.
 Check `ErrChainDisabled` on the `AvailableBalance` error the same way, before
 the generic error branch.
 
-Deliberately kept to that. The handler's logging is duplicative — it calls both
-`logger.Debug` and `logger.Error` for the same failure — but that pattern is
+Deliberately kept to that. The handler's logging is duplicative (it calls both
+`logger.Debug` and `logger.Error` for the same failure), but that pattern is
 used throughout `pkg/api` and changing it here would mix an unrelated style
 change into a defect fix.
 
@@ -67,7 +67,7 @@ is required.
 Not a performance change, so there is no before-and-after to measure. Done when:
 
 1. A unit test drives `AvailableBalance` to return `ErrChainDisabled` and
-   asserts 405 — and fails against the current code, which is what makes it a
+   asserts 405, and fails against the current code, which is what makes it a
    real test rather than a restatement.
 2. The existing `TestChequebookBalance` still passes, showing the success path
    is untouched.

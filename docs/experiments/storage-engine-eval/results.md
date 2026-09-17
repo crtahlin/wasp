@@ -1,7 +1,7 @@
 # Results: Pebble vs goleveldb under a real reserve
 
-Issue: [#185](https://github.com/crtahlin/wasp/issues/185) · Spec:
-[`spec.md`](spec.md) · Survey: [`survey.md`](survey.md) · Supersedes the
+Issue: [#185](https://github.com/crtahlin/wasp/issues/185), Spec:
+[`spec.md`](spec.md), Survey: [`survey.md`](survey.md). Supersedes the
 microbenchmark verdict in [#15](https://github.com/crtahlin/wasp/issues/15) once
 this completes.
 
@@ -291,7 +291,7 @@ both engines meet the same background load.
 | | goleveldb | Pebble |
 |---|---|---|
 | chunks/s, median | 58,700 | 79,700 |
-| chunks/s, min–max | 27,700 – 60,400 | 23,900 – 99,600 |
+| chunks/s, min-max | 27,700 - 60,400 | 23,900 - 99,600 |
 | commit latency p50 | 0.012 ms | 0.006 ms |
 | commit latency p99 | 0.030 ms | 0.017 ms |
 | worst commit, any run | 5.5 s (1 of 6 rounds) | 17.4 s (3 of 6 rounds) |
@@ -329,7 +329,7 @@ engine on bench-2.
 | delete throughput, median | 202k deletes/s | 382k deletes/s |
 | scan before / after delete | ~1990 / ~1960 ms | ~1710 / ~1810 ms |
 | space after delete, over 160 s | drops fully to ~257 MB | sits at ~431 MB, barely moves |
-| level 0 through the window | 0 throughout | pinned at 9–11, then eases |
+| level 0 through the window | 0 throughout | pinned at 9-11, then eases |
 
 Three things, consistent across all three rounds:
 

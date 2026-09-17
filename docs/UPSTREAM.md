@@ -22,11 +22,14 @@ commits below are wasp's own.
   wasp change was made.
 - **Commit** links the merge commit on `main`. A dash means no wasp change has
   merged.
-- **Title** is quoted as the issue carries it, punctuation included. Some older
-  titles contain em-dashes, which the writing rules forbid in our own prose. Do
-  not edit them here: the column's job is to match the issue, and changing it
-  would make the table wrong in the way that matters to make it right in the way
-  that does not.
+- **Title** follows the issue's own title, with punctuation normalized to ASCII
+  under the writing rules. Some older issue titles contain em-dashes; those read
+  as commas here. This reverses an earlier instruction not to edit titles in
+  this column at all, which was written to stop a title being reworded into
+  something its author did not write; replacing a punctuation mark with its
+  ASCII equivalent is not rewording. The wording is otherwise unchanged, so a
+  title still identifies its issue. Do not reword a title to improve it: the
+  column's job is to find the issue.
 
 Derived from the experiment ledger ([`experiments/INDEX.md`](experiments/INDEX.md))
 and the git history on 2026-09-17, against the upstream base
@@ -45,11 +48,11 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#34](https://github.com/crtahlin/wasp/issues/34) | Reserve size within radius is computed two different ways | done | `fix/34-reserve-size-two-ways` | [`7f1da3d3`](https://github.com/crtahlin/wasp/commit/7f1da3d3) |
 | [#35](https://github.com/crtahlin/wasp/issues/35) | Add descriptions to OpenAPI schema properties | done (via #192) | - | [`e999eaae`](https://github.com/crtahlin/wasp/commit/e999eaae) |
 | [#36](https://github.com/crtahlin/wasp/issues/36) | Fix typos and parameter naming in the OpenAPI spec | done (via #192) | - | [`e999eaae`](https://github.com/crtahlin/wasp/commit/e999eaae) |
-| [#69](https://github.com/crtahlin/wasp/issues/69) | fix(build): Green Tea GC in Go 1.26 corrupts the heap — build with GOEXPERIMENT=nogreenteagc | done, validated | `fix/69-disable-greenteagc` | [`9702319c`](https://github.com/crtahlin/wasp/commit/9702319c) |
+| [#69](https://github.com/crtahlin/wasp/issues/69) | fix(build): Green Tea GC in Go 1.26 corrupts the heap, build with GOEXPERIMENT=nogreenteagc | done, validated | `fix/69-disable-greenteagc` | [`9702319c`](https://github.com/crtahlin/wasp/commit/9702319c) |
 | [#73](https://github.com/crtahlin/wasp/issues/73) | Node segfaults in goleveldb's block-cache buffer pool after the Green Tea fix | not planned | - | - |
-| [#74](https://github.com/crtahlin/wasp/issues/74) | Node reports ready with zero peers and never recovers — p2p dial breaker stays tripped | done, validated | `fix/74-breaker-backoff-reset` | [`22dfbdd5`](https://github.com/crtahlin/wasp/commit/22dfbdd5) |
+| [#74](https://github.com/crtahlin/wasp/issues/74) | Node reports ready with zero peers and never recovers, p2p dial breaker stays tripped | done, validated | `fix/74-breaker-backoff-reset` | [`22dfbdd5`](https://github.com/crtahlin/wasp/commit/22dfbdd5) |
 | [#76](https://github.com/crtahlin/wasp/issues/76) | Node dies with concurrent map writes in peerRegistry.addStream under load | not planned | - | - |
-| [#77](https://github.com/crtahlin/wasp/issues/77) | SIMD BMT hasher segfaults in hashLeavesBatch — nil node dereference | done | `fix/77-warn-on-simd` | [`f18520b2`](https://github.com/crtahlin/wasp/commit/f18520b2) |
+| [#77](https://github.com/crtahlin/wasp/issues/77) | SIMD BMT hasher segfaults in hashLeavesBatch, nil node dereference | done | `fix/77-warn-on-simd` | [`f18520b2`](https://github.com/crtahlin/wasp/commit/f18520b2) |
 | [#79](https://github.com/crtahlin/wasp/issues/79) | Flaky CI: pkg/api hangs on macOS, TestDebugInfo/disk fails on Windows | done | `fix/79-async-test-deadlines` | [`bb6bbb73`](https://github.com/crtahlin/wasp/commit/bb6bbb73) |
 | [#85](https://github.com/crtahlin/wasp/issues/85) | Node with zero peers cannot self-recover: breaker blocks the bootnode fallback | done, validated | `fix/74-breaker-never-isolates` | [`2e3016b7`](https://github.com/crtahlin/wasp/commit/2e3016b7) |
 | [#89](https://github.com/crtahlin/wasp/issues/89) | XKCP generator emits a stack frame smaller than the code it generates needs | done | `fix/89-generated-frame-too-small` | [`4b57e508`](https://github.com/crtahlin/wasp/commit/4b57e508) |
