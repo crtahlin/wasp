@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> **This repository is `crtahlin/wasp` — an experimental downstream
+> **This repository is `crtahlin/wasp`, an experimental downstream
 > distribution of [`ethersphere/bee`](https://github.com/ethersphere/bee).**
 > It is not the upstream project and is not affiliated with or endorsed by the
 > Swarm Foundation. Upstream's own instructions follow below and still apply;
@@ -9,7 +9,7 @@
 ## Fork rules (non-negotiable)
 
 **1. Nothing goes back to Ethersphere.**
-The `upstream` remote is fetch-only — its push URL is deliberately set to
+The `upstream` remote is fetch-only, its push URL is deliberately set to
 `DO_NOT_PUSH`. Never push to it, never open a pull request against
 `ethersphere/bee`, never comment on an upstream issue or pull request on the
 maintainer's behalf. Always pass `--repo crtahlin/wasp` to
@@ -18,16 +18,16 @@ GitHub fork, so nothing about the platform will suggest upstream as a target;
 keep it that way.
 
 **2. No code before an issue and a merged spec.**
-The order is: issue → spec merged → branch → implement with tests and docs →
-pull request → merge → ledger row → marker tag. See
+The order is: issue -> spec merged -> branch -> implement with tests and docs ->
+pull request -> merge -> ledger row -> marker tag. See
 `docs/agent-playbooks/experiment-lifecycle.md`. A change that arrives as code
 first gets sent back, however good it is.
 
 **3. Merge commits are the changelog.**
 Every change lands on `main` as a `--no-ff` merge commit whose **subject is the
 conventional-commit line**, for example
-`feat(pushsync): parallel chunk dispatch (#12)` — not GitHub's default
-`Merge pull request #12 from …`.
+`feat(pushsync): parallel chunk dispatch (#12)`, not GitHub's default
+`Merge pull request #12 from ...`.
 
 ```bash
 gh pr merge <n> --merge --subject "feat(scope): what changed (#<n>)"
@@ -41,14 +41,14 @@ sync stays cheap. Breaking it breaks all three at once.
 **4. Review before merging, then merge.**
 Run `/review-pr` on a pull request before merging it, and act on what the review
 finds rather than filing it away. Merging after a clean review is the normal
-path and needs no further sign-off — waiting for approval on every change is
+path and needs no further sign-off, waiting for approval on every change is
 not the process. Pause for the operator only on something genuinely risky:
 a protocol change, a migration, or anything that could affect a running node's
 stake or data. There should rarely be such a change.
 
 **5. Never squash-merge. Never delete a branch. Never force-push `main`.**
 Squash and rebase merging are disabled at the repository level and automatic
-branch deletion is off — do not re-enable them. Experiment branches are the
+branch deletion is off, do not re-enable them. Experiment branches are the
 historical record.
 
 **6. The wire surface is frozen.**
@@ -59,7 +59,7 @@ whether a stock peer will talk to us. Changing it requires an explicit
 `docs/agent-playbooks/protocol-compatibility.md` before touching anything under
 `pkg/p2p/`, `pkg/swarm/`, or `pkg/config/`.
 
-**7. Claims are measured, not asserted — and once is not measured.**
+**7. Claims are measured, not asserted, and once is not measured.**
 An optimization is not accepted because the code looks faster. It is accepted
 because a before-and-after run on the test bench says so, with the numbers
 recorded in the experiment's `measurement.md`.
@@ -74,12 +74,12 @@ An HTTP 200 from an API endpoint is never proof that a node is healthy.
 
 **8. Tuning constants become configuration, not edits.**
 A hard-coded constant that measurably matters is exposed as a **config option
-with the current value as its default** — not changed in place. A node with 8
+with the current value as its default**, not changed in place. A node with 8
 cores and a slow disk wants different numbers from one with 32 cores and NVMe,
 and no single compiled-in value serves both.
 
 Order matters: **measure first, expose second.** A config option is permanent
-surface area — documented, kept working across every upstream sync, and an
+surface area, documented, kept working across every upstream sync, and an
 invitation to set it badly. Shipping a dial that turns out not to matter is
 worse than not shipping it. Each such setting gets its own issue, gated on the
 measurement that justifies it, with `db-block-cache-capacity` as the reference
@@ -87,13 +87,13 @@ shape.
 
 Two things the option's documentation must state, not just its existence:
 what raising it costs, and what lowering it costs. For anything that consumes
-other nodes' resources — peer counts, connection limits, sync rates — say what
+other nodes' resources (peer counts, connection limits, sync rates), say what
 it costs *them*, because that operator is not the one who pays.
 
 Not everything can be a runtime option. Anything determining on-disk layout is
 write-once at initialisation or needs a migration; say which in the issue.
 
-**9. Disclose AI assistance — in prose, not in commits.**
+**9. Disclose AI assistance, in prose, not in commits.**
 Issues, pull request descriptions, and comments in this repository end with:
 
 ```
@@ -101,19 +101,19 @@ Generated with help of AI.
 ```
 
 That is deliberate for this repository and reverses the usual convention. The
-work here is largely analytical — performance claims, protocol-compatibility
+work here is largely analytical, performance claims, protocol-compatibility
 arguments, assessments of whether an upstream behaviour is a bug. A reader
 weighing such an argument is entitled to know how it was produced.
 
 Commit messages stay clean: **no `Co-Authored-By` trailers and no tool names.**
 The commit log is a permanent technical record, and branches here are never
 deleted, so anything landed there is effectively immovable. Note that
-`git cherry-pick` preserves trailers by default — when re-landing work from
+`git cherry-pick` preserves trailers by default, when re-landing work from
 elsewhere, write the message explicitly rather than using `cherry-pick -x`.
 
 **10. Nothing sensitive in the repository.**
 This repository is public. No node addresses, hostnames, SSH configuration,
-private keys, wallet addresses, or postage batch identifiers — in code, issues,
+private keys, wallet addresses, or postage batch identifiers, in code, issues,
 specs, or results. Bench machines are referenced by role name (`bench-1`,
 `mainnet-canary`) only.
 
@@ -121,9 +121,9 @@ specs, or results. Bench machines are referenced by role name (`bench-1`,
 When you find a genuine defect that exists in unmodified upstream code, add the
 `affects-upstream` label to the issue and write a section explaining what the
 problem is, why it is upstream's rather than ours, and what the solution would
-be. Verify the claim against the upstream tree — check the file at
+be. Verify the claim against the upstream tree, check the file at
 `upstream/v2.8.1` or `upstream/master` and confirm the defect is present and
-unmodified there — rather than assuming it, and say in the issue what you
+unmodified there, rather than assuming it, and say in the issue what you
 checked.
 
 The label is a **marker for a later human decision, and nothing more.** It does
@@ -133,8 +133,8 @@ it.
 
 Tag defects, not preferences. An optimization we want for large-reserve nodes is
 not an upstream defect; a function that computes the same quantity two different
-ways is. If the problem is only suspected — reasoned from reading the code, not
-measured or reproduced — leave it untagged and record in the issue what evidence
+ways is. If the problem is only suspected, reasoned from reading the code, not
+measured or reproduced, leave it untagged and record in the issue what evidence
 would justify the tag later. A set of findings that might one day be shown to
 someone else is worth only as much as its weakest member, and an unverified claim
 in that set is how the misattribution in #8 happened.
@@ -147,7 +147,7 @@ plausible but false diagnosis is worse than reporting nothing.
 
 `commitlint.config.js` sets `footer-max-line-length` to 72 and the parser treats the
 first line containing a `#N` issue reference as the start of the footer. So a body
-paragraph that mentions an issue — which most good commit messages do — is linted as
+paragraph that mentions an issue (which most good commit messages do) is linted as
 footer, and any line over 72 characters fails `Lint`. There is no `body-max-line-length`
 rule, which makes the failure look arbitrary if you do not know this.
 
@@ -246,7 +246,7 @@ it cost a cleanup commit. Check before merging, not after.
 
 ## Where the detail lives
 
-| If you are… | Read |
+| If you are... | Read |
 |---|---|
 | Starting or shipping an experiment | `docs/agent-playbooks/experiment-lifecycle.md` |
 | Absorbing a new upstream release | `docs/agent-playbooks/upstream-sync.md` |
@@ -267,12 +267,12 @@ it cost a cleanup commit. Check before merging, not after.
 - Version numbers are this fork's own line (`v0.1.0` onward) and do not mirror
   upstream's. `bee version` reports both.
 - New fork-authored `.go` files carry
-  `Copyright <year> The Wasp Authors.` — do not claim Swarm
+  `Copyright <year> The Wasp Authors.`, do not claim Swarm
   authorship for new work. Files inherited from upstream keep their existing
   headers untouched.
 - **Wrap commit message bodies at 72 characters.** `commitlint.config.js` sets
   `footer-max-line-length: 72`, and commitlint treats a trailing paragraph
-  containing an issue reference as a *footer* — so a normal-looking paragraph
+  containing an issue reference as a *footer*, so a normal-looking paragraph
   that mentions `#123` fails CI at 73 characters while the same paragraph
   without the reference passes. Wrapping everything at 72 avoids the trap.
 - `make vet` does not exist despite the upstream checklist below mentioning it.
