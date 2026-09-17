@@ -18,7 +18,7 @@ moved.
 | `protocolName` / `protocolVersion` | `pkg/hive`, `pkg/pushsync`, `pkg/pullsync`, `pkg/retrieval`, `pkg/status`, `pkg/pricing`, `pkg/pingpong`, `pkg/settlement/pseudosettle`, `pkg/settlement/swap/swapprotocol` | Matched per-protocol on connect. See the semver rule below |
 | `ProtocolVersion` | `pkg/p2p/libp2p/internal/handshake/handshake.go` | The handshake itself. A mismatch means no connection at all |
 | Handshake field numbers | `pkg/p2p/libp2p/internal/handshake/pb/handshake.proto` | Protobuf field numbers are permanent. Reusing one silently misinterprets peer data |
-| Chunk geometry | `pkg/swarm/swarm.go`, `ChunkSize`, `Branches`, `SectionSize`, `HashSize`, `MaxPO`, the SOC sizes | These determine chunk **addresses**. Changing one makes our hashes disagree with every other client, including the JavaScript ones |
+| Chunk geometry | `pkg/swarm/swarm.go`: `ChunkSize`, `Branches`, `SectionSize`, `HashSize`, `MaxPO`, the SOC sizes | These determine chunk **addresses**. Changing one makes our hashes disagree with every other client, including the JavaScript ones |
 | `NetworkID`, `ChainID`, contract addresses | `pkg/config/chain.go` | `NetworkID` is checked in the handshake **and** mixed into the overlay address and the signed `BzzAddress`. It is the switch that deliberately creates a separate network |
 
 ## The semver rule, which is subtler than the freeze

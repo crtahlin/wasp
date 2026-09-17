@@ -116,7 +116,7 @@ needs a from-scratch adapter and the prior is against it. Not the primary.
 **Test Pebble against goleveldb under a real reserve. Keep goleveldb as the
 control and the default.** The honest finding of the survey is that the pure-Go
 constraint, plus a write-heavy workload that also needs prefix iteration and
-concurrent writers, leaves Pebble as the best-available maintained alternative -
+concurrent writers, leaves Pebble as the best-available maintained alternative,
 and the only one with an existing conformant adapter. The alternatives were not
 dismissed by assumption:
 
@@ -134,8 +134,8 @@ goleveldb-contention work ([#23](https://github.com/crtahlin/wasp/issues/23),
 
 ## Shortlist for the A/B
 
-1. **goleveldb**, control, current default, bench-1's existing reserve.
-2. **Pebble**, primary treatment, on bench-2 with a fresh reserve.
+1. **goleveldb**: control, current default, bench-1's existing reserve.
+2. **Pebble**: primary treatment, on bench-2 with a fresh reserve.
 3. *(optional, deferred)* **bbolt**, a read-optimised third arm, only if the
    from-scratch adapter is judged worth it after the first comparison.
 

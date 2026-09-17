@@ -1,7 +1,7 @@
 # Results: restore headroom between L0 compaction and write pause
 
-Issue: [#24](https://github.com/crtahlin/wasp/issues/24) -
-Spec: [`spec.md`](spec.md) -
+Issue: [#24](https://github.com/crtahlin/wasp/issues/24),
+Spec: [`spec.md`](spec.md),
 Harness: `beebench/l0depth_test.go`
 
 ## Outcome: the hypothesis is falsified
@@ -13,7 +13,7 @@ level 0 reach the pause trigger.
 **It is not.** Under sustained write load heavy enough to reach the pause
 trigger, the two settings are indistinguishable.
 
-**Table, Level-0 depth under sustained writes, by `CompactionL0Trigger`**
+**Table: Level-0 depth under sustained writes, by `CompactionL0Trigger`**
 
 Synthetic, `beebench`, 2,000,000-entry pre-populated index store, 8 concurrent
 writers, 300 s per arm, options otherwise identical to `pkg/storer`.
@@ -66,7 +66,7 @@ Reproducing it is not the same as it being reachable. The unlimited run drove
 483,587 index writes per second, which is 1.98 GB/s of chunk-equivalent ingest.
 Sweeping the rate downward, with the shipped trigger, 120 s per point:
 
-**Table, Level-0 depth against sustained write rate, `CompactionL0Trigger=8`**
+**Table: Level-0 depth against sustained write rate, `CompactionL0Trigger=8`**
 
 | target writes/s | achieved | peak depth | paused | GB/s equivalent |
 |---|---|---|---|---|
@@ -82,8 +82,8 @@ peaks at 6, below the compaction trigger of 8, never mind the pause at 12. Even
 at ten times line rate it reaches only 9.
 
 So on this hardware the failure needs more inbound bandwidth than a node can
-have, and no amount of postage funding changes that. The batch itself is cheap
-- about 0.56 BZZ per day at depth 22, which was never the constraint.
+have, and no amount of postage funding changes that. The batch itself is cheap,
+about 0.56 BZZ per day at depth 22, which was never the constraint.
 
 ### What that does and does not license
 

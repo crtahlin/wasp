@@ -70,19 +70,19 @@ absorbed:
   (`pkg/bmt/dispatch_simd.go`).
 
 Expect more of this after each upstream sync. When a benchmark stops compiling,
-the fix is to mirror what the production code now does — a benchmark measuring
+the fix is to mirror what the production code now does, a benchmark measuring
 a shape the code no longer has is worse than no benchmark.
 
 ## Reproduced at v2.8.1
 
-**Table — Micro-benchmarks re-run on this fork's v2.8.1 base, Apple M5 Pro, 3s × 3**
+**Table, Micro-benchmarks re-run on this fork's v2.8.1 base, Apple M5 Pro, 3s x 3**
 
 | Benchmark | Briefing (`3e157a04`) | Measured at `v2.8.1` |
 |---|---|---|
-| `Key_Current` | 45.17 ns/op, 224 B, 2 allocs | 47.1–48.2 ns/op, 224 B, 2 allocs |
-| `TransformedAddressCAC` | 26,119 ns/op, 5,924 B, 194 allocs | 27,161–27,766 ns/op, 5,952 B, 195 allocs |
-| `TransformedAddressCAC` throughput | 157 MB/s | 148–151 MB/s |
+| `Key_Current` | 45.17 ns/op, 224 B, 2 allocs | 47.1-48.2 ns/op, 224 B, 2 allocs |
+| `TransformedAddressCAC` | 26,119 ns/op, 5,924 B, 194 allocs | 27,161-27,766 ns/op, 5,952 B, 195 allocs |
+| `TransformedAddressCAC` throughput | 157 MB/s | 148-151 MB/s |
 
 The briefing's figures reproduce within a few percent, so its conclusions hold
-on this base. In particular the BMT allocation problem is unchanged — 195
-allocations per chunk — despite upstream adding SIMD dispatch in the meantime.
+on this base. In particular the BMT allocation problem is unchanged, 195
+allocations per chunk, despite upstream adding SIMD dispatch in the meantime.

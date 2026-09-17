@@ -105,7 +105,7 @@ the accounting figures rather than confirmed against delivery.
   the balance (`:975-979`), so the quantity the trigger tests is the same before
   and after the report. The next cheque needs new debt either way. The report
   took about 0.3 s against a 1.2 s spacing, so it was never the constraint.
-- **`refreshDue` does not delay it either**, because it was zero throughout, as
+- **`refreshDue` does not delay it either**: because it was zero throughout, as
   above.
 
 **So both gates are predicted to do nothing at the rate measured**, and the spec
@@ -130,7 +130,7 @@ Both issues argued from a cheque costing about 0.3 s in chain calls on the
 receiving side. [#301 and #302](../cheque-acceptance-cost/results.md) have since
 removed most of that cost, which is why this spec's framing is narrow.
 
-- **About 93% of the chain reads the node used to make are gone**, 87% to 95%
+- **About 93% of the chain reads the node used to make are gone**: 87% to 95%
   per run, 153 avoided against 12 made across six runs. That is of the reads the
   node made, not per cheque: on the steady path a cheque costs none, against two
   every 30 seconds.
@@ -339,12 +339,12 @@ did what, recorded there as a deviation. Not to be repeated.
 - **Accounting divergence if (a) is got wrong.** The sender credits itself for
   payments the receiver never accepted. This is the reason (a) is a blocking
   design item rather than an implementation detail.
-- **Settlement suppressed for ten seconds**, but only if an implementation makes
+- **Settlement suppressed for ten seconds**: but only if an implementation makes
   the sender aware of a rejection and treats it as a failure. On the current
   code that path is unreachable, per (d), so this is a risk the implementation
   would introduce rather than one it inherits.
 - **A blocklist** if the refreshment bookkeeping in (f) is wrong.
-- **The payer spends more, sooner**, by design, for #304.
+- **The payer spends more, sooner**: by design, for #304.
 - **It raises the exposure #301 and #302 created.** Those reuse a chequebook's
   balance for 30 seconds, so clearing debt faster means more value accepted
   inside that window. [#311](https://github.com/crtahlin/wasp/issues/311) exists
@@ -364,7 +364,7 @@ did what, recorded there as a deviation. Not to be repeated.
   provider, a faster clearing rate would change the outcome. So these changes
   must not be presented as fixing #313, and equally must not be presented as
   irrelevant to it until #313 is measured properly.
-- **They do not widen the credit window**, which is what sets a provider's
+- **They do not widen the credit window**: which is what sets a provider's
   share: the payment threshold sweep moved the share in proportion to the
   threshold. They change how fast the window refills.
 
@@ -415,12 +415,12 @@ between them, fresh 16 MiB files without erasure coding.
   straddling stock, so it did not reproduce.
 - **Identical treatment per arm.** Same restart, same minimum warm-up, same
   minimum peer count. Arms there were compared across warm-ups of 60 to 300 s.
-- **Measure a chain call from the node's own counters**, not a separate probe. A
+- **Measure a chain call from the node's own counters**: not a separate probe. A
   probe that opened a connection per call reported 0.10 s, while the floors give
   a lower bound of about 0.05 s. The results file says the usual cost lies
   between the two and that its data does not say where, so "roughly twofold" is
   the widest reading of that gap and not a measured ratio.
-- **Write the distinguishing counters into the results file**, not merely
+- **Write the distinguishing counters into the results file**: not merely
   collect them: `/settlements/{peer}` and `/timesettlements` before and after,
   the exchange rate in force, preferred attempts, hits and misses, retrieval
   request count, chunks delivered by the provider, the accounting balance with
@@ -428,14 +428,14 @@ between them, fresh 16 MiB files without erasure coding.
   harness records none of the settlement figures today and must be extended
   first. The content B failure was diagnosed wrongly because collected counters
   were never written down.
-- **State the sample size beside every figure**, including runs that produced
+- **State the sample size beside every figure**: including runs that produced
   one cheque.
 - At least three runs per condition, reported with the spread (rule 7).
 
 **Conditions**, interleaved:
 
-1. **Stock**, `payment-early-percent` at its default of 50.
-2. **Stock at `payment-early-percent` 25**, and **3. at 10.** No code: this is
+1. **Stock**: `payment-early-percent` at its default of 50.
+2. **Stock at `payment-early-percent` 25**: and **3. at 10.** No code: this is
    the dial that moves cheque size most, and it must be measured before #304 is
    justified. **Predicted, and falsifiable:** these conditions should *raise*
    `accounting_blocks_count`, not lower it. The overdraft limit is
@@ -450,8 +450,8 @@ between them, fresh 16 MiB files without erasure coding.
    so the figures hold when that term is zero. If blocks do not rise, this
    reasoning is wrong and the rest of the arithmetic here should be re-checked.
 4. **#303 alone.**
-5. **#304 alone**, only if conditions 2 and 3 leave a case for it.
-6. **Both**, on the same condition.
+5. **#304 alone**: only if conditions 2 and 3 leave a case for it.
+6. **Both**: on the same condition.
 
 **Which conditions run on both endpoints.** Conditions 1, 4, 5 and 6 run **on a
 fast endpoint and on a deliberately slowed one**, using the delaying endpoint

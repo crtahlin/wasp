@@ -467,11 +467,11 @@ pseudosettle loggers at debug. Its timing is not comparable with the tables
 above, because the logging itself slows the download.
 
 Measured over one download of 10.6 s:
-- **9 cheques sent to P**, one about every 1.2 s;
+- **9 cheques sent to P**: one about every 1.2 s;
 - **57,790,000 accounting units** cleared by those cheques in total, about
   6,400,000 each, roughly 21 chunks;
 - **about 0.3 s** between a cheque being sent and the payment being registered;
-- **9 free-allowance refreshes**, one per second, as the code sets.
+- **9 free-allowance refreshes**: one per second, as the code sets.
 
 Two things follow:
 - **A cheque clears much less than the window.** The amount paid is the debt
@@ -538,7 +538,7 @@ The 54,000,000 step has **two** runs of condition 3, not three. Its figures are
 both runs, not a median.
 
 **What it shows:**
-- **The provider's share rises with the threshold**, from about 4% of the file
+- **The provider's share rises with the threshold**: from about 4% of the file
   at the default to about 11% at twice the default and about a third at four
   times it. The direction is clear and it matches the explanation in "Why the
   provider's share is small".

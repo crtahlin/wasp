@@ -24,8 +24,8 @@ commits below are wasp's own.
   merged.
 - **Title** follows the issue's own title, with punctuation normalized to ASCII
   under the writing rules. Some older issue titles contain em-dashes; those read
-  as commas here. The wording is otherwise unchanged, so a title still matches
-  its issue on search. Do not reword a title to improve it: the column's job is
+  as commas here. The wording is otherwise unchanged, so a title still
+  identifies its issue. Do not reword a title to improve it: the column's job is
   to find the issue.
 
 Derived from the experiment ledger ([`experiments/INDEX.md`](experiments/INDEX.md))

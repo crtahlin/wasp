@@ -11,7 +11,7 @@ fresh for this project.
 
 Two machines cover the whole backlog. One is enough to start.
 
-**Table, Bench machines for wasp, minimum viable through full coverage**
+**Table: Bench machines for wasp, minimum viable through full coverage**
 
 | Role | vCPU | RAM | Disk | Network | Purpose |
 |---|---|---|---|---|---|
@@ -60,7 +60,7 @@ and failing to, which is the difference between earning and not earning.
 
 **That has never been tested.** No mechanical drive was available for the
 original work, and a VM with SSD-backed storage cannot answer it either. A
-single cheap spinning disk, even a USB-attached one on an existing machine -
+single cheap spinning disk, even a USB-attached one on an existing machine,
 would settle it. Until then #11 is ranked on its SSD numbers alone, which
 probably understates it.
 
@@ -78,7 +78,7 @@ probably understates it.
 
 ## Network and stake posture
 
-- **Mainnet**, so peer behaviour and sync rates are real. Testnet peer counts
+- **Mainnet**: so peer behaviour and sync rates are real. Testnet peer counts
   and traffic patterns do not represent what these changes are tuning for.
 - **Unstaked.** Running unreviewed code on a staked node risks real value if it
   misbehaves during a redistribution round. Every measurement in the backlog can

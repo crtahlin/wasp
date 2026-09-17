@@ -142,7 +142,7 @@ The cause is garbage-collector pacing, established by measurement, not guessed.
 Running one allocation-free read benchmark six times in a single process, each
 with its own fresh store:
 
-**Table, `inmemchunkstore` ReadRandom, Apple M5 Pro, `-benchtime 3000x -count=6`, one process, ns/op**
+**Table: `inmemchunkstore` ReadRandom, Apple M5 Pro, `-benchtime 3000x -count=6`, one process, ns/op**
 
 | GC setting | run 1 | 2 | 3 | 4 | 5 | 6 | spread |
 |---|---|---|---|---|---|---|---|
@@ -356,9 +356,9 @@ health signal an operator would normally trust said the run was valid (#74).
 Every soak and benchmark must therefore treat "is the node working" as a measured
 precondition, not an assumption:
 
-- **Peer count above zero**, read from `/peers` or `/topology`'s `connected`. Treat
+- **Peer count above zero**: read from `/peers` or `/topology`'s `connected`. Treat
   zero as a distinct *invalid run* outcome, not as a pass and not as a failure.
-- **Load average above idle**, from `/proc/loadavg`.
+- **Load average above idle**: from `/proc/loadavg`.
 - For read-path work, **drive load explicitly**. A node whose reserve is already full
   does very little on its own. `/rchash/{depth}/{anchor1}/{anchor2}` in a loop
   produces sustained heavy reads, roughly 137 s per run at depth 9 on a 4M-chunk

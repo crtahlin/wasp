@@ -85,7 +85,7 @@ In order:
    against it, remove each one the release now covers, empty *Bee changes wasp
    does not have yet* of anything this sync brings in, and update the two lines
    at the top. The commands are in rule 13 of `AGENTS.md`.
-5. **CI green**, then merge with a merge commit.
+5. **CI green**: then merge with a merge commit.
 
 ## Never `git fetch --tags upstream`
 
@@ -152,8 +152,8 @@ git switch exp/<n>-<slug>
 git rebase main
 ```
 
-If the conflict is in code the experiment *replaces* wholesale, a rewritten
-hasher, a replaced scheduler, take ours and re-verify against upstream's new
+If the conflict is in code the experiment *replaces* wholesale (a rewritten
+hasher, a replaced scheduler) take ours and re-verify against upstream's new
 tests. If upstream changed the **interface** the experiment builds on, drop the
 commit and re-apply the idea on top rather than hand-merging; a hand-merged
 interface change is how subtle behavioural drift enters.
@@ -186,7 +186,7 @@ concluding anything about why a check is missing.
 
 Two things now prevent a recurrence:
 
-1. **`paths-ignore` is gone from the `pull_request` trigger**, so the contexts always
+1. **`paths-ignore` is gone from the `pull_request` trigger**: so the contexts always
    report; documentation-only pull requests skip the work at step level instead. See #45.
 2. **The workflow verifies before opening the pull request.** `make build` runs inside the
    sync job on the clean path, so a merge that resolves but does not compile never becomes

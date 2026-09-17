@@ -5,7 +5,7 @@
 An experimental downstream distribution of [Ethereum Swarm
 Bee](https://github.com/ethersphere/bee).
 
-> ###  Read this before running it
+> ### Read this before running it
 >
 > This is **not** the Bee client. It is a personal fork carrying changes that
 > the upstream project has not adopted, has declined, or has not evaluated.
@@ -37,8 +37,8 @@ branches: specified before they are written, developed one to a branch, tested,
 documented, measured on real nodes, and shipped in versioned releases.
 
 **It stays protocol-compatible with stock Bee.** These nodes are meant to run on
-the real Swarm network alongside everyone else's. The wire surface, protocol
-versions, the handshake, chunk geometry, network ID, is frozen and enforced by
+the real Swarm network alongside everyone else's. The wire surface (protocol
+versions, the handshake, chunk geometry, network ID) is frozen and enforced by
 a CI check on every pull request. See
 [`docs/agent-playbooks/protocol-compatibility.md`](docs/agent-playbooks/protocol-compatibility.md).
 

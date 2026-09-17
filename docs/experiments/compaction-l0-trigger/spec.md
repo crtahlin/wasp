@@ -150,7 +150,7 @@ documented behaviour rather than anything wasp-specific. What Ethersphere would
 need is exactly what the measurement section produces: L0 depth traces for both
 arms, and the compaction-cost figure showing what the revert costs.
 
-The instrumentation is separable and worth offering regardless of the outcome -
+The instrumentation is separable and worth offering regardless of the outcome,
 L0 depth is not currently visible from bee at all, which is part of why this was
 diagnosed operationally rather than measured.
 

@@ -164,7 +164,7 @@ The cause was path filtering, not anything to do with the pull request being
 bot-authored. `go.yml` carried `paths-ignore: '**/*.md'` on its `pull_request` trigger,
 and a release pull request changes exactly one file: `CHANGELOG.md`. So `Lint` and `Test`
 were never triggered. Two other workflows did run on that same pull request, on the same
-`pull_request` event, which is how we know bot authorship was not the obstacle -
+`pull_request` event, which is how we know bot authorship was not the obstacle,
 `assign-author` even reported a failure, and the merge went through anyway because nothing
 was required at the time.
 
@@ -207,4 +207,4 @@ Three things now prevent a recurrence:
    protocol-freeze check run against the commit that will be proposed, after the
    changelog is written, not before it. On failure nothing is pushed and no pull request
    exists.
-3. **`main` requires status checks**, so no pull request merges on zero evidence.
+3. **`main` requires status checks**: so no pull request merges on zero evidence.

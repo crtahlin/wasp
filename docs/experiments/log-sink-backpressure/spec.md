@@ -1,6 +1,6 @@
 # A stalled log sink must not deadlock the node
 
-Issue: [#156](https://github.com/crtahlin/wasp/issues/156) -
+Issue: [#156](https://github.com/crtahlin/wasp/issues/156),
 Upstream: [ethersphere/bee#5581](https://github.com/ethersphere/bee/issues/5581)
 
 ## Problem

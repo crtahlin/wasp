@@ -96,7 +96,8 @@ Then:
 Accounting limits hypothesis 1. Without SWAP, the sustained rate one provider can
 give one requester is about its refresh rate divided by the chunk price. At the
 highest price, a chunk at proximity 0 (`pkg/pricer/pricer.go:35`), that is:
-- about 4,500,000 / 320,000 about 14 chunks per second to a full node;
+- about 4,500,000 / 320,000, which is about 14 chunks per second to a full
+  node;
 - about 1.4 to a light node (`pkg/node/node.go:230-232`).
 
 Chunks closer to the provider cost less. Beyond this rate, `PrepareCredit` reports an
@@ -350,7 +351,7 @@ reserve, pins and cache. A local-only request is answered from all of it.
   hide it.
 
 **Announcing** (new package `pkg/providers`, with the fork copyright header).
-- **`POST /wasp/providers/{reference}`**, with `Swarm-Postage-Batch-Id`:
+- **`POST /wasp/providers/{reference}`**: with `Swarm-Postage-Batch-Id`:
   - requires the reference to be pinned already, with `POST /pins/{reference}`,
     and returns 400 otherwise. Pinning inside this call would mean refactoring
     upstream's `pkg/api/pin.go`, which makes every upstream sync more expensive;

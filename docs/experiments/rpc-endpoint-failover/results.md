@@ -1,14 +1,14 @@
 # Results: fallback blockchain RPC endpoints
 
-Issue: [#109](https://github.com/crtahlin/wasp/issues/109) -
-Spec: [`spec.md`](spec.md) -
+Issue: [#109](https://github.com/crtahlin/wasp/issues/109),
+Spec: [`spec.md`](spec.md),
 Code: [#117](https://github.com/crtahlin/wasp/pull/117), [#118](https://github.com/crtahlin/wasp/pull/118)
 
 ## Outcome: the node survives an outage that previously killed it
 
 Measured on bench-1, `wasp 0.0.0-untagged-3d1d3d2`, Gnosis mainnet.
 
-**Table, Node survival with its primary RPC endpoint dead**
+**Table: Node survival with its primary RPC endpoint dead**
 
 | arm | endpoints configured | outcome |
 |---|---|---|
@@ -53,7 +53,7 @@ running the test.
 
 ## What this does not cover
 
-- **Recovery**, the `Recover` loop moving back to the primary once it returns. The
+- **Recovery**: the `Recover` loop moving back to the primary once it returns. The
   code is tested in unit tests but was not exercised on the node here.
 - **A partial failure**: an endpoint that answers but lies, or lags far behind.
   The block-lag bound exists for this and is unit-tested only.

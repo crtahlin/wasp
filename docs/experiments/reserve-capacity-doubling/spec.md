@@ -202,7 +202,7 @@ Expose this as configuration with the current behavior as the default
 ([#219](https://github.com/crtahlin/wasp/issues/219)):
 
 - Add `--redistribution-sync-rate-threshold` in chunks per second.
-- **Default 0**, special-cased to keep the exact current gate `SyncRate() == 0`, so
+- **Default 0**: special-cased to keep the exact current gate `SyncRate() == 0`, so
   behavior is unchanged unless set.
 - A positive value `t` switches the gate to `SyncRate() < (t * 2^d)`, scaling by
   the doubling since that is the axis the offer rate grows on.
@@ -265,7 +265,7 @@ the three changes alter `.github/protocol-freeze.lock`.
 
 ## Measurement
 
-- **Shallow receipt rate**, `bee_pushsync_shallow_receipt`, on a node running
+- **Shallow receipt rate**: `bee_pushsync_shallow_receipt`, on a node running
   with doubling. It should be indistinguishable from a node without doubling.
   This is the whole point of the change and it is directly instrumented already.
 - **The extended reserve still fills.** Reserve size against committed depth,
@@ -315,7 +315,7 @@ Doubling is easy to turn on and easy to get wrong, and the failure mode is losin
 redistribution earnings, so the risks have to be written down where an operator
 setting the flag will read them.
 
-- **A new operator guide**, `docs/reserve-capacity-doubling.md`, covering: what
+- **A new operator guide**: `docs/reserve-capacity-doubling.md`, covering: what
   doubling does and how it changes storage radius and committed depth; that fill is
   bounded by sync rate, not disk; the full list of knobs to raise alongside it (the
   table above) and what each costs; the correlated-freeze reasoning and that there

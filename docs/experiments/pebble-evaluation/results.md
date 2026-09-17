@@ -1,6 +1,6 @@
 # Results: Pebble evaluated against goleveldb
 
-Issue: [#15](https://github.com/crtahlin/wasp/issues/15) -
+Issue: [#15](https://github.com/crtahlin/wasp/issues/15),
 Spec: [`spec.md`](spec.md)
 
 ## Verdict: do not adopt Pebble now, and keep the evidence
@@ -53,7 +53,7 @@ way they were wrong is the useful part.
 Apple M5 Pro, `-benchtime 200ms -count 3`, median of three. Both engines on
 disk, a fresh store per sub-benchmark, 100,000-entry datasets.
 
-**Table, Store operations, goleveldb against Pebble, like for like**
+**Table: Store operations, goleveldb against Pebble, like for like**
 
 | operation | goleveldb ns | Pebble ns | verdict |
 |---|---|---|---|
@@ -143,9 +143,9 @@ Everything the spec said it would not, and one thing more.
 
 - **Nothing about the reserve at scale.** The workload is synthetic, against an
   empty store, on a laptop. bench-1 holds 4,064,993 chunks.
-- **Nothing about compaction under sustained ingest**, which is the behaviour
+- **Nothing about compaction under sustained ingest**: which is the behaviour
   that matters most and the one a microbenchmark cannot reproduce.
-- **Nothing about prefix iteration**, one of the two operations the spec named
+- **Nothing about prefix iteration**: one of the two operations the spec named
   as deciding. `IterateSequential` and `IterateReverse` run but report no
   `ns/op`, so there is nothing to compare.
 
@@ -160,12 +160,12 @@ are different, and the spec's first draft got that wrong.
 
 In order of what it would cost:
 
-1. **Done**, the harness is fixed ([#146](https://github.com/crtahlin/wasp/issues/146),
+1. **Done**: the harness is fixed ([#146](https://github.com/crtahlin/wasp/issues/146),
    [#159](https://github.com/crtahlin/wasp/pull/159)) and the numbers above are
    the result.
-2. **Done**, prefix iteration now reports per-entry cost, and Pebble is 1.19x
+2. **Done**: prefix iteration now reports per-entry cost, and Pebble is 1.19x
    slower. That is the half of the criterion that decides this.
-3. **Run both engines under a real reserve**, which is the only setting where
+3. **Run both engines under a real reserve**: which is the only setting where
    compaction behaviour appears at all.
 
 The maintenance argument for Pebble is unchanged and remains the strongest point

@@ -5,7 +5,8 @@ Issue: [#185](https://github.com/crtahlin/wasp/issues/185) - Survey:
 
 ## What this builds
 
-An operator-selectable index-store engine (goleveldb (default) or Pebble) and
+An operator-selectable index-store engine, either goleveldb (the default) or
+Pebble, and
 the observability parity needed to compare them fairly on real nodes. goleveldb
 stays the default and only value; Pebble is opt-in. Per rule 8 this is experiment
 surface, not a migration: no engine becomes the default without the A/B verdict.
@@ -36,7 +37,7 @@ All the goleveldb coupling is confined to `pkg/storer/storer.go`.
 
 **2. `initStore` returns the interface and branches.** `initStore`
 (`storer.go`) becomes `(storage.Store, error)` and switches on the engine,
-calling `leveldbstore.New` or `pebblestore.New`. Their signatures differ -
+calling `leveldbstore.New` or `pebblestore.New`. Their signatures differ,
 `leveldbstore.New` returns `(*Store, bool, error)` (the `bool` is the
 unclean-shutdown flag), `pebblestore.New` returns `(*Store, error)`, so the
 switch reconciles them and, for the leveldb arm, keeps today's dirty-flag

@@ -39,7 +39,7 @@ built yet.
 
 | Section | Contents |
 |---|---|
-| Problem | What is wrong today, with evidence, logs, measurements, upstream issue links |
+| Problem | What is wrong today, with evidence: logs, measurements, upstream issue links |
 | Hypothesis | What you believe is happening and why the proposed change addresses it |
 | Design | What changes, which packages, which interfaces |
 | Protocol impact | Explicitly: does this touch the frozen surface? If no, say why not. If yes, what breaks and for whom |
@@ -142,7 +142,7 @@ a node does compared with Bee, the pull request should already have updated
 
 Merged is not the same as proven. Deploy to the bench, confirm the node connects
 to stock peers and stays healthy, and write `results.md`. See
-`docs/agent-playbooks/test-bench.md`. A negative result is a genuine outcome -
+`docs/agent-playbooks/test-bench.md`. A negative result is a genuine outcome,
 record it and say so in the ledger rather than quietly abandoning the branch.
 
 ## Extracting an experiment for upstream
