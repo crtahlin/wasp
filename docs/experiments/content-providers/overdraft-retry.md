@@ -213,10 +213,13 @@ turns on that distinction, so the rule is restated rather than reinterpreted:
   runs and the fix completed 1 of 1. That is short of rule 7's three per
   condition and is a pointer, not a result.
 - **At the shipped lookahead buffer** the download still truncates, so the rule
-  is not met. It does deliver 31.2% of the file against stock's 6.2%, and
-  against stock's 0% on a first attempt after a restart, exactly
-  five times as many whole read units, and about eight times as fast while it
-  lasts.
+  is not met. An earlier version of this amendment said the fix delivers five
+  times as many bytes there. **That comparison was not controlled and is
+  withdrawn**; the results document carries the withdrawal and the matched
+  replacement. Matched, three restart cycles per build from a zero balance, the
+  fix delivers one read unit in one cycle of three where stock delivers nothing
+  in three of three, and always asks the provider more often than stock's
+  invariant 59 attempts.
 - **Content A does not regress**, which was the second clause. The medians are
   4.30 s and 2,325,064 B/s for the fix against 5.22 s and 1,917,504 B/s for
   stock, and the fix is inside stock's range at its fast end.

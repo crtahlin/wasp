@@ -6,12 +6,19 @@ Spec: [overdraft-retry.md](overdraft-retry.md). Issue:
 
 **Summary.** The fix works and it is not sufficient. With the prefetch off, so
 one chunk in flight at a time, it turns a truncated sole-source download into a
-complete one. At the shipped lookahead buffer the download still truncates, but
-it delivers five times as many bytes as stock, 31.2% of the file against 6.2%,
-and against 0% on stock's first attempt after a restart.
-Content the network also holds is not slower; the first version of the fix made
-it about 3x slower and was replaced. The remaining failure is credit refusal
-itself, which is [#327](https://github.com/crtahlin/wasp/issues/327).
+complete one. At the shipped lookahead buffer the download still truncates on
+both builds; on a cold node the fix delivers one read unit in one cycle of three
+where stock delivers nothing in three of three, and it consistently asks the
+provider more often, 67 to 155 attempts against stock's invariant 59. Content
+the network also holds is not slower; the first version of the fix made it about
+3x slower and was replaced. The remaining failure is credit refusal itself,
+which is [#327](https://github.com/crtahlin/wasp/issues/327).
+
+**An earlier version of this document claimed the fix delivers five times as
+many bytes at the shipped buffer. That comparison was not controlled and is
+withdrawn**, along with the attribution of the zero-byte first run to the stock
+build. Table 2 carries the correction and the matched measurement that replaces
+it.
 
 ## Setup
 
@@ -86,76 +93,97 @@ condition.** It is reported as a pointer, not as the result. The reason the
 condition is so hard to provoke here is that one chunk in flight rarely outruns
 the free refresh allowance. Table 2 is the arm where it fires every time.
 
-## Table 2: sole-source at the shipped lookahead buffer
+## Table 2, withdrawn: it compared conditions, not builds
 
-No header overrides beyond the cache and hint headers, which is what a real
-client sends. This is the arm the spec's primary test actually describes, and it
-is the one that was missing when the fix was first called done.
+**This section replaces the shipped-lookahead-buffer comparison that stood here.
+The figures in it were real; the comparison was not.**
 
-**Stock.** Two separate sessions, each a fresh start of the node, three runs
-each:
+### What was wrong
 
-| Session | Run | Bytes of 4,194,304 | Share | Time | Rate | First byte | curl | blocks | attempts | hits |
-|---|---|---|---|---|---|---|---|---|---|---|
-| A | 1 | **0** | 0% | 1.72 s | 0 B/s | 1.723 s | 18 | 9 | 59 | 57 |
-| A | 2 | 262,144 | 6.2% | 2.30 s | 114,216 B/s | 0.338 s | 18 | 1,037 | 74 | 72 |
-| A | 3 | 262,144 | 6.2% | 2.27 s | 115,407 B/s | 0.339 s | 18 | 595 | 102 | 100 |
-| B | 1 | **0** | 0% | 1.59 s | 0 B/s | 1.590 s | 18 | 9 | 59 | 57 |
-| B | 2 | 262,144 | 6.2% | 2.58 s | 101,458 B/s | 0.338 s | 18 | 398 | 74 | 72 |
-| B | 3 | 262,144 | 6.2% | 2.63 s | 99,752 B/s | 0.338 s | 18 | 204 | 103 | 101 |
+The two arms did not start from the same node state.
 
-**The first run after a restart delivers nothing at all**, and it does so
-identically in two independent sessions: 59 preferred attempts, 57 of them hits,
-9 requests refused for credit, 0 bytes out, HTTP 200 with `curl` exit 18. The
-attempt and hit counts repeat to the digit across both sessions on all three
-runs, 59/57, 74/72, then 102/100 and 103/101, so this is a deterministic path
-rather than a sampled one.
+- The **patched** runs, at 17:21:52, 17:23:24 and 17:24:56, came immediately
+  after three 10 MB downloads hinted to the same provider, which ran from
+  17:18:28 to 17:21:37. The node entered them carrying debt and settlement
+  history with that provider.
+- The **stock** runs began at 17:39:30, 120 seconds after a binary swap
+  restarted the node, with the balance with the provider at zero and no warm-up
+  at all.
 
-That is the original #313 report reproduced, and it is now explained rather than
-described. #313 recorded "asked the provider for 45 chunks, was served 43, and
-abandoned the download with nothing transferred". The same shape appears here
-with 59 and 57, and the missing piece is the 9: nine refusals inside the first
-read unit are enough to lose the whole download, because each refused chunk is
-then sought from peers that do not hold it and the unit is all or nothing. **The
-provider served 57 chunks and the requester could use none of them.**
+So the arms differed in accumulated accounting state as well as in build. Rule 7
+says, in as many words, match node state across a comparison. This did not, and
+the difference in state turns out to be the larger effect.
 
-So the zero-byte outcome is not a separate failure from the 6.2% one. It is the
-same failure landing before the first read unit completes rather than after it,
-and what differs is only whether the node has settled accounting state with the
-provider yet.
+### The matched comparison
 
-**The fix, 3 runs:**
+Restart the node, wait, run once, so the balance with the provider starts at
+zero. Three cycles per build, one instance at a time, alternating nothing else:
 
-| Run | Bytes of 4,194,304 | Share | Time | Rate | First byte | curl | blocks | attempts | hits | overdrafts | readmits |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 1,310,720 | 31.2% | 1.38 s | 952,710 B/s | 0.278 s | 18 | 360 | 454 | 452 | 360 | 356 |
-| 2 | 1,310,720 | 31.2% | 1.42 s | 924,411 B/s | 0.278 s | 18 | 429 | 454 | 452 | 429 | 425 |
-| 3 | 1,310,720 | 31.2% | 1.34 s | 976,922 B/s | 0.307 s | 18 | 311 | 455 | 453 | 311 | 308 |
+| Build | Bytes of 4,194,304 | Time | Attempts | Hits | Refused |
+|---|---|---|---|---|---|
+| stock | 0 | 1.82 s | 59 | 57 | 9 |
+| stock | 0 | 1.60 s | 59 | 57 | 9 |
+| stock | 0 | 2.47 s | 59 | 57 | 9 |
+| the fix | 262,144 | 2.93 s | 155 | 153 | 717 |
+| the fix | 0 | 0.88 s | 67 | 65 | 34 |
+| the fix | 0 | 0.85 s | 67 | 65 | 35 |
 
-**Both builds truncate, and the fix delivers five times as much**, exactly five
-times: 1,310,720 is 5 units of 262,144 against stock's 1, or stock's 0 on a
-first run. 262,144 is `smallFileBufferSize` in `pkg/api/bzz.go:51`, the
-granularity at which the API reads, so the file arrives in whole units of it or
-not at all.
+**On a cold node the fix delivers one read unit in one cycle of three, where
+stock delivers nothing in three of three.** That is a real difference and a much
+smaller one than the withdrawn figure.
 
-**The mechanism is visible in the attempt counts, which is the point of the
-change.** Stock asked the provider 59, 74 and 102 times; the fix asked it 454,
-454 and 455 times, between 4.4 and 7.7 times as often, with the hit rate
-unchanged at over 99% on both. Stock stops asking the only holder of a chunk
-after one refusal. The fix keeps asking, which is the whole of #324, and the
-extra bytes are the direct consequence.
+**Stock is invariant.** 59 attempts, 57 hits, 9 refusals, zero bytes, three
+times across three restarts, and the same three numbers appear in two earlier
+sessions on a different harness. The fix never produces 59; it produces 67 or
+155. So the mechanism is visible in the attempt counts even in the condition
+where the delivery is not.
 
-The deliveries are also faster per byte, 924,411 to 976,922 B/s against 99,752
-to 115,407 B/s, and reach the first byte in 0.278 to 0.307 s against 0.338 s, or
-1.59 to 1.72 s on a first run after a restart.
+### What is withdrawn
 
-**`blocks` is higher on stock than on the fix in four of six rows**, for example
-1,037 against 360, while stock delivers less. That counter covers every
-accounting refusal, not only the ones on the preferred path, so a build that
-gives up on the provider and turns to ordinary peers is refused by those peers
-instead. It is reported because it is the only refusal observable that exists on
-both builds, but the preferred-path counters are the ones that speak to this
-change, and no conclusion here rests on the `blocks` difference.
+- **"The fix delivers five times as much", 1,310,720 against 262,144.** A warm
+  arm against a cold one.
+- **"The mechanism is visible in the attempt counts", 454 against 59.** Same
+  defect. Matched, the figures are 67 to 155 against 59.
+- **"The first run after a restart delivers nothing at all"** as a statement
+  about stock. **It is a property of cold accounting state and happens on both
+  builds**, on two of three cycles with the fix in place.
+
+The claim that this reproduces the #313 report still holds, and is strengthened
+rather than weakened: 59 attempts, 57 hits and 9 refusals yielding zero bytes is
+that report's shape, and it now has an explanation. Nine refusals inside the
+first 262,144-byte read unit lose the whole download, because `joiner.ReadAt` is
+all or nothing. **What is withdrawn is only the attribution of that outcome to
+the stock build.**
+
+### What is not withdrawn
+
+- **The regression test.** It asserts that a preferred peer refused credit is
+  asked again for the same chunk with the local-only header, fails on unfixed
+  code and passes on fixed code. Deterministic, and owing nothing to bench state.
+- **Table 1, the one-chunk-in-flight arm.** Both builds ran the same script with
+  the same spacing, each arm beginning with a binary swap and therefore a
+  restart, so run 1 is cold and runs 2 to 6 progressively warmer in **both**
+  arms. That structure is matched.
+
+### What this changes about the conclusion
+
+Less than it might seem, and it sharpens the next step. The fix removes a
+transient refusal turning into a permanent one, and the attempt counts show it
+doing exactly that. It does not remove the refusal, and on a cold node, where
+there is no settlement history at all, the credit window binds from the first
+chunk and the fix has almost nothing to work with.
+
+That is the condition [#327](https://github.com/crtahlin/wasp/issues/327)
+addresses, and it gives that work a second pre-registered prediction: a
+per-peer threshold should let a **cold** sole-source download deliver something,
+where today both builds deliver nothing.
+
+### The rule this adds to the method
+
+**A sole-source row is meaningless without the balance with the provider at the
+start of the run.** Every row records it now, before and after. A comparison
+whose arms do not start from comparable balances is not a comparison.
+
 
 ## Table 3: non-regression, content the network holds
 
@@ -195,7 +223,32 @@ the requester a large enough credit window at the provider that provider
 requests do not get refused at all. The prediction recorded there is that this
 arm completes and the overdraft counter falls towards zero.
 
+**And the cold case is the sharper form of the same thing.** A node that has
+just connected has settled nothing with the provider, so the window binds from
+the first chunk and there is no accumulated headroom for the fix to spend. Both
+builds deliver nothing there. That is the condition a per-peer threshold should
+relieve most visibly, and #327 carries it as a second prediction.
+
 ## Method errors, recorded so they are not repeated
+
+**An uncontrolled comparison, which is the one that reached a merged document.**
+The shipped-buffer arms did not start from the same node state: one followed
+three 10 MB downloads to the same provider, the other followed a restart. Rule 7
+already says to match node state across a comparison, so this was not a gap in
+what was written down but in treating it as binding. Every sole-source row now
+records the balance with the provider before and after, which makes an unmatched
+comparison visible rather than merely possible. Table 2 carries the withdrawal.
+
+**Two instances of the same arm running at once.** A wrapper was piped through
+`tail`, which buffers until the pipeline ends, so a running job looked dead and a
+second instance was started on top of it. The two restarted the same node against
+each other. It was caught because rows arrived 93 s and 75 s apart where the
+script sleeps 150 s, and the affected rows are relabelled in the raw data rather
+than deleted. Two fixes: the harness now takes a lock and a second instance
+refuses to start, and bench wrappers redirect to a file instead of piping through
+`tail`, so silence means silence. The bench notes already warned against running
+an arm and a binary swap concurrently; this is the same error in a new shape.
+
 
 **A control that removed the condition it was meant to test.** The first
 comparison spaced its runs 90 s apart, to clear the one-minute `errSkip` list.
