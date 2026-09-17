@@ -1,13 +1,13 @@
-# pkg/keccak: SIMD Keccak-256 binaries
+# pkg/keccak — SIMD Keccak-256 binaries
 
 This package wraps the SIMD-accelerated, legacy Keccak-256 (Ethereum-compatible,
-0x01 padding suffix, **not** FIPS 202 SHA3-256) primitives produced by
+0x01 padding suffix — **not** FIPS 202 SHA3-256) primitives produced by
 [XKCP](https://github.com/XKCP/XKCP). The actual permutation code is shipped as
 two pre-linked, relocation-free `.syso` blobs that the Go linker pulls in
-directly, no CGO, no toolchain dependency at `go build` time:
+directly — no CGO, no toolchain dependency at `go build` time:
 
-- `keccak_times4_linux_amd64.syso`, AVX2, 4-way parallel
-- `keccak_times8_linux_amd64.syso`, AVX-512, 8-way parallel
+- `keccak_times4_linux_amd64.syso` — AVX2, 4-way parallel
+- `keccak_times8_linux_amd64.syso` — AVX-512, 8-way parallel
 
 The `.syso` files are checked in and verified against `CHECKSUM` by
 `TestSysoChecksums` in `keccak_test.go`, so bee builds reproducibly without
@@ -87,7 +87,7 @@ under their `linux_amd64` names, refresh `CHECKSUM`, and run the tests.
 `CHECKSUM` pins the SHA-256 of each `.syso`, and `TestSysoChecksums` enforces
 it. Note what that test does and does not prove: it shows the files have not
 changed since they were pinned. It does not show they correspond to any
-particular source, that is what the reproducible rebuild above is for.
+particular source; that is what the reproducible rebuild above is for.
 
 ```bash
 cd pkg/keccak
