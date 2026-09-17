@@ -148,6 +148,10 @@ const (
 	skiplistDur          = time.Minute
 	originSuffix         = "_origin"
 	maxOriginErrors      = 32
+	// maxOverdraftReadmits is how many times one preferred peer may be kept for
+	// a later attempt at the same chunk after being refused credit. Bounded so
+	// a peer that never regains credit cannot livelock the request.
+	maxOverdraftReadmits = 8
 	maxMultiplexForwards = 2
 )
 
@@ -201,6 +205,10 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		// normal peer selection, and the timer that starts the next attempt
 		// when a preferred attempt is slow
 		candidates := s.preferredCandidates(preferredPeers, chunkAddr, s.errSkip.ChunkPeers(chunkAddr))
+		// how many times each preferred peer has been kept after an overdraft,
+		// bounded by maxOverdraftReadmits so a peer that never regains credit
+		// cannot hold the request open (#324)
+		readmits := make(map[string]int, len(candidates))
 		var (
 			preferredTimer  *time.Timer
 			preferredTimerC <-chan time.Time
@@ -260,11 +268,29 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 
 				if len(candidates) > 0 {
 					peer := candidates[0]
-					candidates = candidates[1:]
-					if !s.retrievePreferred(ctx, spanCtx, quit, chunkAddr, peer, skip, resultC) {
+					if err := s.retrievePreferred(ctx, spanCtx, quit, chunkAddr, peer, skip, resultC); err != nil {
+						// An overdraft clears by itself after overDraftRefresh,
+						// so keep the peer and come back to it. Consuming the
+						// candidate here made a transient refusal permanent,
+						// which stopped downloads of content only this peer
+						// held (#324). Any other reason, such as the peer not
+						// being connected, will not clear, so drop it.
+						if errors.Is(err, accounting.ErrOverdraft) && readmits[peer.ByteString()] < maxOverdraftReadmits {
+							readmits[peer.ByteString()]++
+							s.metrics.PreferredReadmits.Inc()
+							if preferredTimer == nil {
+								preferredTimer = time.NewTimer(overDraftRefresh)
+							} else {
+								preferredTimer.Reset(overDraftRefresh)
+							}
+							preferredTimerC = preferredTimer.C
+							continue
+						}
+						candidates = candidates[1:]
 						retry()
 						continue
 					}
+					candidates = candidates[1:]
 					inflight++
 					if preferredTimer == nil {
 						preferredTimer = time.NewTimer(preferredWait)

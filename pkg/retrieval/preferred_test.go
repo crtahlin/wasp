@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -436,5 +437,146 @@ func TestFingerprint(t *testing.T) {
 	}
 	if retrieval.Fingerprint([]swarm.Address{a}) == retrieval.Fingerprint([]swarm.Address{a, b}) {
 		t.Fatal("different sets share a fingerprint")
+	}
+}
+
+// TestPreferredOverdraftRetried tests that a preferred peer refused credit for
+// a chunk is asked again once its credit clears, rather than dropped for that
+// chunk. Before #324 the candidate was consumed before the credit check, so a
+// transient 600 ms overdraft permanently removed the only holder of the chunk
+// and the download stopped.
+func TestPreferredOverdraftRetried(t *testing.T) {
+	t.Parallel()
+
+	var (
+		chunk      = testingc.FixtureChunk("0033")
+		clientAddr = swarm.RandAddress(t)
+		holderAddr = swarm.RandAddress(t)
+		pricer     = pricermock.NewMockService(defaultPrice, defaultPrice)
+		calls      atomic.Int32
+	)
+
+	st := &testStorer{ChunkStore: inmemchunkstore.New()}
+	if err := st.Put(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	holder := createRetrieval(t, holderAddr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	holder.SetProvidersEnabled(true)
+
+	// Count the asks that carry the local-only header. That header is sent only
+	// on the preferred path, so it is what separates "asked again as a
+	// preferred peer after the overdraft cleared" from "dropped from the
+	// preferred set and reached later by ordinary peer selection". Asserting
+	// only that the chunk arrived does not discriminate, because the holder is
+	// an ordinary peer of the client too.
+	var localOnlyAsks atomic.Int32
+	spec := holder.Protocol()
+	inner := spec.StreamSpecs[0].Handler
+	spec.StreamSpecs[0].Handler = func(ctx context.Context, p p2p.Peer, s p2p.Stream) error {
+		if _, ok := s.Headers()[retrieval.LocalOnlyHeader]; ok {
+			localOnlyAsks.Add(1)
+		}
+		return inner(ctx, p, s)
+	}
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{
+			holderAddr.String(): spec,
+		}),
+	)
+
+	// refuse the first two credit attempts with an overdraft, then allow it
+	var acc *accountingmock.Service
+	acc = accountingmock.NewAccounting(
+		accountingmock.WithPrepareCreditFunc(func(peer swarm.Address, price uint64, originated bool) (accounting.Action, error) {
+			if calls.Add(1) <= 2 {
+				return nil, accounting.ErrOverdraft
+			}
+			return acc.MakeCreditAction(peer, price), nil
+		}),
+	)
+
+	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		topologymock.NewTopologyDriver(topologymock.WithPeers(holderAddr)), log.Noop, acc, pricer, nil, false)
+	client.SetProvidersEnabled(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(holderAddr))
+
+	got, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress)
+	if err != nil {
+		t.Fatalf("retrieve after an overdraft: %v", err)
+	}
+	if !got.Address().Equal(chunk.Address()) {
+		t.Fatalf("got chunk %s, want %s", got.Address(), chunk.Address())
+	}
+	if n := calls.Load(); n < 3 {
+		t.Fatalf("credit was attempted %d times, want the peer retried after the overdraft", n)
+	}
+	// the peer must have been asked with the local-only header, i.e. as a
+	// preferred peer, not merely reached by normal selection
+	if n := localOnlyAsks.Load(); n == 0 {
+		t.Fatal("the peer was never asked as a preferred peer after the overdraft; " +
+			"it was dropped for this chunk and only reached by ordinary selection")
+	}
+}
+
+// TestPreferredNonOverdraftNotRetried tests that a refusal which will not clear
+// by itself drops the peer for that chunk instead of being retried. Retrying a
+// peer that is not connected would spin until the request deadline.
+func TestPreferredNonOverdraftNotRetried(t *testing.T) {
+	t.Parallel()
+
+	var (
+		chunk      = testingc.FixtureChunk("0033")
+		clientAddr = swarm.RandAddress(t)
+		holderAddr = swarm.RandAddress(t)
+		otherAddr  = swarm.RandAddress(t)
+		pricer     = pricermock.NewMockService(defaultPrice, defaultPrice)
+		calls      atomic.Int32
+	)
+
+	st := &testStorer{ChunkStore: inmemchunkstore.New()}
+	if err := st.Put(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	other := createRetrieval(t, otherAddr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{
+			otherAddr.String(): other.Protocol(),
+		}),
+	)
+
+	// the preferred peer is always refused for a reason that never clears
+	notConnected := errors.New("connection not initialized yet")
+	var acc *accountingmock.Service
+	acc = accountingmock.NewAccounting(
+		accountingmock.WithPrepareCreditFunc(func(peer swarm.Address, price uint64, originated bool) (accounting.Action, error) {
+			if peer.Equal(holderAddr) {
+				calls.Add(1)
+				return nil, notConnected
+			}
+			return acc.MakeCreditAction(peer, price), nil
+		}),
+	)
+
+	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		topologymock.NewTopologyDriver(topologymock.WithPeers(holderAddr, otherAddr)), log.Noop, acc, pricer, nil, false)
+	client.SetProvidersEnabled(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(holderAddr))
+
+	// normal selection still finds the chunk at the other peer
+	if _, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress); err != nil {
+		t.Fatalf("retrieve fell back to normal selection: %v", err)
+	}
+	if n := calls.Load(); n > 1 {
+		t.Fatalf("a refusal that cannot clear was retried %d times, want 1", n)
 	}
 }

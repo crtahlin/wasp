@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethersphere/bee/v2/pkg/accounting"
 	"github.com/ethersphere/bee/v2/pkg/p2p"
 	"github.com/ethersphere/bee/v2/pkg/safe"
 	"github.com/ethersphere/bee/v2/pkg/skippeers"
@@ -211,20 +212,26 @@ func (s *Service) connectedFullNode(peer swarm.Address) bool {
 	return err == nil && closest.Equal(peer)
 }
 
-// retrievePreferred starts a local-only attempt at a preferred peer and
-// reports whether it started. It does not start when the peer cannot be
-// credited, for example on an overdraft, and the caller moves on.
+// retrievePreferred starts a local-only attempt at a preferred peer. It
+// returns nil when the attempt started, and otherwise the reason it did not.
+// The caller needs the reason, not just the failure: an overdraft clears by
+// itself after overDraftRefresh and is worth waiting for, while a peer that is
+// not connected never will be. Returning a bare bool here is what made a
+// transient refusal permanent, see #324.
 func (s *Service) retrievePreferred(
 	ctx, spanCtx context.Context,
 	quit chan struct{},
 	chunkAddr, peer swarm.Address,
 	skip *skippeers.List,
 	resultC chan retrievalResult,
-) bool {
+) error {
 	action, err := s.prepareCredit(ctx, peer, chunkAddr, true)
 	if err != nil {
 		skip.Add(chunkAddr, peer, overDraftRefresh)
-		return false
+		if errors.Is(err, accounting.ErrOverdraft) {
+			s.metrics.PreferredOverdrafts.Inc()
+		}
+		return err
 	}
 	// a preferred peer is asked once per chunk; normal selection would only
 	// make it forward
@@ -239,7 +246,7 @@ func (s *Service) retrievePreferred(
 		defer span.End()
 		s.retrieveChunk(ctx, quit, chunkAddr, peer, resultC, action, span, localOnlyHeaders(), true)
 	})
-	return true
+	return nil
 }
 
 // preferredResult records the outcome of a preferred attempt in the set.
