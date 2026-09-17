@@ -49,6 +49,9 @@ type Service struct {
 	lightPaymentThreshold    *big.Int
 	minPaymentThreshold      *big.Int
 	paymentThresholdObserver PaymentThresholdObserver
+	// announce serialises threshold announcements per peer. See announce.go
+	// for why the wire cannot carry the ordering and the sender must.
+	announce *announceSerial
 }
 
 func New(streamer p2p.Streamer, logger log.Logger, paymentThreshold, lightPaymentThreshold, minThreshold *big.Int) *Service {
@@ -58,6 +61,7 @@ func New(streamer p2p.Streamer, logger log.Logger, paymentThreshold, lightPaymen
 		paymentThreshold:      paymentThreshold,
 		lightPaymentThreshold: lightPaymentThreshold,
 		minPaymentThreshold:   minThreshold,
+		announce:              newAnnounceSerial(),
 	}
 }
 
@@ -123,6 +127,13 @@ func (s *Service) init(ctx context.Context, p p2p.Peer) error {
 
 // AnnouncePaymentThreshold announces the payment threshold to per
 func (s *Service) AnnouncePaymentThreshold(ctx context.Context, peer swarm.Address, paymentThreshold *big.Int) error {
+	return s.announceSerialised(ctx, peer, paymentThreshold)
+}
+
+// sendAnnouncement writes one announcement to one peer. Callers reach it
+// through announceSerialised, never directly, so that two announcements to the
+// same peer cannot be in flight at once and arrive out of order.
+func (s *Service) sendAnnouncement(ctx context.Context, peer swarm.Address, paymentThreshold *big.Int) error {
 	loggerV1 := s.logger.V(1).Register()
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
