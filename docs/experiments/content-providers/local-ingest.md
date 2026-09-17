@@ -5,9 +5,9 @@ into its own store, pays no postage, and serves it to anyone who asks for it.
 
 Code references are to `main` at `7bd5da14`, base `upstream/v2.8.2`.
 
-**This is revision 2.** An adversarial review found four load-bearing sections
-wrong and eleven things missing. Where a claim has changed, the earlier one is
-marked rather than removed.
+**This is revision 3.** Two adversarial reviews found four load-bearing
+sections wrong and about twenty things missing between them. Where a claim has
+changed, the earlier one is marked rather than removed.
 
 ## Terms
 
@@ -16,9 +16,11 @@ marked rather than removed.
 - **Collection**: a set of chunks committed together under one root reference,
   which is how pinning stores things (`pkg/storer/pinstore.go:36-61`).
 - **Payload bytes** against **stored bytes**: a 4,194,304-byte file is 1,033
-  chunks, and a full chunk costs 4,096 data bytes plus an 8-byte span, so the
-  store holds at most about 4,239,432 bytes for it, less because the
-  intermediate chunks are not full. The two are not interchangeable and
+  chunks, and a full chunk costs 4,096 data bytes plus an 8-byte span, so at
+  redundancy level NONE the store holds about 4,239,432 bytes for it. **The
+  route defaults to MEDIUM**, which adds parity chunks and two dispersed root
+  replicas, so the real figure is roughly a tenth higher again. An earlier
+  draft gave the NONE figure as an upper bound, which it is not. The two are not interchangeable and
   this document says which it means every time.
 - **Refcount**: `chunkstore` keeps one copy of a chunk with a reference count
   (`pkg/storer/internal/chunkstore/chunkstore.go:92`), so a chunk this node
@@ -32,7 +34,7 @@ marked rather than removed.
   `Swarm-Redundancy-Level` (`pkg/api/pin.go:25-59`); there is no postage header.
   It stores through `s.storer.NewCollection(r.Context())` (`:61`), an unstamped
   putter, and those chunks are served like any others because the retrieval
-  handler answers from `Lookup()` (`pkg/retrieval/retrieval.go:554`), which
+  handler answers from `Lookup()` (`pkg/retrieval/retrieval.go:589`), which
   reads the whole chunk store with no proximity guard.
 - **But pinning can only adopt, not create.** It traverses the reference and
   downloads each chunk (`pin.go:68-115`), committing with `putter.Done`
@@ -88,8 +90,14 @@ names it, and is retrievable from nowhere else before its first retrieval.
 ### 1. The route, named
 
 ```
-POST /wasp/local
+POST /wasp/ingest
 ```
+
+**Not `/wasp/local`**, which an earlier draft proposed. "Local" already has a
+settled meaning on the wire in this fork: `LocalOnlyHeader` is
+`wasp-local-only` (`pkg/retrieval/preferred.go:29`), the header meaning "answer
+from your own store, do not forward". A route called `/wasp/local` would mean
+something unrelated to it.
 
 - Body: the content, as `POST /bytes` takes it.
 - Headers honoured: `Swarm-Redundancy-Level`, `Swarm-Encrypt`.
@@ -97,14 +105,39 @@ POST /wasp/local
   this node only. **It is not an upload and the response must not read like
   one**: the reference resolves for nobody else unless they ask this node, and
   losing this node loses the content.
+- 200 when the reference is already held, matching `pinRootHash`
+  (`pkg/api/pin.go:49-59`) rather than failing on a duplicate. See 2(a).
 - 403 when the feature is off, following `providersEnabled`
-  (`pkg/api/providers.go:210-216`), which is the existing precedent for a
-  fork route gated by a setting.
+  (`pkg/api/providers.go:210-216`), which is the existing precedent for a fork
+  route gated by a setting.
 - 507 when the limit is reached, naming the limit and current usage.
+
+**The route is mounted whether or not the feature is on, and answers 403 when it
+is off.** An earlier draft said both this and "the route must not exist unless
+the operator enabled it", which are different designs. This one is chosen
+because it is what `providersEnabled` already does, and because a conditional
+`handle` call is a larger change for no gain: an unmounted route and a route
+that always refuses are indistinguishable to anyone probing the API.
+
+**Two things `mountAPI`'s `handle` closure does automatically**
+(`pkg/api/router.go:251-255`), neither of which an earlier draft mentioned:
+
+- it registers `/v1/wasp/ingest` alongside the bare path, so the mirror exists
+  whether or not this document asks for it;
+- it wraps the route in `s.checkRouteAvailability`, so the route answers 503
+  while the node is syncing. **That is wrong for this operation**, which touches
+  no network at all and is exactly what an operator might want while a node is
+  still catching up. The implementation registers it outside that wrapper, and
+  the pull request says so, because deviating from the group default is the kind
+  of thing a reviewer should see rather than discover.
+
+CORS needs nothing new: `Swarm-Redundancy-Level` and `Swarm-Encrypt` are already
+allowed (`pkg/api/api.go:615-622`).
 
 **Directories are out of scope for this issue.** The sketch below reproduces the
 `POST /bytes` path only. A website or a directory needs the manifest path that
-`dirUploadHandler` builds (`pkg/api/bzz.go:213-306`), and which
+`fileUploadHandler` builds (`pkg/api/bzz.go:173-306`), with the directory case
+in `dirUploadHandler` (`pkg/api/dirs.go:39`), and which
 `GET /bzz/{ref}/{path}` needs in order to serve anything. The motivation names
 gateways and publishers, which implies directories, so the gap is stated rather
 than left for a reader to discover. It is a follow-up issue, not a silent
@@ -121,13 +154,26 @@ two paths every real caller has**, and both matter here more than elsewhere:
 
 ```go
 rLevel := redundancy.DefaultUploadLevel          // NOT DefaultDownloadLevel
-if has, _ := s.storer.HasPin(reference); has { ... }   // see (a)
-putter, err := s.storer.NewCollection(ctx)
-defer func() { if err != nil { _ = putter.Cleanup() } }()   // see (b)
-p := requestPipelineFn(putter, encrypt, rLevel)
-reference, err := p(ctx, cleanupOnErrWriter-wrapped body)
-err = putter.Done(reference)
+session, err := s.storer.NewLocalIngestCollection(ctx)   // see (e), fork-authored
+ow := &cleanupOnErrWriter{ResponseWriter: w, onErr: session.Cleanup, logger: logger}
+counted := countingPutter{Putter: session, limit: n}     // see (d)
+p := requestPipelineFn(counted, encrypt, rLevel)
+reference, err := p(ctx, r.Body)                 // every error answered through ow
+err = session.Done(reference)                    // writes the localIngestItem too
 ```
+
+**`cleanupOnErrWriter` wraps the RESPONSE WRITER, not the body**, and an earlier
+draft of this document said the opposite and sketched code that would not
+compile. It embeds `http.ResponseWriter` and fires `onErr` from `WriteHeader`
+when the status is 400 or above (`pkg/api/api.go:913-925`); both upload handlers
+pass `w`, and feed the pipeline `r.Body` directly (`bytes.go:107-108`).
+
+That is not a typo with no consequence. It means **cleanup happens because the
+handler writes its error status through `ow`**, so every error path in the
+handler must go through `ow` or the leak section 2(b) is about comes straight
+back. It also means the 507 path already triggers `Cleanup` through `ow`, and an
+explicit second call is harmless only because `collectionPutter.Cleanup` returns
+nil once closed (`pinning.go:157-159`).
 
 **(a) The duplicate path.** `putter.Done` on an already-pinned root returns
 `ErrDuplicatePinCollection` (`pkg/storer/internal/pinning/pinning.go:136-138`).
@@ -149,6 +195,24 @@ and no operator action removes**, which is the exact failure the limit exists
 to prevent, on the one endpoint whose whole risk is unbounded disk. The mechanism
 to name is `collectionPutter.Cleanup` (`pinning.go:156-174`), which deletes the
 collection chunks and the dirty record.
+
+**(d) The count comes from a putter wrapper, because the pipeline cannot be
+watched.** `requestPipelineFn` returns `func(context.Context, io.Reader)
+(swarm.Address, error)` and the builder feeds to end of input before returning,
+so the handler sees nothing until it is over. An earlier draft said the handler
+"counts chunks as the pipeline produces them", which is not something it can do.
+The counter therefore wraps the putter, and three things follow:
+
+- **It must be safe for concurrent use.** `replicas.putter.Put`
+  (`pkg/replicas/putter.go:36-62`) calls the wrapped putter from several
+  goroutines when the dispersed root replicas are stored, so a plain integer is
+  a data race.
+- **The abort is clean**, which is the one part of this that works without
+  effort: an error from the wrapper propagates synchronously back out of the
+  pipeline, and the replicas putter joins errors rather than swallowing them.
+- **It needs its own sentinel error**, tested with `errors.Is`, or the pipeline
+  error arrives opaque and the 507 becomes the 500 the upload handlers write by
+  default.
 
 **(c) The redundancy default is the upload one.** `pkg/api/bytes.go:48` uses
 `redundancy.DefaultUploadLevel`, which is `MEDIUM`; `pkg/api/pin.go:44` uses
@@ -218,9 +282,37 @@ marker and no size, so a collection made by this route is indistinguishable from
 one made by `POST /pins/{reference}`. A limit scoped to locally ingested content
 therefore needs state that does not exist.
 
-So: **a `localIngestItem`, keyed by the root reference, written once when the
-ingest commits, holding the chunk count.** That gives the scoped limit and the
-listing together.
+So: **a `localIngestItem`, keyed by the root reference, holding the chunk
+count.** That gives the scoped limit and the listing together.
+
+**It is written inside the same transaction as the collection commit**, and
+"when the ingest commits" was not precise enough in an earlier draft. Written
+after `Done` returns, a crash in between leaves a committed collection with no
+item, so usage undercounts for good and that much of the limit is bypassed
+permanently. Written before, a failing `Close` leaves an orphan item and usage
+overcounts for good. Neither is repairable, because `pinstore.CleanupDirty`
+(`storer.go:927`) iterates `dirtyCollection` and would know nothing about a new
+namespace.
+
+The transaction lives in the `done` closure of `DB.NewCollection`
+(`pkg/storer/pinstore.go:47-53`), which calls
+`db.storage.Run(ctx, func(s transaction.Store) error { ... })`, and `pkg/api`
+cannot reach `s.IndexStore()`. **So this needs a fork-authored
+`DB.NewLocalIngestCollection` in `pkg/storer`**, which is the same shape with
+the extra write inside the same `Run`. It follows that the item never exists for
+an uncommitted collection, so it takes no part in startup cleanup.
+
+**The item must size its buffer for a 64-byte reference**, as
+`pinCollectionItem` does with `encryption.ReferenceSize` (`pinning.go:350`,
+with the length test on unmarshal at `:390`). The route honours `Swarm-Encrypt`,
+and a 32-byte assumption would break every encrypted ingest silently.
+
+**The running total is held in memory and rebuilt at startup** by one iteration
+over the namespace. The alternative, a singleton total item, is a second
+transactional write and therefore a second way for two records to disagree. An
+earlier draft rejected `/debugstore`'s figure partly for being a full iteration,
+which would have applied equally to summing these items on every request; doing
+it once at startup is what avoids that.
 
 **An earlier draft of this document said "no on-disk format change". That was
 wrong** and it made the work look smaller than it is. There is still **no
@@ -247,11 +339,32 @@ network, and `CollectionStat.Total` is incremented before the duplicate check
 
 **Enforcement is mid-stream, not pre-flight.** `Content-Length` is absent under
 chunked transfer encoding and is client-supplied in any case, so a pre-flight
-refusal cannot be the only gate. The handler counts chunks as the pipeline
-produces them, and on crossing the limit it stops, calls `putter.Cleanup()` and
-returns 507 naming the limit and the usage. A pre-flight check on
-`Content-Length` when it is present is a convenience that fails fast, not the
-enforcement.
+refusal cannot be the only gate. The counting putter of 2(d) stops on crossing
+the limit, and the handler answers 507 through `ow`, which triggers cleanup. A
+pre-flight check on `Content-Length` when it is present refuses before reading
+the body, which is a convenience rather than the enforcement.
+
+**Two numbers, not one, and they differ by orders of magnitude on repetitive
+content.** The putter wrapper sees `Put` calls. What actually reaches disk is
+fewer, twice over: `collectionPutter.Put` drops a chunk already in this
+collection and counts it as a duplicate instead (`pinning.go:100-110`), and
+`chunkstore.Put` only increments a refcount for a chunk the node already holds
+(`chunkstore.go:92`). A gigabyte of zeros is about 262,000 `Put` calls and close
+to one new chunk.
+
+So: **the mid-stream limit is enforced on `Put` calls**, which is the only
+number available while the body is still arriving and is a conservative upper
+bound, so it refuses early rather than late. **The recorded usage is the
+collection's real figure**, `Total` minus `DupInCollection`, read back when the
+session commits and stored in the `localIngestItem`. The two are different
+quantities and the metric's documentation says which is which.
+
+**The 507 may not reach a client that is still uploading.** Go's server discards
+only a bounded amount of an unread request body before closing the connection,
+so a client still writing a large body is likely to see a reset rather than the
+status. The test for this keeps the body small enough to observe the status, and
+accepts a connection error as the alternative outcome rather than treating it as
+a failure.
 
 **A warning below the limit, not only at it.** A compiled-in threshold to start,
 at 90% of the limit, logged at a level an operator sees, with a usage metric
@@ -281,6 +394,13 @@ running `du` sees no change.
 What can be promised, and what the documentation must say: **the chunk count
 attributable to the reference drops to zero, the freed slots become reusable by
 this node, and on-disk shard files do not shrink.**
+
+**Unpinning must remove the item, and that is an edit to an upstream
+function.** There are two places it can go, `unpinRootHash`
+(`pkg/api/pin.go:129-160`) or `DB.DeletePin` (`pkg/storer/pinstore.go:64-80`),
+and both are upstream files. `DeletePin` is the right one, because the removal
+then happens in the same final transaction as the collection delete
+(`pinning.go:308-314`) rather than in a second step that can fail on its own.
 
 **"Ingested and also pinned for another reason" cannot exist**, so the earlier
 requirement to keep them from dropping each other has no referent. Collections
@@ -424,10 +544,22 @@ Unit tests in `package api_test`:
   stamped `POST /bytes` of identical bytes at the same redundancy level;
 - the handler uses `redundancy.DefaultUploadLevel` when no header is given;
 - the endpoint returns 403 when the feature is off;
+- the counting putter is safe under the concurrent calls the replicas putter
+  makes, asserted under the race detector;
+
+Tests in `package storer_test`, against a real database rather than the mock,
+because `pkg/storer/mock/mockstorer.go` has no dirty-collection concept at all:
+its `NewCollection` never returns `ErrDuplicatePinCollection` and its
+`Cleanup()` returns nil unconditionally. An earlier draft put these in
+`package api_test`, where they cannot be written:
+
 - re-ingesting an already-held reference returns 200 rather than 500, and leaves
   no dirty collection;
 - a body that ends early leaves no dirty collection and no orphaned chunks,
   asserted through the usage figure;
+- the `localIngestItem` and the collection commit in one transaction, so a
+  failure in either leaves neither;
+- the item round-trips a 64-byte encrypted reference;
 - the limit is enforced mid-stream, returns 507 naming the limit and usage, and
   the partial collection is cleaned up;
 - the warning fires below the limit, not only at it;
@@ -463,10 +595,23 @@ The warning threshold stays a compiled-in constant under rule 8.
 
 Upstream has no equivalent and no preferred-peer concept, so this is a fork
 feature rather than an upstream defect: **no `affects-upstream` marker** under
-rule 11. The handler is fork-authored in `pkg/api` and reuses
-`storer.NewCollection` and the pipeline unchanged. The one addition outside
-`pkg/api` is the `localIngestItem`, which is a new index item in `pkg/storer`
-and adds no divergence in existing types.
+rule 11.
+
+**But it is not confined to `pkg/api`, and an earlier draft said it was.** Four
+things are needed outside it, two of them inside upstream functions, which is
+what the next upstream sync will meet:
+
+1. **`localIngestItem` and `DB.NewLocalIngestCollection`** in `pkg/storer`. New
+   files, so no upstream edit.
+2. **A method on the API's `Storer` interface** (`pkg/api/api.go:141-155`),
+   which the fork already edits.
+3. **`pkg/storer/mock/mockstorer.go`** must grow the same method or the
+   `pkg/api` tests stop compiling. Upstream file.
+4. **The unpin hook** in `DB.DeletePin` (`pkg/storer/pinstore.go:64-80`).
+   Upstream file.
+
+Nothing here changes an existing type's shape, and the pipeline and
+`storer.NewCollection` are reused unchanged.
 
 ## Rollout and rollback
 
