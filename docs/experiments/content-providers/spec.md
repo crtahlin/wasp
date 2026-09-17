@@ -383,6 +383,18 @@ publish what the operator has recently watched.
 
 ### Phases
 
+**Defects found after phase 1 landed**, each with its own document:
+
+- [overdraft-retry.md](overdraft-retry.md), the fix for
+  [#324](https://github.com/crtahlin/wasp/issues/324): a preferred peer refused
+  credit for one chunk is dropped from that chunk's preferred path permanently,
+  which is the cause behind
+  [#313](https://github.com/crtahlin/wasp/issues/313).
+- [#322](https://github.com/crtahlin/wasp/pull/322), on extending a larger
+  payment threshold to a peer downloading announced content rather than
+  node-wide. Linked here as a pull request because its document is not on `main`
+  yet; replace this with the file link when it merges.
+
 1. **Phase 1, this spec's implementation.**
    - the explicit hint;
    - discovery (records and pointer index);
