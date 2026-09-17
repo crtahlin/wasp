@@ -396,7 +396,11 @@ publish what the operator has recently watched.
      (`pkg/topology/kademlia/kademlia.go:787-858`). This builds on #291.
    - **Erasure-coded content.** Carry the preferred set into it, whose prefetch
      starts from `context.Background()`
-     (`pkg/file/redundancy/getter/getter.go:242`).
+     (`pkg/file/redundancy/getter/getter.go:242`). Specified in
+     [erasure-preferred.md](erasure-preferred.md), which is
+     [#299](https://github.com/crtahlin/wasp/issues/299). This is the phase 2
+     item that decides whether phase 1 works for ordinary content at all, since
+     uploads are erasure coded by default, so it comes first.
    - **Publisher lists.** A manifest metadata key naming a providers list chosen by
      the publisher.
    - **Passive sharing.** [passive-sharing.md](passive-sharing.md) analyzes three
