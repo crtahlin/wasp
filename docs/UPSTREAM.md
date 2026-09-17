@@ -22,9 +22,14 @@ commits below are wasp's own.
   wasp change was made.
 - **Commit** links the merge commit on `main`. A dash means no wasp change has
   merged.
+- **Title** is quoted as the issue carries it, punctuation included. Some older
+  titles contain em-dashes, which the writing rules forbid in our own prose. Do
+  not edit them here: the column's job is to match the issue, and changing it
+  would make the table wrong in the way that matters to make it right in the way
+  that does not.
 
 Derived from the experiment ledger ([`experiments/INDEX.md`](experiments/INDEX.md))
-and the git history on 2026-09-16, against the upstream base
+and the git history on 2026-09-17, against the upstream base
 `v2.8.2`. Two issues (#73, #76) were closed not planned. Wasp issue numbers can
 collide with upstream Bee pull-request numbers in the shared history, so the
 commits here were resolved from fork-only merges, not by issue number alone.
@@ -70,8 +75,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#300](https://github.com/crtahlin/wasp/issues/300) | swap: three chain calls per received cheque cap how fast one peer can serve another | open | - | - |
 | [#301](https://github.com/crtahlin/wasp/issues/301) | chequebook: read the chequebook issuer once instead of on every cheque | done, neutral | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done, neutral (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
-| [#303](https://github.com/crtahlin/wasp/issues/303) | accounting: allow more than one payment in flight per peer | open | - | - |
-| [#304](https://github.com/crtahlin/wasp/issues/304) | accounting: each cheque clears only a slice of the debt | open | - | - |
+| [#316](https://github.com/crtahlin/wasp/issues/316) | accounting: refreshDue is computed without the one second cap in settle, which can suppress cheques entirely | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
@@ -80,5 +84,25 @@ cost across all of a node's peers at once, was never exercised, so #300 stays
 open and the work needed to answer it is
 [#312](https://github.com/crtahlin/wasp/issues/312). A reader should not take
 the two closed rows as evidence for that half.
+
+#303 and #304 had rows here and no longer do. Both lost the
+`affects-upstream` label when their spec was written
+(`docs/experiments/accounting-gates/spec.md`, Upstream portability). They are
+optimizations this fork wants, not things upstream got wrong, and rule 11 says
+to tag defects rather than preferences. The same reading of that code did turn
+up two genuine problems, and they were split off rather than left attached to
+the changes:
+
+- [#316](https://github.com/crtahlin/wasp/issues/316), the uncapped
+  `refreshDue`, is tagged and has its row above. It was verified in
+  `upstream/v2.8.2` against the four capped sites, and it is rule 11's own
+  example of a defect, one quantity computed two different ways.
+- [#317](https://github.com/crtahlin/wasp/issues/317), the unlocked allocation
+  in `chequebook.Issue`, is **not** tagged and has no row. The code is the same
+  upstream, but no caller there or here can reach it: `Issue` has a single
+  caller, gated per peer by `paymentOngoing`, and two peers cannot share a
+  beneficiary. It is a latent hazard that #303 itself would make reachable, and
+  rule 11 says to leave untagged what is reasoned from reading the code rather
+  than reproduced. That issue records what evidence would justify the tag later.
 
 Generated with help of AI.
