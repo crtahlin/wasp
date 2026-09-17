@@ -394,6 +394,30 @@ availability if content B-0 works (spec.md, Measurement). Conditions 2m and 3m a
 B-default are reported as the size of the gap in #299, not judged against these
 rules.
 
+## Exploratory: provider payment-threshold sweep
+
+**Outside the fixed method, and written before its runs.** The conditions above
+showed the provider capped at 3 to 5% of a download, and a first exploratory run
+with the provider at the largest threshold a node accepts raised that to about 21%
+(results.md). This sweep measures how the share and the download time follow the
+threshold.
+
+- **Settings:** the SWAP block's, that is Q with `swap-enable: true` and
+  `providers-enable: true`.
+- **Steps:** P announces `payment-threshold` of 13,500,000 (the default),
+  27,000,000, 54,000,000 and 108,000,000 (the largest a node accepts,
+  `pkg/node/node.go:241`).
+- **Per step:** P is restarted and settles for at least 15 minutes and until it has
+  at least 100 peers. Q reconnects to P, and Q's accounting is read to confirm the
+  threshold it received. Then three runs each of condition 3 (hint to P) and
+  condition 2 (no provider known), alternating.
+- **Records:** as for content A, in `results.tsv`, with the threshold in the block
+  label.
+- **Reported:** chunks delivered by P, time to first byte and total time against
+  the threshold.
+- **Not judged** by the negative-result rules, which stand on the fixed method.
+- **P's default threshold is restored** at the end.
+
 ## Reporting
 
 `results.md` gives, per block and condition:
