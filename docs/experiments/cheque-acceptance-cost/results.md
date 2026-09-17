@@ -107,7 +107,7 @@ because that is what the main comparison showed.
 
 ## Setup
 
-- **P**: the node that receives cheques, on bench-1. **Q**, the node that pays,
+- **P**, the node that receives cheques, on bench-1. **Q**, the node that pays,
   on bench-2. About 30 ms added between them, as in [content
   providers](../content-providers/measurement.md).
 - Stock build and patched build differ only by `a89a3a83`. Both were confirmed
@@ -201,7 +201,7 @@ counter was not captured for cycles 4 to 6.
   1.236 s figure is a **single cheque**, so the separation should be read as
   consistent rather than established: patched's other slow values, 1.200, 1.183
   and 1.180, sit in the same place, which is what makes it consistent.
-- **Two of six patched runs produced no timed cheque at all**: and in one run a
+- **Two of six patched runs produced no timed cheque at all**, and in one run a
   cheque was sent whose payment never registered within the window.
 - **The patched build does not reach its floor here** because it still reads the
   chequebook's balance and paid out total once per 30 s, which is two delayed
@@ -297,12 +297,12 @@ pointed.
   P counted one fewer, most likely because the counter was read just before the
   last cheque landed. In no run did P count more than Q sent, which is what
   rules out another payer.
-- **The first contention series is void**: not merely insufficient. Besides the
+- **The first contention series is void**, not merely insufficient. Besides the
   load being too small, P served Q far less in the stock arms than the patched
   ones, 0 to 169 chunks against 307 to 327, because a faster download simply
   takes more chunks from other peers. Stock produced one timed cheque across
   three runs, so there was nothing to compare.
-- **An earlier draft blamed a drifting endpoint for the missing effect**: and
+- **An earlier draft blamed a drifting endpoint for the missing effect**, and
   claimed the three calls were not on the path. Both were wrong, and are
   corrected under "What a chain call actually costs" above.
 

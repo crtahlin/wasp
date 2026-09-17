@@ -101,7 +101,7 @@ overwriting *the same key* as distinct writes. Nothing failed; the number simply
 meant something other than its name.
 
 **The two engines were not both on disk.** `leveldbstore`'s benchmark store was
-built with `New("", ...)` (goleveldb's in-memory backend) while
+built with `New("", ...)` (goleveldb's in-memory backend), while
 `pebblestore`'s used `b.TempDir()`. Every published figure compared memory
 against disk. On the corrected harness the same leveldb `ReadRandom` moves from
 226 ns in memory to 9,198 ns on disk: a 40x difference, which was the dominant
@@ -143,9 +143,9 @@ Everything the spec said it would not, and one thing more.
 
 - **Nothing about the reserve at scale.** The workload is synthetic, against an
   empty store, on a laptop. bench-1 holds 4,064,993 chunks.
-- **Nothing about compaction under sustained ingest**: which is the behaviour
+- **Nothing about compaction under sustained ingest**, which is the behaviour
   that matters most and the one a microbenchmark cannot reproduce.
-- **Nothing about prefix iteration**: one of the two operations the spec named
+- **Nothing about prefix iteration**, one of the two operations the spec named
   as deciding. `IterateSequential` and `IterateReverse` run but report no
   `ns/op`, so there is nothing to compare.
 
@@ -165,7 +165,7 @@ In order of what it would cost:
    the result.
 2. **Done**: prefix iteration now reports per-entry cost, and Pebble is 1.19x
    slower. That is the half of the criterion that decides this.
-3. **Run both engines under a real reserve**: which is the only setting where
+3. **Run both engines under a real reserve**, which is the only setting where
    compaction behaviour appears at all.
 
 The maintenance argument for Pebble is unchanged and remains the strongest point

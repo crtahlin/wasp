@@ -87,7 +87,7 @@ shape.
 
 Two things the option's documentation must state, not just its existence:
 what raising it costs, and what lowering it costs. For anything that consumes
-other nodes' resources (peer counts, connection limits, sync rates) say what
+other nodes' resources (peer counts, connection limits, sync rates), say what
 it costs *them*, because that operator is not the one who pays.
 
 Not everything can be a runtime option. Anything determining on-disk layout is

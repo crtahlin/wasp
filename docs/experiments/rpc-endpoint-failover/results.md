@@ -53,7 +53,7 @@ running the test.
 
 ## What this does not cover
 
-- **Recovery**: the `Recover` loop moving back to the primary once it returns. The
+- **Recovery**, the `Recover` loop moving back to the primary once it returns. The
   code is tested in unit tests but was not exercised on the node here.
 - **A partial failure**: an endpoint that answers but lies, or lags far behind.
   The block-lag bound exists for this and is unit-tested only.

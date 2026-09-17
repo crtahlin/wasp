@@ -13,7 +13,7 @@ backlog, imported so that those issues cite something a reader here can open.
 > `v2.8.1`**, and all were unchanged there.
 >
 > **Four have since changed in wasp, and the document does not know it.** Their
-> *values* are untouched, each became an option with its previous value as the
+> *values* are untouched: each became an option with its previous value as the
 > default, but a reader following the document to the code will not find the
 > constant it names:
 >

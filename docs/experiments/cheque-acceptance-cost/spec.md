@@ -232,8 +232,8 @@ accepted per second across all of them, from the provider's log. This is where
 the mutex is expected to show.
 
 **Conditions:**
-1. **Stock**: the current code. The #290 runs are this, for one paying peer.
-2. **A fast endpoint**: before any code change: a caching proxy in front of the
+1. **Stock**, the current code. The #290 runs are this, for one paying peer.
+2. **A fast endpoint**, before any code change: a caching proxy in front of the
    node's chain endpoint that answers only calls to the paying node's chequebook
    contract. It stands in for a chain node on the same machine and shows what the
    calls cost, without changing Bee.

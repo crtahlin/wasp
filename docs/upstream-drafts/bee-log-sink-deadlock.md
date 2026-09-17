@@ -78,7 +78,7 @@ a terminal or a file. The parent had stopped reading them.
 The chain:
 
 1. The consumer stops reading; the socket buffer fills.
-2. `pricing.(*Service).init` logs a Warning during `Connect`, it fires whenever
+2. `pricing.(*Service).init` logs a Warning during `Connect`; it fires whenever
    `AnnouncePaymentThreshold` returns an error, which is common as peers go bad.
 3. `logger.go:245` does a bare `l.sink.Write(buf)` with no timeout, no bounded
    buffer and no drop path, so it blocks for ever.
@@ -121,7 +121,7 @@ func TestLoggerBlocksOnAStalledSink(t *testing.T) {
 }
 ```
 
-Result, nothing reads `r`, the pipe fills, and the logger stops for good:
+Result. Nothing reads `r`, the pipe fills, and the logger stops for good:
 
 ```
 log calls completed: 368 after 2s, 368 after 7s

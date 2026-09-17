@@ -73,12 +73,12 @@ probably understates it.
   overwhelmingly Linux on ext4, and absolute throughput does not transfer
   between them.
 - Go 1.26 to build, or install the released `.deb` to test packaging.
-- SSH access. Keys and addresses stay **out of this repository**, it is public.
+- SSH access. Keys and addresses stay **out of this repository**; it is public.
   See `docs/agent-playbooks/test-bench.md`.
 
 ## Network and stake posture
 
-- **Mainnet**: so peer behaviour and sync rates are real. Testnet peer counts
+- **Mainnet**, so peer behaviour and sync rates are real. Testnet peer counts
   and traffic patterns do not represent what these changes are tuning for.
 - **Unstaked.** Running unreviewed code on a staked node risks real value if it
   misbehaves during a redistribution round. Every measurement in the backlog can

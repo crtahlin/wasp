@@ -41,7 +41,7 @@ error or the database closing. **There is no timeout.**
 ### It is not a deadlock, and that changes the goal
 
 There is no lock cycle. It is an unbounded wait on compaction. The symptom is
-indistinguishable (writes stop, the node stops working, nothing recovers) so
+indistinguishable (writes stop, the node stops working, nothing recovers), so
 the original operational report described what was seen accurately. But the
 distinction determines what any fix can claim, and the honest claim is *raises
 the margin*, not *removes the failure mode*. The pause path at L0 >= 12 exists at
@@ -65,7 +65,7 @@ than goleveldb expects, into a window that ends four files later at a hard block
 If that is right, returning the trigger to 4 should keep L0 depth well below the
 pause threshold under the same load, and the node should not stall.
 
-If it is wrong (if L0 depth still reaches 12 with the trigger at 4) then the
+If it is wrong (if L0 depth still reaches 12 with the trigger at 4), then the
 binding constraint is compaction throughput itself, not when it starts, and the
 answer lies with the load rather than the threshold: [#23](https://github.com/crtahlin/wasp/issues/23)
 (pause pullsync during sampling) and [#29](https://github.com/crtahlin/wasp/issues/29)

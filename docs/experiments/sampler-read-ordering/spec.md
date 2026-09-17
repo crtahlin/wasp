@@ -61,7 +61,7 @@ mean distance between consecutive reads within a window from roughly `N/3` slots
 to roughly `N/W`, for a reserve of `N` chunks and a window of `W`.
 
 If seek cost matters on the device, sample wall clock falls. If the device has no
-meaningful seek cost (which is the expected case on the NVMe in bench-1) the
+meaningful seek cost (which is the expected case on the NVMe in bench-1), the
 ordering buys nothing and the extra `retrievalIdx` lookup makes the sampler
 slower. **Both outcomes are answers.** A null or negative result on an SSD does
 not refute the mechanism; it bounds where the mechanism is worth paying for, and
@@ -122,7 +122,7 @@ return swarm.NewChunk(rIdx.Address, buf), nil
 
 The sampler would hash those bytes, derive a transformed address from them, and
 potentially place the result in the sample it commits to a redistribution round.
-The failure is silent (nothing checks that the bytes match the address) and it
+The failure is silent (nothing checks that the bytes match the address), and it
 gets more likely the larger the window is, which is the opposite of the direction
 the optimisation wants to move in.
 

@@ -84,7 +84,7 @@ outset rather than hardcoded.
 | default | `max(4, runtime.NumCPU())`, preserves today's offered concurrency exactly |
 | raising it costs | more concurrent disk operations; on a slow or contended disk this queues rather than helps, and competes with pullsync writes |
 | lowering it costs | the sampler under-drives the storage layer and sampling takes longer, risking missing a redistribution round |
-| costs other nodes | nothing directly, this is local I/O, not peer-facing |
+| costs other nodes | nothing directly; this is local I/O, not peer-facing |
 
 The default must be `max(4, runtime.NumCPU())`, not `runtime.NumCPU()`, because
 that is what `pkg/storer/sample.go:77` uses today. On a host with fewer than four
@@ -122,7 +122,7 @@ Method:
    no meaningful density between them. Three runs cannot tell which cluster they
    landed in, so any difference they show is a sampling artefact. Report the
    **fast-cluster median** and the fraction of runs in each cluster, and treat a
-   change in that fraction as a result in its own right, it may be the only
+   change in that fraction as a result in its own right; it may be the only
    thing that moves.
 2. Compare `ChunkLoadDuration` per chunk iterated, not totals, `TotalIterated`
    varies between runs.
@@ -147,7 +147,7 @@ commit removes the option entirely. No migration, no persisted state.
 
 The pool split is self-contained in `pkg/storer/sample.go`. Offering it upstream
 is more plausible than most of this backlog **because it is a config option with
-their current value as default**, it changes nothing for existing operators
+their current value as default**: it changes nothing for existing operators
 unless they opt in, which is the form Ethersphere is most likely to accept.
 
 Generated with help of AI.

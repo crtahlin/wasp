@@ -165,7 +165,7 @@ restores the single-string option.
 
 Good. The change is contained in one new package plus config plumbing, it does
 not touch consensus or protocol code, and it keeps the existing behaviour as the
-default. That is the shape Ethersphere is most likely to accept, it changes
+default. That is the shape Ethersphere is most likely to accept: it changes
 nothing for an operator who does not opt in.
 
 The failover package has no wasp-specific dependencies and would apply to

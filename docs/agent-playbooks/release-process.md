@@ -207,4 +207,4 @@ Three things now prevent a recurrence:
    protocol-freeze check run against the commit that will be proposed, after the
    changelog is written, not before it. On failure nothing is pushed and no pull request
    exists.
-3. **`main` requires status checks**: so no pull request merges on zero evidence.
+3. **`main` requires status checks**, so no pull request merges on zero evidence.

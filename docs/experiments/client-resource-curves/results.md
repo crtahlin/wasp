@@ -132,7 +132,7 @@ conclusion outright.
   regime only. The radius comparisons are wasp+goleveldb against wasp+pebble.
 - **One host, one client at a time.** The within-client comparisons are clean; the
   cross-client absolute numbers carry the usual live-node variance.
-- **Backfill plateaus were captured at their onset**: not run to completion (a full
+- **Backfill plateaus were captured at their onset**, not run to completion (a full
   radius-8 or radius-7 fill takes hours). The read-amplification behaviour is
   established; longer plateaus would refine the resource totals.
 - **Not staked.** The sampler was driven with `/rchash`, so no redistribution

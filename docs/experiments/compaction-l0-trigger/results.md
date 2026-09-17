@@ -96,7 +96,7 @@ compaction throughput:
 |---|---|
 | slower disk (SATA SSD, or spinning) | 10-100x less compaction throughput |
 | sharky chunk writes alongside index writes | competes for the same device |
-| reserve sampling reads | seeks steal from compaction, this is #23 |
+| reserve sampling reads | seeks steal from compaction; this is #23 |
 | a smaller `WriteBuffer` than the 64 MB used here | more L0 files per unit of data |
 
 On a node whose effective throughput is 20x lower, depth 12 would arrive around

@@ -44,7 +44,7 @@ Hypothesis 1 (speed) and hypothesis 2 (availability) of the spec. Hypothesis 3
 
 - **wasp** `main` at `de136880`. It contains phase 1, merged as `5608aa53`; every
   change since then is documentation only (`git diff --stat 5608aa53 de136880`).
-- **bee v2.8.2**: the stock release, for the stock node S.
+- **bee v2.8.2**, the stock release, for the stock node S.
 
 ## Nodes
 
@@ -102,7 +102,7 @@ success here.
      the stock build itself is not measured.
 2. **Q is a full node only.** Work on light nodes has stopped for now (#282), so
    the runs with a light requester are not made in this round.
-3. **Q runs on `bench-2`**: not on `bench-1` as the spec says, so that provider and
+3. **Q runs on `bench-2`**, not on `bench-1` as the spec says, so that provider and
    requester are on different machines.
 4. **One file size, 16 MiB,** stands for the spec's "file of typical size".
 5. **The SWAP block decides the result.**
@@ -159,13 +159,13 @@ success here.
 
 ## Postage
 
-- **Batch A**: depth 20, bought by P for about 4 days. It stamps content A and all
+- **Batch A**, depth 20, bought by P for about 4 days. It stamps content A and all
   provider records, including the records that announce content B.
   - The runs upload about 188,000 chunks, 207,000 with a margin of 10% for
     repeated runs.
   - At depth 20 each bucket holds 16 chunks. At depth 19 it would hold 8, and
     some buckets would overflow before the runs end.
-- **Batches B and B2**: depth 17, each bought by P for the contract's minimum
+- **Batches B and B2**, depth 17, each bought by P for the contract's minimum
   validity (17,280 blocks, about 24 hours) plus 10%. B stamps content B at the
   default level and B2 content B without erasure coding.
   - With one file of about 1,100 chunks per batch, a bucket (2 chunks at depth 17)
@@ -208,8 +208,8 @@ success here.
 
 **Content B**, two fresh 4 MiB files, uploaded by P and pinned at the start of the
 measurement:
-- **B-default**: at the default level MEDIUM, with batch B: 1,120 chunks.
-- **B-0**: without erasure coding, with batch B2: 1,033 chunks.
+- **B-default**, at the default level MEDIUM, with batch B: 1,120 chunks.
+- **B-0**, without erasure coding, with batch B2: 1,033 chunks.
 - Both are announced by P with batch A. P renews its records every window by
   itself.
 - Both are tested after their batches have expired and at least 1 hour more has
@@ -237,8 +237,8 @@ must be pinned to be announced.
 
 **P** keeps its settings throughout. **Q** runs two blocks:
 
-1. **Pseudosettle block**: Q with `swap-enable: false`.
-2. **SWAP block**: Q with `swap-enable: true`.
+1. **Pseudosettle block**, Q with `swap-enable: false`.
+2. **SWAP block**, Q with `swap-enable: true`.
 
 Within each block:
 1. **Q with `providers-enable: false`:** condition 1, three runs.

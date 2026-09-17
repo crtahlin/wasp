@@ -22,7 +22,7 @@ the Ethersphere organisation, or any Bee contributor.
 
 Do not report issues with this software to the upstream project. Do not
 represent it as an official Bee release. Do not assume that a fix present here
-has been reviewed to upstream's standards, by construction, it has not.
+has been reviewed to upstream's standards; by construction, it has not.
 
 ## Specific risks of running this
 

@@ -150,7 +150,7 @@ with its own fresh store:
 | `GOGC=off` | 27.7 | 23.2 | 22.9 | 24.7 | 25.1 | 21.4 | 1.3x |
 
 The loop allocates nothing (`0 allocs/op`), so this is not the benchmark's own
-garbage, it is background GC driven by the heap the setup phase left live,
+garbage: it is background GC driven by the heap the setup phase left live,
 stealing cycles from early measured runs and settling as the process continues.
 `GOGC=off` removes it almost entirely. Longer `-benchtime` dampens it (the same
 benchmark at `40000x` spread 1.4x rather than 2.7x) but does not remove it. And
@@ -175,8 +175,8 @@ Rules for microbenchmarks:
 
 The method, fixed in advance in the experiment's `measurement.md`:
 
-1. **Baseline.** The stock build for the same upstream base, that is what
-   `v0.1.0` exists for, an unmodified `v2.8.1` with fork packaging.
+1. **Baseline.** The stock build for the same upstream base (that is what
+   `v0.1.0` exists for), an unmodified `v2.8.1` with fork packaging.
 2. **Same everything else.** Same machine, same config, same postage batch
    depth, same neighbourhood if it matters, same duration.
 3. **Repeat.** A single run of anything network-adjacent measures the network,
@@ -202,7 +202,7 @@ owner, never `pull_request` from forks.
 Running non-reference code on a mainnet node that has stake at risk can cost
 real value if the node misbehaves during a redistribution round. Canary and
 bench nodes should be unstaked, or staked only with an amount that is acceptable
-to lose. This is not a theoretical caution, it is the main way an experiment
+to lose. This is not a theoretical caution; it is the main way an experiment
 here could cost money.
 
 ## When the index store stops accepting writes
@@ -356,9 +356,9 @@ health signal an operator would normally trust said the run was valid (#74).
 Every soak and benchmark must therefore treat "is the node working" as a measured
 precondition, not an assumption:
 
-- **Peer count above zero**: read from `/peers` or `/topology`'s `connected`. Treat
+- **Peer count above zero**, read from `/peers` or `/topology`'s `connected`. Treat
   zero as a distinct *invalid run* outcome, not as a pass and not as a failure.
-- **Load average above idle**: from `/proc/loadavg`.
+- **Load average above idle**, from `/proc/loadavg`.
 - For read-path work, **drive load explicitly**. A node whose reserve is already full
   does very little on its own. `/rchash/{depth}/{anchor1}/{anchor2}` in a loop
   produces sustained heavy reads, roughly 137 s per run at depth 9 on a 4M-chunk

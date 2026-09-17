@@ -3,7 +3,7 @@
 The point of this fork is to run modified Bee nodes **on the real Swarm
 network, alongside stock Bee nodes**. Everything else is negotiable; this is
 not. A change that makes stock peers refuse to talk to us has not optimized
-anything, it has removed the node from the network.
+anything; it has removed the node from the network.
 
 ## What is frozen
 
