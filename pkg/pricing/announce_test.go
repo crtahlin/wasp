@@ -19,6 +19,22 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
+// lockedObserver is a PaymentThresholdObserver safe for the several handler
+// goroutines these tests produce. The package's own testThresholdObserver
+// writes three fields with no mutex, which is fine for one announcement and
+// races once there are several.
+type lockedObserver struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (o *lockedObserver) NotifyPaymentThreshold(_ swarm.Address, _ *big.Int) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.n++
+	return nil
+}
+
 // thresholdsSent reads every announcement the recorder captured for a peer, in
 // the order they were sent.
 func thresholdsSent(t *testing.T, recorder *streamtest.Recorder, peer swarm.Address) []*big.Int {
@@ -60,7 +76,7 @@ func TestAnnounceSerialisedKeepsCallOrder(t *testing.T) {
 
 	peer := swarm.MustParseHexAddress("9ee7add7")
 	recipient := pricing.New(nil, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
-	recipient.SetPaymentThresholdObserver(&testThresholdObserver{})
+	recipient.SetPaymentThresholdObserver(&lockedObserver{})
 
 	recorder := streamtest.New(
 		streamtest.WithProtocols(recipient.Protocol()),
@@ -96,7 +112,7 @@ func TestAnnounceSerialisedCoalesces(t *testing.T) {
 
 	peer := swarm.MustParseHexAddress("9ee7add7")
 	recipient := pricing.New(nil, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
-	recipient.SetPaymentThresholdObserver(&testThresholdObserver{})
+	recipient.SetPaymentThresholdObserver(&lockedObserver{})
 
 	recorder := streamtest.New(
 		streamtest.WithProtocols(recipient.Protocol()),
@@ -134,7 +150,7 @@ func TestAnnounceSerialisedOneAtATime(t *testing.T) {
 
 	peer := swarm.MustParseHexAddress("9ee7add7")
 	recipient := pricing.New(nil, log.Noop, big.NewInt(100000), big.NewInt(10000), big.NewInt(1000))
-	recipient.SetPaymentThresholdObserver(&testThresholdObserver{})
+	recipient.SetPaymentThresholdObserver(&lockedObserver{})
 
 	recorder := streamtest.New(
 		streamtest.WithProtocols(recipient.Protocol()),
