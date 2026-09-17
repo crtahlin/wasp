@@ -88,6 +88,11 @@ type Service struct {
 	providers       atomic.Bool
 	peerMissLimiter *ratelimit.Limiter
 	nodeMissLimiter *ratelimit.Limiter
+
+	// providerCredit grants a peer a larger payment threshold because it is
+	// asking this node as a provider (#327). Nil unless wired in, and then the
+	// handler grants nothing.
+	providerCredit providerCreditor
 }
 
 func New(
@@ -603,6 +608,14 @@ func (s *Service) handler(p2pctx context.Context, p p2p.Peer, stream p2p.Stream)
 			return fmt.Errorf("get from store: %w", err)
 		}
 	}
+
+	// The peer asked as a provider and this node had the chunk, so this is the
+	// path where a provider actually serves and credit is consumed. Until now
+	// the local-only header was read only on a miss, because nothing on the hit
+	// path needed it. Granting is cheap and does nothing after the first call
+	// for a connection.
+	_, localOnly := stream.Headers()[LocalOnlyHeader]
+	s.grantProviderCredit(peerInfo{address: p.Address, fullNode: p.FullNode}, localOnly)
 
 	chunkPrice := s.pricer.Price(chunk.Address())
 	debit, err := s.accounting.PrepareDebit(ctx, p.Address, chunkPrice)
