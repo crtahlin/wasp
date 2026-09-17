@@ -145,7 +145,7 @@ message and no chunk-to-content index.
 **But that header is not proof the peer is downloading content this node
 announced, and this spec does not pretend otherwise.** The handler answers a
 local-only request from `s.storer.Lookup().Get`
-(`pkg/retrieval/retrieval.go:554`), which reads the whole chunk store, reserve
+(`pkg/retrieval/retrieval.go:589`), which reads the whole chunk store, reserve
 and cache included. Any peer can obtain a hit by asking for any chunk this node
 happens to hold, and for an announced reference the node has published which
 chunks those are.
@@ -207,8 +207,8 @@ The four things that bound the surface:
 1. **The operator opts in.** The threshold is a new setting whose default
    disables the behaviour. Nothing changes for a node that does not set it.
 2. **`providers-enable` must be on, and it is off by default**
-   (`cmd/bee/cmd/cmd.go:415`, honoured at `pkg/retrieval/retrieval.go:171` and
-   `:558`).
+   (`cmd/bee/cmd/cmd.go:415`, honoured at `pkg/retrieval/retrieval.go:175` and
+   `:593`).
 3. **The budget**, which bounds how much extra credit is outstanding across all
    raised connections at one time.
 4. **Reconnects are rate limited** by the accounting blocklist above and, far
@@ -381,7 +381,7 @@ exposure upstream intends for it, and it would clear the debt ten times slower.
 **Light peers therefore do not get the raise in this version**, and the decision
 reads `p.FullNode` from the `p2p.Peer` the handler already has
 (`pkg/p2p/p2p.go:192-196`), not `accountingPeer.fullNode`. That field is set by
-`Connect` (`:1425`), which is invoked as
+`Connect` (`:1426`), which is invoked as
 `go s.accounting.Connect(p.Address, p.FullNode)`
 (`pkg/settlement/pseudosettle/pseudosettle.go:115`), so it races the first
 request on another stream and may not be set yet.
@@ -401,8 +401,8 @@ provider.
   upstream's growth path is also routed through.
 - **`pkg/retrieval`**: the header read on the hit path, which does not exist
   today. The handler tests the local-only header only inside the
-  `storage.ErrNotFound` branch (`:556-560`) and on a hit goes straight to
-  pricing at `:572`. The read itself is cheap. The service reaches accounting
+  `storage.ErrNotFound` branch (`:591-595`) and on a hit goes straight to
+  pricing at `:607`. The read itself is cheap. The service reaches accounting
   through a small fork-authored interface declared here, rather than by widening
   upstream's `accounting.Interface`.
 
@@ -483,8 +483,8 @@ what makes true.
 On the bench, following [test-bench.md](../../agent-playbooks/test-bench.md).
 Every arm in one block, interleaved, at least three runs each (rule 7).
 `providers-enable` is on for every arm on both nodes, since it gates both the
-requester's preferred path (`retrieval.go:171`) and the provider's local-only
-answer (`:558`), and an arm without it measures something else.
+requester's preferred path (`retrieval.go:175`) and the provider's local-only
+answer (`:593`), and an arm without it measures something else.
 
 **First, what not to measure, because an earlier draft got this wrong.** From
 the requester's side a node-wide raise and a per-peer raise are the same
