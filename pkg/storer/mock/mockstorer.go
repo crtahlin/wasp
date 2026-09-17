@@ -143,6 +143,18 @@ func (m *mockStorer) NewLocalIngestCollection(_ context.Context) (storer.LocalIn
 	return &localIngestSession{chunkStore: m.chunkStore, store: m}, nil
 }
 
+// StoredChunkCount counts the distinct chunks in the mock's chunk store, which
+// keys by address and so deduplicates. It gives a test a count arrived at
+// independently of whatever the code under test reports.
+func (m *mockStorer) StoredChunkCount(ctx context.Context) (uint64, error) {
+	var n uint64
+	err := m.chunkStore.Iterate(ctx, func(swarm.Chunk) (bool, error) {
+		n++
+		return false, nil
+	})
+	return n, err
+}
+
 // LocalIngestSessionCount reports how many local ingest sessions were created.
 func (m *mockStorer) LocalIngestSessionCount() uint64 {
 	m.mu.Lock()

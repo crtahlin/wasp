@@ -115,3 +115,14 @@ func (db *DB) ReserveSampleWithWindow(
 ) (Sample, error) {
 	return db.reserveSample(ctx, anchor, committedDepth, consensusTime, minBatchBalance, inWindow)
 }
+
+// LocalIngestPublished is the last usage figure handed to the local ingest
+// gauge. A test uses it to check that the number an operator sees tracks the
+// total on every path that moves it, not only on the ingest that happened to
+// set it last. See issue #326.
+func (db *DB) LocalIngestPublished() uint64 {
+	db.localIngest.mu.Lock()
+	defer db.localIngest.mu.Unlock()
+
+	return db.localIngest.published
+}

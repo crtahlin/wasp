@@ -35,8 +35,12 @@ type localIngestResponse struct {
 
 type localIngestFullResponse struct {
 	Message string `json:"message"`
-	Chunks  uint64 `json:"chunks"`
-	Limit   uint64 `json:"limit"`
+	// Held is the node-wide count of chunks from local ingests. It is
+	// deliberately not called "chunks": that name means this ingest's own
+	// count in the 201 body, and one name for two quantities is how a
+	// reader ends up acting on the wrong one.
+	Held  uint64 `json:"held"`
+	Limit uint64 `json:"limit"`
 }
 
 // localIngestHandler stores content in this node's own store without postage
@@ -78,6 +82,7 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 	if limit > 0 && r.ContentLength > 0 {
 		want := uint64(CalculateNumberOfChunks(r.ContentLength, headers.Encrypt))
 		if committed+reserved+want > limit {
+			logger.Warning("local ingest refused, declared length does not fit under the limit", "limit", limit, "held_chunks", committed, "wanted", want)
 			respondLocalIngestFull(w, committed, limit)
 			return
 		}
@@ -112,8 +117,11 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 		// happens after the whole body has been read, which is exactly
 		// where a large ingest crosses its limit. See issue #337.
 		if counted.exceededLimit() {
-			logger.Warning("local ingest refused: limit reached", "limit", limit, "chunks", committed)
-			respondLocalIngestFull(ow, committed, limit)
+			// Read the usage again rather than reusing the figure from
+			// before the body: another ingest may have committed since.
+			held, _, limit := s.storer.LocalIngestUsage()
+			logger.Warning("local ingest refused, limit reached", "limit", limit, "held_chunks", held)
+			respondLocalIngestFull(ow, held, limit)
 			return
 		}
 		logger.Debug("local ingest: split write all failed", "error", err)
@@ -130,6 +138,7 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, storer.ErrLocalIngestDuplicate) {
 			if err := session.Cleanup(); err != nil {
 				logger.Debug("local ingest: cleanup after duplicate failed", "error", err)
+				logger.Error(nil, "local ingest: cleanup after a duplicate failed, its chunks stay on disk counted by nothing until the next restart")
 			}
 			jsonhttp.OK(w, localIngestResponse{
 				Reference:  reference,
@@ -145,7 +154,6 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now, _, limit := s.storer.LocalIngestUsage()
-	s.metrics.LocalIngestUsage.Set(float64(now))
 
 	// A warning below the limit, not only at it, so an operator has notice
 	// before an ingest is refused.
@@ -162,10 +170,10 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func respondLocalIngestFull(w http.ResponseWriter, chunks, limit uint64) {
+func respondLocalIngestFull(w http.ResponseWriter, held, limit uint64) {
 	jsonhttp.Respond(w, http.StatusInsufficientStorage, localIngestFullResponse{
 		Message: "local ingest limit reached",
-		Chunks:  chunks,
+		Held:    held,
 		Limit:   limit,
 	})
 }

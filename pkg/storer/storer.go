@@ -942,11 +942,11 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 
 	// Rebuild the local ingest usage total from the index (issue #326). This
 	// completes before the API is built and before the listener opens, so the
-	// route never serves against an unbuilt total.
+	// route never serves against an unbuilt total. It reports its own
+	// failures and does not stop the node; see the function.
 	db.localIngest.limit = opts.LocalIngestLimit
-	if err := db.rebuildLocalIngestTotal(ctx); err != nil {
-		return nil, err
-	}
+	db.localIngest.gauge = db.metrics.LocalIngestChunks
+	db.rebuildLocalIngestTotal(ctx)
 
 	db.inFlight.Add(1)
 	go db.cacheWorker(ctx)

@@ -253,11 +253,24 @@ func TestLocalIngestCleanupReleasesClaim(t *testing.T) {
 // TestLocalIngestCleanupIsIdempotent covers the ordering the handler actually
 // produces: cleanupOnErrWriter fires Cleanup from WriteHeader, and the handler
 // may call it again on the duplicate path.
+//
+// A second session holds a claim throughout, because with only one session a
+// double release is invisible: release clamps at the outstanding total, so
+// releasing five twice when only five are held subtracts five and then nothing.
 func TestLocalIngestCleanupIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	lstore, err := newStorer(t, "", localIngestOpts(t, 20))
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	bystander, err := lstore.NewLocalIngestCollection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bystander.Cleanup() })
+	if err := bystander.Reserve(5); err != nil {
 		t.Fatal(err)
 	}
 
@@ -281,9 +294,117 @@ func TestLocalIngestCleanupIsIdempotent(t *testing.T) {
 		t.Fatalf("second Cleanup(): unexpected error: %v", err)
 	}
 
-	// The second call must not release a claim twice, which would let the
-	// total underflow and hand out room the node does not have.
-	assertUsage(t, lstore, 0, 0)
+	assertUsage(t, lstore, 0, 5)
+}
+
+// TestLocalIngestSessionRefusesUseAfterClose. Once a session is finished, a
+// claim taken on it would be added to the node-wide total with nothing left
+// that could ever give it back, and the limit would shrink for the life of the
+// process. A second Done would write the record again and take Close down a
+// path it has already been through.
+func TestLocalIngestSessionRefusesUseAfterClose(t *testing.T) {
+	t.Parallel()
+
+	lstore, err := newStorer(t, "", localIngestOpts(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A bystander holds a claim so the assertion below is about this
+	// session's behaviour and not about an empty total.
+	bystander, err := lstore.NewLocalIngestCollection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bystander.Cleanup() })
+	if err := bystander.Reserve(5); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := lstore.NewLocalIngestCollection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Reserve(5); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.Reserve(3); !errors.Is(err, storer.ErrLocalIngestSessionClosed) {
+		t.Fatalf("Reserve on a finished session returned %v, want ErrLocalIngestSessionClosed", err)
+	}
+
+	// The refusal has to be the whole story: a claim taken and then refused
+	// would be just as stranded as one taken and accepted.
+	assertUsage(t, lstore, 0, 5)
+
+	if err := session.Done(swarm.RandAddress(t), 5); !errors.Is(err, storer.ErrLocalIngestSessionClosed) {
+		t.Fatalf("Done on a finished session returned %v, want ErrLocalIngestSessionClosed", err)
+	}
+}
+
+// TestLocalIngestFailedDoneWritesNoRecord is the transaction test the merged
+// spec asks for: a failure in either half must leave neither.
+//
+// It is asserted from outside the transaction, because there is no hook to
+// fail the record write from a test. The second session commits the SAME root
+// with a deliberately different chunk count, so a record written outside the
+// rollback shows up as that wrong count after a restart rather than hiding
+// behind the first session's identical key.
+func TestLocalIngestFailedDoneWritesNoRecord(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	lstore, err := storer.New(context.Background(), dir, localIngestOpts(t, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := chunktesting.GenerateTestRandomChunks(6)
+	root := chunks[0].Address()
+	if err := ingest(t, lstore, root, chunks); err != nil {
+		t.Fatalf("first ingest: unexpected error: %v", err)
+	}
+
+	second, err := lstore.NewLocalIngestCollection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range chunks {
+		if err := second.Reserve(1); err != nil {
+			t.Fatal(err)
+		}
+		if err := second.Put(context.Background(), ch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := second.Done(root, 999); !errors.Is(err, storer.ErrLocalIngestDuplicate) {
+		t.Fatalf("Done returned %v, want ErrLocalIngestDuplicate", err)
+	}
+	if err := second.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := lstore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := storer.New(context.Background(), dir, localIngestOpts(t, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("failed closing storer: %v", err)
+		}
+	})
+
+	// A total of 999 here would mean a record survived a rolled back
+	// transaction.
+	assertUsage(t, reopened, 6, 0)
 }
 
 func TestLocalIngestLimit(t *testing.T) {
@@ -457,5 +578,61 @@ func TestLocalIngestSendsNothingToThePusher(t *testing.T) {
 	case op := <-lstore.PusherFeed():
 		t.Fatalf("a locally ingested chunk reached the pusher: %v", op.Chunk.Address())
 	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+// TestLocalIngestGaugeTracksEveryPath. The gauge is what an operator sees and
+// what the warning is measured against, so it has to follow the total on every
+// path that moves it. Publishing it only where an ingest succeeds leaves a node
+// reporting zero after a restart however much it is holding, and reporting a
+// figure that only ever rises however much is unpinned.
+func TestLocalIngestGaugeTracksEveryPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	lstore, err := storer.New(context.Background(), dir, localIngestOpts(t, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := lstore.LocalIngestPublished(); got != 0 {
+		t.Fatalf("a fresh node reports %d ingested chunks, want 0", got)
+	}
+
+	chunks := chunktesting.GenerateTestRandomChunks(9)
+	root := chunks[0].Address()
+	if err := ingest(t, lstore, root, chunks); err != nil {
+		t.Fatalf("ingest: unexpected error: %v", err)
+	}
+	if got := lstore.LocalIngestPublished(); got != 9 {
+		t.Fatalf("after an ingest the gauge reports %d, want 9", got)
+	}
+
+	if err := lstore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// After a restart the gauge must report what the node actually holds,
+	// not zero until somebody happens to ingest again.
+	reopened, err := storer.New(context.Background(), dir, localIngestOpts(t, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Errorf("failed closing storer: %v", err)
+		}
+	})
+
+	if got := reopened.LocalIngestPublished(); got != 9 {
+		t.Fatalf("after a restart the gauge reports %d, want 9; the node would report holding nothing however much it holds", got)
+	}
+
+	if err := reopened.DeletePin(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.LocalIngestPublished(); got != 0 {
+		t.Fatalf("after unpinning everything the gauge reports %d, want 0; the figure would only ever rise", got)
 	}
 }

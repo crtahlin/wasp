@@ -6,7 +6,10 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ethersphere/bee/v2/pkg/api"
@@ -202,6 +205,9 @@ func TestLocalIngestLimitPreflight(t *testing.T) {
 	if resp.Limit != 1 {
 		t.Fatalf("the refusal reported a limit of %d, want 1; an operator cannot act on a 507 that does not say what the limit is", resp.Limit)
 	}
+	if resp.Held != 0 {
+		t.Fatalf("the refusal reported %d chunks held, want 0", resp.Held)
+	}
 
 	committed, reserved, _ := storerMock.LocalIngestUsage()
 	if committed != 0 || reserved != 0 {
@@ -339,11 +345,104 @@ func TestLocalIngestConcurrentPuts(t *testing.T) {
 		jsonhttptest.WithUnmarshalJSONResponse(&resp),
 	)
 
-	committed, reserved, _ := storerMock.LocalIngestUsage()
-	if committed != resp.Chunks {
-		t.Fatalf("the response reported %d chunks and the node recorded %d; the two must be one quantity", resp.Chunks, committed)
+	// The count has to come from somewhere other than the code that produced
+	// it. Comparing the response against the node's committed total compares
+	// one value with itself, because the handler passes the same number to
+	// both. The chunk store keys by address, so counting what is actually in
+	// it is an independent answer, and a lost update in the counting wrapper
+	// shows up as a response that is short of it.
+	stored, err := storerMock.StoredChunkCount(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
+	if resp.Chunks != stored {
+		t.Fatalf("the response reported %d distinct chunks and the chunk store holds %d", resp.Chunks, stored)
+	}
+	if stored < 16 {
+		t.Fatalf("only %d chunks were stored, too few for the replicas putter to have run concurrently at all", stored)
+	}
+
+	_, reserved, _ := storerMock.LocalIngestUsage()
 	if reserved != 0 {
 		t.Fatalf("%d chunks are still claimed after the ingest committed", reserved)
 	}
+}
+
+// TestLocalIngestWarnsBelowTheLimit. The warning is what gives an operator
+// notice before an ingest is refused, so it has to fire short of the limit and
+// not only at it.
+func TestLocalIngestWarnsBelowTheLimit(t *testing.T) {
+	t.Parallel()
+
+	content := localIngestContent(t, swarm.ChunkSize*8)
+
+	// Calibrate: find how many chunks this content needs, then set a limit it
+	// lands above 90% of without reaching.
+	calib := mockstorer.New()
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:             calib,
+		Logger:             log.Noop,
+		LocalIngestEnabled: true,
+	})
+	var full api.LocalIngestResponse
+	jsonhttptest.Request(t, client, http.MethodPost, localIngestResource, http.StatusCreated,
+		jsonhttptest.WithRequestBody(bytes.NewReader(content)),
+		jsonhttptest.WithUnmarshalJSONResponse(&full),
+	)
+
+	for _, tc := range []struct {
+		name string
+		// limit is chosen relative to the chunks this content needs.
+		limit    uint64
+		wantWarn bool
+	}{
+		// Comfortably under 90%, so no warning.
+		{name: "well_below", limit: full.Chunks * 4, wantWarn: false},
+		// Above 90% of the limit but still under it, which is the case the
+		// warning exists for.
+		{name: "just_below", limit: full.Chunks + (full.Chunks / 50), wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sink := &syncBuffer{}
+			logger := log.NewLogger("localingest_"+tc.name, log.WithSink(sink), log.WithVerbosity(log.VerbosityDebug)).Build()
+
+			storerMock := mockstorer.New()
+			storerMock.SetLocalIngestLimit(tc.limit)
+			client, _, _, _ := newTestServer(t, testServerOptions{
+				Storer:             storerMock,
+				Logger:             logger,
+				LocalIngestEnabled: true,
+			})
+
+			jsonhttptest.Request(t, client, http.MethodPost, localIngestResource, http.StatusCreated,
+				jsonhttptest.WithRequestBody(bytes.NewReader(content)),
+			)
+
+			warned := strings.Contains(sink.String(), "close to its limit")
+			if warned != tc.wantWarn {
+				t.Fatalf("with %d chunks against a limit of %d the warning fired=%v, want %v; logs were:\n%s",
+					full.Chunks, tc.limit, warned, tc.wantWarn, sink.String())
+			}
+		})
+	}
+}
+
+// syncBuffer is a log sink that is safe to read while the logger writes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

@@ -19,6 +19,7 @@ import (
 	pinstore "github.com/ethersphere/bee/v2/pkg/storer/internal/pinning"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/transaction"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // ErrLocalIngestLimit is returned when accepting another chunk would take this
@@ -32,6 +33,11 @@ var ErrLocalIngestLimit = errors.New("storer: local ingest limit reached")
 // It stands for pinning.ErrDuplicatePinCollection, which lives in an internal
 // package that pkg/api cannot import.
 var ErrLocalIngestDuplicate = errors.New("storer: content already held")
+
+// ErrLocalIngestSessionClosed is returned when a session is used after it has
+// been finished by Done or Cleanup. Claiming room on a finished session would
+// take it from the node-wide limit with nothing left to give it back.
+var ErrLocalIngestSessionClosed = errors.New("storer: local ingest session is closed")
 
 var (
 	errInvalidLocalIngestAddr = errors.New("storer: invalid local ingest address")
@@ -84,6 +90,23 @@ type localIngestState struct {
 	committed uint64
 	reserved  uint64
 	limit     uint64
+	// gauge mirrors committed. Every method that changes committed publishes
+	// it, because a gauge written on only one of the paths that move a number
+	// reports a figure the operator cannot act on.
+	gauge prometheus.Gauge
+	// published is the last value handed to the gauge. Reading a prometheus
+	// gauge back needs a dependency this module does not carry, so tests
+	// assert on this instead; it is written in the same place and so still
+	// catches a path that changes the total without publishing it.
+	published uint64
+}
+
+// publish reports the committed total. Called with mu held.
+func (s *localIngestState) publish() {
+	s.published = s.committed
+	if s.gauge != nil {
+		s.gauge.Set(float64(s.committed))
+	}
 }
 
 func (s *localIngestState) reserve(n uint64) error {
@@ -118,6 +141,7 @@ func (s *localIngestState) commit(claimed, chunks uint64) {
 	}
 	s.reserved -= claimed
 	s.committed += chunks
+	s.publish()
 }
 
 func (s *localIngestState) subtract(n uint64) {
@@ -128,6 +152,15 @@ func (s *localIngestState) subtract(n uint64) {
 		n = s.committed
 	}
 	s.committed -= n
+	s.publish()
+}
+
+func (s *localIngestState) setTotal(n uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.committed = n
+	s.publish()
 }
 
 func (s *localIngestState) usage() (committed, reserved, limit uint64) {
@@ -161,32 +194,48 @@ type localIngestSession struct {
 
 var _ LocalIngestSession = (*localIngestSession)(nil)
 
+// Reserve holds the session mutex across the node-wide claim. Splitting the two
+// would let a Done or Cleanup land in between: the claim would be committed
+// node-wide while the session it belongs to had already given up everything it
+// was holding, so those units would never be released and the limit would
+// shrink for the life of the process.
 func (s *localIngestSession) Reserve(n uint64) error {
-	if err := s.state.reserve(n); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	s.reserved += n
-	s.mu.Unlock()
-	return nil
-}
-
-// take removes and returns the session's outstanding claim, marking it closed.
-// It is called by both Done and Cleanup so a claim can be released once only,
-// however the two are ordered.
-func (s *localIngestSession) take() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	claimed := s.reserved
+	if s.closed {
+		return ErrLocalIngestSessionClosed
+	}
+	if err := s.state.reserve(n); err != nil {
+		return err
+	}
+	s.reserved += n
+	return nil
+}
+
+// take removes and returns the session's outstanding claim and reports whether
+// the session had already been finished. Done and Cleanup both go through it,
+// so a claim is released once however the two are ordered.
+func (s *localIngestSession) take() (claimed uint64, alreadyClosed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return 0, true
+	}
+	claimed = s.reserved
 	s.reserved = 0
 	s.closed = true
-	return claimed
+	return claimed, false
 }
 
 func (s *localIngestSession) Done(root swarm.Address, chunks uint64) error {
-	claimed := s.take()
+	claimed, alreadyClosed := s.take()
+	if alreadyClosed {
+		// Running the commit twice would write the record a second time and
+		// take Close down a path it has already been through.
+		return ErrLocalIngestSessionClosed
+	}
 
 	if err := s.done(root, chunks); err != nil {
 		// The transaction did not commit, so the claim never became usage.
@@ -200,9 +249,11 @@ func (s *localIngestSession) Done(root swarm.Address, chunks uint64) error {
 }
 
 func (s *localIngestSession) Cleanup() error {
-	// The claim goes back before the storer is touched: this mutex must not
-	// be held across a call that takes uploadsLock.
-	s.state.release(s.take())
+	// The claim goes back before the storer is touched: the state mutex must
+	// not be held across a call that takes uploadsLock.
+	if claimed, alreadyClosed := s.take(); !alreadyClosed {
+		s.state.release(claimed)
+	}
 	return s.cleanup()
 }
 
@@ -248,13 +299,20 @@ func (db *DB) NewLocalIngestCollection(ctx context.Context) (LocalIngestSession,
 			unlock := db.Lock(uploadsLock)
 			defer unlock()
 			err := db.storage.Run(ctx, func(s transaction.Store) error {
-				if err := pinningPutter.Close(s.IndexStore(), root); err != nil {
+				// The record is written BEFORE Close, and the order is not
+				// cosmetic. Close marks the collection putter closed in
+				// memory before it writes, and a later Cleanup on a closed
+				// putter returns nil without deleting anything. Writing the
+				// record first means a failure here leaves Close unrun, so
+				// Cleanup still removes the chunks. Both writes are in one
+				// transaction, so durability does not depend on the order.
+				if err := s.IndexStore().Put(&localIngestItem{Addr: root, Chunks: chunks}); err != nil {
 					return err
 				}
-				return s.IndexStore().Put(&localIngestItem{Addr: root, Chunks: chunks})
+				return pinningPutter.Close(s.IndexStore(), root)
 			})
 			// Close refuses a root this node already holds, and refuses it
-			// before writing anything, so the record is not written either.
+			// before writing anything, so the transaction rolls back whole.
 			if errors.Is(err, pinstore.ErrDuplicatePinCollection) {
 				return ErrLocalIngestDuplicate
 			}
@@ -274,26 +332,43 @@ func (db *DB) NewLocalIngestCollection(ctx context.Context) (LocalIngestSession,
 // It runs in New, before the API is built and before the listener opens, so
 // there is no window in which the route serves against an unbuilt total.
 //
+// **It never fails startup.** What it rebuilds is an in-memory accounting
+// figure for a feature that is off by default, and the worst consequence of
+// getting it wrong is a limit that binds early or late. Refusing to start a
+// node over that would be out of proportion, so a record that cannot be read
+// is logged and skipped and the node comes up with a total that is short by
+// that record. Contrast pinstore.CleanupDirty beside it, which is fatal
+// because it repairs real on-disk state.
+//
 // The dropping repairs one case and one only: a crash after DB.DeletePin
 // removed the collection but before it removed the record. A crash inside
 // pinstore.DeletePin is not covered, because that deletes the collection chunks
 // in many independent transactions and the root last, so the root still answers
 // HasPin while its chunks are gone. That is upstream behaviour and CleanupDirty
 // does not see it either, since DeletePin writes no dirty marker.
-func (db *DB) rebuildLocalIngestTotal(ctx context.Context) error {
+func (db *DB) rebuildLocalIngestTotal(ctx context.Context) {
 	var (
 		total    uint64
+		skipped  int
 		orphaned []*localIngestItem
 	)
 
 	err := db.storage.IndexStore().Iterate(
 		storage.Query{Factory: func() storage.Item { return new(localIngestItem) }},
 		func(r storage.Result) (bool, error) {
-			item := r.Entry.(*localIngestItem)
+			item, ok := r.Entry.(*localIngestItem)
+			if !ok {
+				skipped++
+				return false, nil
+			}
 
 			has, err := pinstore.HasPin(db.storage.IndexStore(), item.Addr)
 			if err != nil {
-				return true, fmt.Errorf("local ingest: has pin %s: %w", item.Addr, err)
+				// Skip this record rather than stopping: one unreadable
+				// pin must not cost the whole total.
+				db.logger.Error(err, "local ingest: checking whether a recorded reference is still pinned", "reference", item.Addr)
+				skipped++
+				return false, nil
 			}
 			if !has {
 				orphaned = append(orphaned, item.Clone().(*localIngestItem))
@@ -305,26 +380,24 @@ func (db *DB) rebuildLocalIngestTotal(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("local ingest: rebuild total: %w", err)
+		// The total is short by whatever the iteration did not reach. Say so
+		// plainly rather than reporting a figure as though it were complete.
+		db.logger.Error(err, "local ingest: rebuilding the usage total, the figure may be short and the limit may bind late")
 	}
 
 	for _, item := range orphaned {
 		if err := db.storage.Run(ctx, func(s transaction.Store) error {
 			return s.IndexStore().Delete(item)
 		}); err != nil {
-			return fmt.Errorf("local ingest: drop record %s: %w", item.Addr, err)
+			db.logger.Error(err, "local ingest: dropping the record of already unpinned content", "reference", item.Addr)
 		}
 	}
 
-	db.localIngest.mu.Lock()
-	db.localIngest.committed = total
-	db.localIngest.mu.Unlock()
+	db.localIngest.setTotal(total)
 
-	if len(orphaned) > 0 {
-		db.logger.Info("local ingest: dropped records whose content was already unpinned", "count", len(orphaned))
+	if len(orphaned) > 0 || skipped > 0 {
+		db.logger.Info("local ingest: usage total rebuilt", "chunks", total, "dropped", len(orphaned), "skipped", skipped)
 	}
-
-	return nil
 }
 
 // dropLocalIngestRecord removes the record for a root that has just been
@@ -334,24 +407,30 @@ func (db *DB) rebuildLocalIngestTotal(ctx context.Context) error {
 // It is called after pinstore.DeletePin has returned, and the order is not
 // interchangeable: removing the record first would leave a root that still
 // answers HasPin with nothing left to detect it.
-func (db *DB) dropLocalIngestRecord(ctx context.Context, root swarm.Address) error {
+//
+// It reports its failures rather than returning them, because by the time it
+// runs the unpin has already succeeded. Failing the request would tell the
+// caller the pin is still there when it is gone, and a retry cannot succeed
+// because the collection no longer exists. A record left behind is repaired by
+// the startup pass.
+func (db *DB) dropLocalIngestRecord(ctx context.Context, root swarm.Address) {
 	item := &localIngestItem{Addr: root}
 
 	if err := db.storage.IndexStore().Get(item); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil
+		if !errors.Is(err, storage.ErrNotFound) {
+			db.logger.Error(err, "local ingest: reading the record of unpinned content", "reference", root)
 		}
-		return fmt.Errorf("local ingest: read record %s: %w", root, err)
+		return
 	}
 
 	if err := db.storage.Run(ctx, func(s transaction.Store) error {
 		return s.IndexStore().Delete(item)
 	}); err != nil {
-		return fmt.Errorf("local ingest: delete record %s: %w", root, err)
+		db.logger.Error(err, "local ingest: deleting the record of unpinned content, the usage figure stays high until the next restart", "reference", root)
+		return
 	}
 
 	db.localIngest.subtract(item.Chunks)
-	return nil
 }
 
 // localIngestItemSize is sized for a 64-byte encrypted reference, as
