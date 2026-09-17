@@ -31,6 +31,15 @@ type mockStorer struct {
 
 	storageRadius  uint8
 	committedDepth uint8
+
+	// Local ingest accounting (issue #326), guarded by mu.
+	localIngestLimit     uint64
+	localIngestCommitted uint64
+	localIngestReserved  uint64
+	// localIngestSessions counts sessions created, so a test can tell a
+	// refusal that happened before the body was read from one that happened
+	// while reading it.
+	localIngestSessions uint64
 }
 
 type putterSession struct {
@@ -50,6 +59,113 @@ func (p *putterSession) Done(address swarm.Address) error {
 }
 
 func (p *putterSession) Cleanup() error { return nil }
+
+// localIngestSession is the mock's LocalIngestSession (issue #326). It tracks
+// claims well enough for the handler tests; the behaviour that needs a real
+// database, such as the duplicate and dirty-collection paths, is tested in
+// package storer_test instead.
+type localIngestSession struct {
+	chunkStore storage.Putter
+	store      *mockStorer
+
+	mu       sync.Mutex
+	reserved uint64
+	closed   bool
+}
+
+func (p *localIngestSession) Put(ctx context.Context, ch swarm.Chunk) error {
+	return p.chunkStore.Put(ctx, ch)
+}
+
+func (p *localIngestSession) Reserve(n uint64) error {
+	p.store.mu.Lock()
+	if p.store.localIngestLimit > 0 &&
+		p.store.localIngestCommitted+p.store.localIngestReserved+n > p.store.localIngestLimit {
+		p.store.mu.Unlock()
+		return storer.ErrLocalIngestLimit
+	}
+	p.store.localIngestReserved += n
+	p.store.mu.Unlock()
+
+	p.mu.Lock()
+	p.reserved += n
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *localIngestSession) take() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	claimed := p.reserved
+	p.reserved = 0
+	p.closed = true
+	return claimed
+}
+
+func (p *localIngestSession) Done(address swarm.Address, chunks uint64) error {
+	claimed := p.take()
+
+	p.store.mu.Lock()
+	defer p.store.mu.Unlock()
+
+	for _, pin := range p.store.pins {
+		if pin.Equal(address) {
+			p.store.localIngestReserved -= claimed
+			return storer.ErrLocalIngestDuplicate
+		}
+	}
+
+	p.store.localIngestReserved -= claimed
+	p.store.localIngestCommitted += chunks
+	p.store.pins = append(p.store.pins, address)
+	return nil
+}
+
+func (p *localIngestSession) Cleanup() error {
+	claimed := p.take()
+
+	p.store.mu.Lock()
+	defer p.store.mu.Unlock()
+
+	if claimed > p.store.localIngestReserved {
+		claimed = p.store.localIngestReserved
+	}
+	p.store.localIngestReserved -= claimed
+	return nil
+}
+
+func (m *mockStorer) NewLocalIngestCollection(_ context.Context) (storer.LocalIngestSession, error) {
+	m.mu.Lock()
+	m.localIngestSessions++
+	m.mu.Unlock()
+
+	return &localIngestSession{chunkStore: m.chunkStore, store: m}, nil
+}
+
+// LocalIngestSessionCount reports how many local ingest sessions were created.
+func (m *mockStorer) LocalIngestSessionCount() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.localIngestSessions
+}
+
+func (m *mockStorer) LocalIngestUsage() (committed, reserved, limit uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.localIngestCommitted, m.localIngestReserved, m.localIngestLimit
+}
+
+// SetLocalIngestLimit sets the mock's limit in chunks, so a test can exercise
+// the refusal path. Zero means no limit.
+func (m *mockStorer) SetLocalIngestLimit(limit uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.localIngestLimit = limit
+}
 
 // New returns a mock storer implementation that is designed to be used for the
 // unit tests.

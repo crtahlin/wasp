@@ -10,6 +10,9 @@ import (
 )
 
 type (
+	LocalIngestResponse     = localIngestResponse
+	LocalIngestFullResponse = localIngestFullResponse
+
 	BytesPostResponse     = bytesPostResponse
 	ChunkAddressResponse  = chunkAddressResponse
 	SocPostResponse       = socPostResponse

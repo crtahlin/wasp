@@ -415,6 +415,8 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		ResolverConnectionCfgs:          resolverCfgs,
 		Resync:                          c.config.GetBool(optionNameResync),
 		RetrievalCaching:                c.config.GetBool(optionNameRetrievalCaching),
+		LocalIngestEnable:               c.config.GetBool(optionNameLocalIngestEnable),
+		LocalIngestLimit:                c.config.GetUint64(optionNameLocalIngestLimit),
 		ProvidersEnable:                 c.config.GetBool(optionNameProvidersEnable),
 		ProvidersPaymentThreshold:       c.config.GetString(optionNameProvidersPaymentThreshold),
 		ProvidersCreditBudget:           c.config.GetString(optionNameProvidersCreditBudget),

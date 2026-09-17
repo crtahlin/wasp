@@ -152,6 +152,11 @@ type Storer interface {
 	// redistribution game.
 	ProbeSample(ctx context.Context, anchor []byte, committedDepth uint8, k int) (storer.ProbeStats, error)
 	ReserveSizeWithinRadius() uint64
+	// NewLocalIngestCollection and LocalIngestUsage back POST /wasp/ingest
+	// (issue #326), which stores content without postage. The session is
+	// fork-specific because its Done carries the chunk count.
+	NewLocalIngestCollection(ctx context.Context) (storer.LocalIngestSession, error)
+	LocalIngestUsage() (committed, reserved, limit uint64)
 }
 
 type PinIntegrity interface {
@@ -159,26 +164,30 @@ type PinIntegrity interface {
 }
 
 type Service struct {
-	storer          Storer
-	resolver        resolver.Interface
-	pss             pss.Interface
-	gsoc            gsoc.Listener
-	steward         steward.Interface
-	providers       Providers
-	providerSetsMu  sync.Mutex
-	providerSets    map[string]providerSetEntry
-	logger          log.Logger
-	loggerV1        log.Logger
-	tracer          *tracing.Tracer
-	feedFactory     feeds.Factory
-	signer          crypto.Signer
-	post            postage.Service
-	accesscontrol   accesscontrol.Controller
-	postageContract postagecontract.Interface
-	probe           *Probe
-	metricsRegistry *prometheus.Registry
-	stakingContract staking.Contract
-	legacyStake     staking.LegacyStakeService
+	storer    Storer
+	resolver  resolver.Interface
+	pss       pss.Interface
+	gsoc      gsoc.Listener
+	steward   steward.Interface
+	providers Providers
+	// localIngestEnabled gates POST /wasp/ingest. The route is mounted
+	// either way and answers 403 when this is false; with no authentication
+	// layer to put it behind, the flag is the only control there is.
+	localIngestEnabled bool
+	providerSetsMu     sync.Mutex
+	providerSets       map[string]providerSetEntry
+	logger             log.Logger
+	loggerV1           log.Logger
+	tracer             *tracing.Tracer
+	feedFactory        feeds.Factory
+	signer             crypto.Signer
+	post               postage.Service
+	accesscontrol      accesscontrol.Controller
+	postageContract    postagecontract.Interface
+	probe              *Probe
+	metricsRegistry    *prometheus.Registry
+	stakingContract    staking.Contract
+	legacyStake        staking.LegacyStakeService
 	Options
 
 	http.Handler
@@ -281,9 +290,11 @@ type ExtraOptions struct {
 	LegacyStake     staking.LegacyStakeService
 	Steward         steward.Interface
 	Providers       Providers
-	SyncStatus      func() (bool, error)
-	NodeStatus      *status.Service
-	PinIntegrity    PinIntegrity
+	// LocalIngestEnabled gates POST /wasp/ingest. See issue #326.
+	LocalIngestEnabled bool
+	SyncStatus         func() (bool, error)
+	NodeStatus         *status.Service
+	PinIntegrity       PinIntegrity
 }
 
 func New(
@@ -362,6 +373,7 @@ func (s *Service) Configure(signer crypto.Signer, tracer *tracing.Tracer, o Opti
 	s.postageContract = e.PostageContract
 	s.steward = e.Steward
 	s.providers = e.Providers
+	s.localIngestEnabled = e.LocalIngestEnabled
 	s.stakingContract = e.Staking
 	s.legacyStake = e.LegacyStake
 

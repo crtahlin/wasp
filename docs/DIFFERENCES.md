@@ -7,7 +7,7 @@ is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
   on 2026-09-10.
-- **wasp described:** `main` at `a89a3a83`, 2026-09-16. The latest wasp release is
+- **wasp described:** `main` at `d94c6747`, 2026-09-18. The latest wasp release is
   v0.1.3.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
 
@@ -98,6 +98,8 @@ including what raising and lowering it costs, in
 | `sampler-read-concurrency` | The CPU count, at least 4, as in Bee. | Chunk reads the reserve sampler keeps in progress. The sampler now reads and hashes in separate worker pools. | v0.1.0 | [#9](https://github.com/crtahlin/wasp/issues/9) |
 | `sampler-sort-window` | 0, reads in address order as Bee does. | Chunks the sampler buffers and sorts into disk order before reading. | v0.1.0 | [#11](https://github.com/crtahlin/wasp/issues/11) |
 | `reserve-has-concurrency` | 0, unlimited as in Bee. | Reserve lookups pull-sync may have in progress at once. | v0.1.0 | [#20](https://github.com/crtahlin/wasp/issues/20) |
+| `local-ingest-enable` | `false`. | Whether `POST /wasp/ingest` stores content. The route is mounted either way and answers 403 when this is off. Enabling it costs local storage that nothing reclaims and for which no rent is paid, content only this node holds so losing the node loses it, and a write endpoint reachable by anyone who can reach the API, including a web page in the operator's own browser. | `main` | [#326](https://github.com/crtahlin/wasp/issues/326) |
+| `local-ingest-limit` | 65536 chunks, about 269 MB of store. | The most chunks the node holds from local ingests. Raising it hands over more disk that nothing will reclaim; lowering it means ingests are refused with 507. 0 means no limit. | `main` | [#326](https://github.com/crtahlin/wasp/issues/326) |
 | `reserve-wakeup-duration` | 15 minutes, as in Bee. | Time between runs of the reserve worker. | v0.1.0 | [#58](https://github.com/crtahlin/wasp/issues/58) |
 | `reserve-batch-sweep-interval` | 0, which checks chunks against their batches on every wake-up, as Bee does. | How often the reserve checks chunks against their batches and evicts chunks whose batch is gone. | `main` | [#201](https://github.com/crtahlin/wasp/pull/201) |
 | `max-reserve-capacity-doubling` | 1, as in Bee. | Largest allowed value of Bee's `reserve-capacity-doubling`. | `main` | [#222](https://github.com/crtahlin/wasp/pull/222) |
@@ -123,7 +125,8 @@ in the Go API, not as a node setting. Its default is 3 seconds, as in Bee
 
 The stake and probe endpoints sit in the business-debug route group, next to Bee's
 `/stake` endpoints. The content-providers endpoints sit in the main API group, next
-to `/pins`, and answer 403 unless `providers-enable` is on.
+to `/pins`, and answer 403 unless `providers-enable` is on. `POST /wasp/ingest`
+sits in the same group and answers 403 unless `local-ingest-enable` is on.
 
 **Table: HTTP endpoints wasp adds to Bee v2.8.2**
 
@@ -137,6 +140,7 @@ to `/pins`, and answer 403 unless `providers-enable` is on.
 | `DELETE /wasp/providers/{reference}` | Stops announcing a reference. The node stays listed until the last 12-hour window it wrote ends. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
 | `GET /wasp/providers` | Lists the references this node announces. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
 | `GET /wasp/providers/{reference}/lookup` | Looks up the providers of a reference and returns those whose records verify. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
+| `POST /wasp/ingest` | Stores content in this node's own store with no postage and without pushing it to the network, and answers with the reference. The reference is identical to the one a stamped `POST /bytes` of the same bytes at the same redundancy level gives. Nothing else holds the content, so it is reachable only by a requester that names this node, and it is not replicated anywhere. Answers 403 unless `local-ingest-enable` is on, and 507 at `local-ingest-limit`. | `main` | [#326](https://github.com/crtahlin/wasp/issues/326) |
 | `Wasp-Providers` request header on `GET /bzz`, `/bytes`, `/chunks` and `/feeds` | Names up to 8 provider overlays that the download tries first, with normal retrieval as the fallback. A named peer that is refused credit for a chunk is kept for a later attempt at that chunk, bounded at 8 re-admissions, while normal retrieval is tried at once rather than after a wait. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290), [#324](https://github.com/crtahlin/wasp/issues/324) |
 
 The list of retired staking contracts in `pkg/config/legacy_staking.go` is seeded
@@ -161,6 +165,7 @@ on a node that has stake stranded in one of them. `stake-recovery-on-startup` is
 | Adds `bee_chequestore_chain_reads` and `bee_chequestore_chain_reads_avoided`, chain calls made and not made while verifying received cheques. | `main` | | [#301](https://github.com/crtahlin/wasp/issues/301), [#302](https://github.com/crtahlin/wasp/issues/302) |
 | Adds `bee_retrieval_preferred_overdrafts` and `bee_retrieval_preferred_readmits`, preferred-peer attempts refused for credit and how many of those peers were kept for a later attempt. | `main` | | [#324](https://github.com/crtahlin/wasp/issues/324) |
 | Adds `bee_accounting_provider_grants`, `bee_accounting_provider_grants_refused` and `bee_accounting_provider_budget_used`, for the per-peer provider payment threshold. | `main` | | [#327](https://github.com/crtahlin/wasp/issues/327) |
+| Adds `bee_api_local_ingest_chunks`, distinct chunks held from local ingests, and a warning log line when an ingest passes 90% of `local-ingest-limit` or is refused at it. The metric is an upper bound on disk rather than a measurement of it, because a chunk the node already held is counted and cost no new disk. | `main` | | [#326](https://github.com/crtahlin/wasp/issues/326) |
 | Removes four hive ping metrics that Bee declares but never records. | v0.1.0 | Yes | [#138](https://github.com/crtahlin/wasp/issues/138) |
 
 ## Version, identity and packaging

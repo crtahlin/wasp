@@ -31,12 +31,22 @@ type metrics struct {
 	ContentApiDuration *prometheus.HistogramVec
 	UploadSpeed        *prometheus.HistogramVec
 	DownloadSpeed      *prometheus.HistogramVec
+
+	LocalIngestUsage prometheus.Gauge
 }
 
 func newMetrics() metrics {
 	subsystem := "api"
 
 	return metrics{
+		LocalIngestUsage: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "local_ingest_chunks",
+			Help: "Distinct chunks held from local ingests (issue #326). " +
+				"An upper bound on disk rather than a measurement of it: a " +
+				"chunk this node already held cost no new disk and is still counted.",
+		}),
 		RequestCount: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,

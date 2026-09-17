@@ -196,6 +196,8 @@ type Options struct {
 	ResolverConnectionCfgs          []multiresolver.ConnectionConfig
 	Resync                          bool
 	RetrievalCaching                bool
+	LocalIngestEnable               bool
+	LocalIngestLimit                uint64
 	ProvidersEnable                 bool
 	ProvidersPaymentThreshold       string
 	ProvidersCreditBudget           string
@@ -1035,6 +1037,10 @@ func NewBee(
 		SamplerReadConcurrency:    o.SamplerReadConcurrency,
 		SamplerSortWindow:         o.SamplerSortWindow,
 		ReserveHasConcurrency:     o.ReserveHasConcurrency,
+		LocalIngestLimit:          o.LocalIngestLimit,
+	}
+	if o.LocalIngestEnable && o.LocalIngestLimit == 0 {
+		logger.Warning("local-ingest-enable is on with local-ingest-limit 0, so nothing bounds how much disk an ingest can take")
 	}
 	if lo.SamplerReadConcurrency <= 0 {
 		lo.SamplerReadConcurrency = storer.DefaultSamplerReadConcurrency()
@@ -1591,6 +1597,8 @@ func NewBee(
 	}
 
 	extraOpts := api.ExtraOptions{
+		LocalIngestEnabled: o.LocalIngestEnable,
+
 		Pingpong:        pingPong,
 		TopologyDriver:  kad,
 		LightNodes:      lightNodes,

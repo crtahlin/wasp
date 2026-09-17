@@ -1340,6 +1340,87 @@ paths:
         default:
           description: Default response
 
+  "/wasp/ingest":
+    post:
+      summary: "Store content locally without postage (wasp)"
+      description: "Splits the request body into chunks and stores them in this node's own store, with no postage and without pushing anything to the network. The reference is identical to the one a stamped POST /bytes of the same bytes at the same redundancy level returns. This is not an upload: no other node holds the content, so it is reachable only by a requester that names this node with the Wasp-Providers header, and it is not replicated, so losing this node loses the content. The content is stored as an ordinary pinning collection and is removed with DELETE /pins/{reference}. An encrypted ingest cannot be announced through /wasp/providers, which refuses encrypted references. Answers 403 unless the node runs with local-ingest-enable, and 507 at local-ingest-limit."
+      tags:
+        - Local ingest
+      parameters:
+        - in: header
+          schema:
+            $ref: "SwarmCommon.yaml#/components/parameters/SwarmEncryptParameter"
+          name: swarm-encrypt
+          required: false
+        - in: header
+          schema:
+            $ref: "SwarmCommon.yaml#/components/parameters/SwarmRedundancyLevelParameter"
+          name: swarm-redundancy-level
+          required: false
+          description: "Redundancy level. Defaults to the upload default, as POST /bytes does, not the download default that pinning uses."
+      requestBody:
+        description: Content to store
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reference:
+                    $ref: "SwarmCommon.yaml#/components/schemas/SwarmReference"
+                  chunks:
+                    type: integer
+                    format: int64
+                    description: Distinct chunks stored, which is what counts against local-ingest-limit
+                  soleSource:
+                    type: boolean
+                    description: "True when no other node held this content at the moment of ingest. It stops being true once anyone retrieves it, because a forwarding peer caches what it relays."
+        "200":
+          description: Already held by this node; nothing was stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reference:
+                    $ref: "SwarmCommon.yaml#/components/schemas/SwarmReference"
+                  chunks:
+                    type: integer
+                    format: int64
+                  soleSource:
+                    type: boolean
+        "400":
+          $ref: "SwarmCommon.yaml#/components/responses/400"
+        "403":
+          description: Local ingest is off
+        "500":
+          $ref: "SwarmCommon.yaml#/components/responses/500"
+        "507":
+          description: Local ingest limit reached
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  chunks:
+                    type: integer
+                    format: int64
+                    description: Chunks currently held from local ingests
+                  limit:
+                    type: integer
+                    format: int64
+        default:
+          description: Default response
+
   "/wasp/providers/{reference}":
     post:
       summary: "Announce pinned content (wasp)"
