@@ -134,7 +134,7 @@ to `/pins`, and answer 403 unless `providers-enable` is on.
 | `DELETE /wasp/providers/{reference}` | Stops announcing a reference. The node stays listed until the last 12-hour window it wrote ends. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
 | `GET /wasp/providers` | Lists the references this node announces. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
 | `GET /wasp/providers/{reference}/lookup` | Looks up the providers of a reference and returns those whose records verify. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
-| `Wasp-Providers` request header on `GET /bzz`, `/bytes`, `/chunks` and `/feeds` | Names up to 8 provider overlays that the download tries first, with normal retrieval as the fallback. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290) |
+| `Wasp-Providers` request header on `GET /bzz`, `/bytes`, `/chunks` and `/feeds` | Names up to 8 provider overlays that the download tries first, with normal retrieval as the fallback. A named peer that is refused credit for a chunk is kept for a later attempt at that chunk, bounded at 8 re-admissions, while normal retrieval is tried at once rather than after a wait. | `main` | [#290](https://github.com/crtahlin/wasp/issues/290), [#324](https://github.com/crtahlin/wasp/issues/324) |
 
 The list of retired staking contracts in `pkg/config/legacy_staking.go` is seeded
 with the verified retired deployments, the two most recent per chain on Gnosis
@@ -156,6 +156,7 @@ on a node that has stake stranded in one of them. `stake-recovery-on-startup` is
 | Adds Pebble's physical write bytes. | `main` | | [#218](https://github.com/crtahlin/wasp/pull/218) |
 | Adds `bee_retrieval_preferred_attempts`, `bee_retrieval_preferred_hits`, `bee_retrieval_preferred_misses`, `bee_retrieval_local_only_misses` and `bee_retrieval_local_only_limited`, for content providers. | `main` | | [#290](https://github.com/crtahlin/wasp/issues/290) |
 | Adds `bee_chequestore_chain_reads` and `bee_chequestore_chain_reads_avoided`, chain calls made and not made while verifying received cheques. | `main` | | [#301](https://github.com/crtahlin/wasp/issues/301), [#302](https://github.com/crtahlin/wasp/issues/302) |
+| Adds `bee_retrieval_preferred_overdrafts` and `bee_retrieval_preferred_readmits`, preferred-peer attempts refused for credit and how many of those peers were kept for a later attempt. | `main` | | [#324](https://github.com/crtahlin/wasp/issues/324) |
 | Removes four hive ping metrics that Bee declares but never records. | v0.1.0 | Yes | [#138](https://github.com/crtahlin/wasp/issues/138) |
 
 ## Version, identity and packaging

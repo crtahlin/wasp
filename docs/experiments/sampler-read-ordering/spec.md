@@ -43,7 +43,7 @@ doing the `retrievalIdx` lookup itself.
 
 The consequence: **no lookup is removed by this change.** The `retrievalIdx`
 lookup is moved earlier, not eliminated, and in the design chosen below it is
-performed twice — once cold to obtain the sort key and once warm inside the
+performed twice, once cold to obtain the sort key and once warm inside the
 existing `Get`. The issue's claim of a saved lookup should not be carried into
 the result.
 
@@ -61,7 +61,7 @@ mean distance between consecutive reads within a window from roughly `N/3` slots
 to roughly `N/W`, for a reserve of `N` chunks and a window of `W`.
 
 If seek cost matters on the device, sample wall clock falls. If the device has no
-meaningful seek cost — which is the expected case on the NVMe in bench-1 — the
+meaningful seek cost (which is the expected case on the NVMe in bench-1), the
 ordering buys nothing and the extra `retrievalIdx` lookup makes the sampler
 slower. **Both outcomes are answers.** A null or negative result on an SSD does
 not refute the mechanism; it bounds where the mechanism is worth paying for, and
@@ -89,7 +89,7 @@ The location is used **only as a sort key** and is then discarded.
 
 A short final window is sorted and emitted like any other. An item whose
 `retrievalIdx` lookup fails is emitted unsorted rather than dropped, so the
-ordering stage cannot change which chunks reach the sampler — only the order they
+ordering stage cannot change which chunks reach the sampler, only the order they
 arrive in.
 
 ### Why the location is not used to read
@@ -122,7 +122,7 @@ return swarm.NewChunk(rIdx.Address, buf), nil
 
 The sampler would hash those bytes, derive a transformed address from them, and
 potentially place the result in the sample it commits to a redistribution round.
-The failure is silent — nothing checks that the bytes match the address — and it
+The failure is silent (nothing checks that the bytes match the address), and it
 gets more likely the larger the window is, which is the opposite of the direction
 the optimisation wants to move in.
 
@@ -162,18 +162,18 @@ against several window sizes, reading wall clock from the endpoint and
 
 Three quantities separate cleanly:
 
-- **Ordering gain** — `ChunkLoadDuration` per chunk iterated, window on against
+- **Ordering gain**: `ChunkLoadDuration` per chunk iterated, window on against
   window off.
-- **Extra lookup cost** — total sample duration at window `W` against window off,
+- **Extra lookup cost**: total sample duration at window `W` against window off,
   minus the ordering gain. On an SSD the ordering gain should be near zero, which
   makes that run a direct measurement of the lookup cost on its own.
-- **Window sensitivity** — whether the effect grows with `W` as `N/W` predicts,
+- **Window sensitivity**: whether the effect grows with `W` as `N/W` predicts,
   or flattens. Flattening at small `W` would mean the device is not seek-bound
   and the mechanism is not the one described here.
 
 Expected on bench-1 (NVMe): little or no gain, and a measurable regression from
-the extra lookup. The SSD figures the issue quotes — 1.16x at 1% of slots, 1.11%
-at 5%, 1.25x at 20% — came from the cheaper variant described above and should
+the extra lookup. The SSD figures the issue quotes, 1.16x at 1% of slots, 1.11%
+at 5%, 1.25x at 20%, came from the cheaper variant described above and should
 not be expected to reproduce.
 
 **The mechanical-drive case cannot be measured here.** No such device is
@@ -193,7 +193,7 @@ bounded at `SampleSize`, deciding as each item arrives whether it belongs:
 if le(item.TransformedAddress, currentMaxAddr) || len(sampleItems) < SampleSize {
 ```
 
-That gate reads `currentMaxAddr`, which depends on what has arrived so far — so
+That gate reads `currentMaxAddr`, which depends on what has arrived so far, so
 the *decision* is order-dependent even though the *outcome* is not. The outcome
 holds because the running maximum is always greater than or equal to the final
 maximum, so any item belonging in the final 16 passes the gate whenever it

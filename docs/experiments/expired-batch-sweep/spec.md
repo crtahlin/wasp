@@ -21,7 +21,7 @@ starts by measuring.
 storage radius, so the chunks below radius are read and discarded. The question
 is how many that is.
 
-**Table 1 — Reserve composition on bench-1, from `/status` on 2026-08-26**
+**Table 1: Reserve composition on bench-1, from `/status` on 2026-08-26**
 
 | Quantity | Chunks | Share of reserve |
 |---|---|---|
@@ -84,7 +84,7 @@ key is deleted**, so on the normal path `Exists` can never report false for a
 batch the storer has not already been told about.
 
 That makes job 2 a reconciliation net, not a primary path. It catches divergence
-between two stores that share no transaction — a partially completed eviction
+between two stores that share no transaction, a partially completed eviction
 whose `expiredBatchItem` was already deleted, a batchstore rebuilt from a
 different chain start block, chunks left by a crash between two writes. On a
 healthy node it finds nothing, and it pays a full reserve scan every 15 minutes
@@ -107,9 +107,9 @@ why the cheap version of this issue was not done.
 
 Split the loop into two, and give each the cadence its job needs.
 
-1. **Count, every wake-up.** `countChunksWithinRadius()` already exists — it was
+1. **Count, every wake-up.** `countChunksWithinRadius()` already exists: it was
    added in [#127](https://github.com/crtahlin/wasp/pull/127) to give
-   `reserveSizeWithinRadius` one definition — and it iterates from the storage
+   `reserveSizeWithinRadius` one definition, and it iterates from the storage
    radius. The wake-up path uses it and gets the 10.3% for free, because it no
    longer has to see the chunks below radius.
 
@@ -131,8 +131,8 @@ setting only once the sweep is known to be finding nothing, which
 ### What a longer interval costs
 
 A chunk whose batch has vanished, on a node where the normal expiry path did not
-run, survives until the next sweep. It is not served incorrectly — retrieval does
-not consult the batch — but it occupies reserve capacity that a chunk with a
+run, survives until the next sweep. It is not served incorrectly, retrieval does
+not consult the batch, but it occupies reserve capacity that a chunk with a
 living batch could have used, and it is skipped during sampling when its stamp
 fails to load. Both are bounded by the sweep interval, and both apply only to the
 divergence case that the sweep exists to repair.
@@ -159,7 +159,7 @@ getting worse.
   jobs must not change what reconciliation finds, only when it looks.
 
 A negative result would be that the count-only scan is not measurably cheaper
-than the combined one — that the 10.3% is inside the noise and the cost was
+than the combined one, that the 10.3% is inside the noise and the cost was
 somewhere else entirely, most likely the iteration itself rather than what the
 callback does. That would redirect the issue toward maintaining the count
 incrementally, which is the option the issue raises and this spec does not take,

@@ -1,14 +1,15 @@
 # Make the index-store engine selectable, and A/B Pebble under a real reserve
 
-Issue: [#185](https://github.com/crtahlin/wasp/issues/185) · Survey:
-[`survey.md`](survey.md) · Related: [#15](https://github.com/crtahlin/wasp/issues/15)
+Issue: [#185](https://github.com/crtahlin/wasp/issues/185), Survey:
+[`survey.md`](survey.md), Related: [#15](https://github.com/crtahlin/wasp/issues/15)
 
 ## What this builds
 
-An operator-selectable index-store engine — goleveldb (default) or Pebble — and
-the observability parity needed to compare them fairly on real nodes. goleveldb
-stays the default and only value; Pebble is opt-in. Per rule 8 this is experiment
-surface, not a migration: no engine becomes the default without the A/B verdict.
+An operator-selectable index-store engine, either goleveldb (the default) or
+Pebble, and the observability parity needed to compare them fairly on real
+nodes. goleveldb stays the default and only value; Pebble is opt-in. Per rule 8
+this is experiment surface, not a migration: no engine becomes the default
+without the A/B verdict.
 
 The survey (`survey.md`) settled *which* alternative to test and why. This spec is
 the *how*.
@@ -36,9 +37,9 @@ All the goleveldb coupling is confined to `pkg/storer/storer.go`.
 
 **2. `initStore` returns the interface and branches.** `initStore`
 (`storer.go`) becomes `(storage.Store, error)` and switches on the engine,
-calling `leveldbstore.New` or `pebblestore.New`. Their signatures differ —
+calling `leveldbstore.New` or `pebblestore.New`. Their signatures differ,
 `leveldbstore.New` returns `(*Store, bool, error)` (the `bool` is the
-unclean-shutdown flag), `pebblestore.New` returns `(*Store, error)` — so the
+unclean-shutdown flag), `pebblestore.New` returns `(*Store, error)`, so the
 switch reconciles them and, for the leveldb arm, keeps today's dirty-flag
 handling.
 
@@ -60,7 +61,7 @@ Pebble field.
 
 **4. Engine-neutral store health.** The 15-second stats goroutine and the
 write-pause log line (added in [#180](https://github.com/crtahlin/wasp/issues/180),
-`storer.go`) read `store.DB().Stats()` — goleveldb-specific, the *only* hard
+`storer.go`) read `store.DB().Stats()`, goleveldb-specific, the *only* hard
 coupling. Introduce a small interface both stores satisfy, e.g.
 
 ```go
@@ -75,7 +76,7 @@ goleveldb fills it from `leveldb.DBStats` (`LevelTablesCounts[0]`, `WritePaused`
 `WriteDelayCount`); Pebble from `db.Metrics()` (`Levels[0].NumFiles`,
 `WriteStallCount`/`WriteStallDuration`). The polling goroutine, the
 `writePauseEdge` log line, and the metric run off the interface, so a stall is
-visible on both engines — which the A/B depends on.
+visible on both engines, which the A/B depends on.
 
 **5. Pebble metrics parity.** `pebblestore` exports nothing today, so a Pebble
 node would be observability-blind. Add `pebblestore/metrics.go`: a `Metrics()
@@ -111,7 +112,7 @@ Documented so it is reproducible.
 2. **Treatment:** bench-2, a bench-1-class box (`docs/agent-playbooks/bench-vm-spec.md`),
    fresh datadir, `--storage-engine=pebble`, otherwise identical config (postage,
    `nat-addr` = its own public IP, puller limits).
-3. Let both fill, then compare under matched state (rule 7 — three runs, spread):
+3. Let both fill, then compare under matched state (rule 7, three runs, spread):
    time-to-full, sync throughput, read and write method-call latencies (the storer
    metrics), **write-stall behaviour** (the neutral health metrics), CPU / disk
    I/O / memory, and on-disk bytes for the same reserve.
@@ -150,7 +151,7 @@ on the directory is a Pebble node.
 ### Running it afterwards
 
 Do not pass the flag again. An empty `--storage-engine` resolves to the marker,
-so a plain `bee start`, and every `bee db …` command, reopens the directory on
+so a plain `bee start`, and every `bee db ...` command, reopens the directory on
 whatever engine created it. The node is otherwise identical to a goleveldb node:
 same APIs, same sync. The only outward difference is the storage metrics, which
 come out under `bee_pebble_*` instead of `bee_leveldb_*`; the write-stall log
@@ -159,7 +160,7 @@ line works the same on both.
 ### You cannot switch an existing directory's engine in place
 
 There is no toggle and no conversion. Pointing the wrong engine at an existing
-directory — for example `--storage-engine leveldb` at a Pebble node — is refused
+directory (for example `--storage-engine leveldb` at a Pebble node) is refused
 at start with a clear error, rather than failing obscurely or corrupting. That
 refusal is deliberate: it protects the reserve.
 
@@ -168,9 +169,9 @@ refusal is deliberate: it protects the reserve.
 You do **not** need a whole new data directory. A node's identity lives outside
 the reserve, in three separate places under the data directory:
 
-- `keys/` — the node's private keys: libp2p identity, swarm overlay key, wallet.
-- `statestore/` — addressbook, postage batches, accounting, chequebook, overlay.
-- `localstore/` — the reserve: chunk data in sharky plus the index store. **Only
+- `keys/`, the node's private keys: libp2p identity, swarm overlay key, wallet.
+- `statestore/`, addressbook, postage batches, accounting, chequebook, overlay.
+- `localstore/`, the reserve: chunk data in sharky plus the index store. **Only
   this is engine-specific, and only this re-syncs.**
 
 So to move a node to the other engine, wipe only the reserve and keep the rest.
@@ -184,8 +185,8 @@ bee start --storage-engine pebble     # fresh localstore, bound to pebble
 
 By default `nuke` removes the `localstore` (reserve) and the kademlia peer cache
 and clears sync-progress state. It does **not** touch `keys/`, and it keeps the
-overlay. After this the node is the same node — same overlay address, libp2p
-identity, wallet, chequebook, postage batches and addressbook — and it re-syncs
+overlay. After this the node is the same node, same overlay address, libp2p
+identity, wallet, chequebook, postage batches and addressbook, and it re-syncs
 its reserve from scratch on the new engine. Because the overlay is unchanged, it
 re-syncs the same neighbourhood it was already responsible for.
 

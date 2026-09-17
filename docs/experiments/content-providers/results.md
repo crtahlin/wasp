@@ -127,7 +127,7 @@ The cap is Q's accounting with each peer, `pkg/accounting/accounting.go`:
   - Over the whole SWAP block, Q's cheques to P came to about 18,400,000 units,
     roughly 60 chunks, across all hinted runs.
 - **The window plus refresh predicts the share.** For a download of 5 to 6 s the
-  prediction is about 58 + 5 × 14 = 130 chunks. Measured: 73 to 201.
+  prediction is about 58 + 5 x 14 = 130 chunks. Measured: 73 to 201.
 
 Normal retrieval spreads a download's debt over about 120 peers, so it never
 reaches any one peer's window. A single provider that is meant to serve most of

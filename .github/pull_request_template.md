@@ -9,7 +9,7 @@ Closes #
 <!--
 Link the merged spec: docs/experiments/<slug>/spec.md
 Experiments and optimizations need a merged spec BEFORE implementation.
-Exempt: docs-only changes, chores, and upstream syncs — say which applies.
+Exempt: docs-only changes, chores, and upstream syncs. Say which applies.
 -->
 
 ## Protocol impact
@@ -17,9 +17,9 @@ Exempt: docs-only changes, chores, and upstream syncs — say which applies.
 <!--
 Answer this, do not tick it. See docs/agent-playbooks/protocol-compatibility.md.
 
-Does this touch the frozen wire surface — the "/swarm/" stream prefix, any
+Does this touch the frozen wire surface (the "/swarm/" stream prefix, any
 protocolName/protocolVersion, the handshake proto, chunk geometry in pkg/swarm,
-or NetworkID/ChainID in pkg/config?
+or NetworkID/ChainID in pkg/config)?
 
 If NO: say why you are confident. "I did not edit those files" is a fine answer.
 If YES: say which peers stop interoperating and what the operator-visible symptom
@@ -35,7 +35,7 @@ would be, then apply the `protocol-change` label and regenerate the lock file.
 - [ ] Measured on the bench, numbers recorded in docs/experiments/<slug>/measurement.md
       (or: state that this is not a performance claim)
 - [ ] Ran on a real node against the network, and it peered and stayed healthy
-      (an HTTP 200 is not proof — check /health, /readiness, /status, /peers, and the logs)
+      (an HTTP 200 is not proof; check /health, /readiness, /status, /peers, and the logs)
 -->
 
 ## Upstream portability

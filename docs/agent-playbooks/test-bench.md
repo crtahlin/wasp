@@ -23,7 +23,7 @@ where that happens.
 | `integration-1` | Runs the local k3d cluster suite (`make beelocal`, `make deploylocal`, `make testlocal`), restoring the coverage lost when upstream's beekeeper workflow was removed |
 | `soak-1` | Long-running experiments whose effect only appears over days |
 
-Machines are referenced by role name everywhere — issues, specs, results,
+Machines are referenced by role name everywhere, issues, specs, results,
 commit messages. **Never by address.**
 
 ## Where the inventory lives
@@ -33,7 +33,7 @@ commit messages. **Never by address.**
 Hostnames, addresses, SSH configuration, node keys, wallet keys, and postage
 batch identifiers live outside it, in the operator's private workspace, and are
 recorded in engram memory under an infrastructure domain. What lives here is
-`infra/` — provisioning scripts and unit templates that read their targets from
+`infra/`, provisioning scripts and unit templates that read their targets from
 an untracked inventory file.
 
 ## Validating a build (the merge gate)
@@ -48,7 +48,7 @@ curl -s localhost:1633/peers      | jq '.peers | length'
 curl -s localhost:1633/topology   | jq '{depth, connected, population}'
 ```
 
-Then watch the logs for handshake failures — `incompatible network ID`, protocol
+Then watch the logs for handshake failures, `incompatible network ID`, protocol
 version mismatches, or a peer count that climbs and then collapses. A node that
 starts, reports healthy, and quietly fails to peer is the exact failure mode this
 fork is most likely to introduce, and it does not show up in `/health`.
@@ -113,7 +113,7 @@ but empty result. Always check the status code, or print the raw body.
 **A single run of anything I/O-adjacent on a live node measures the node's mood.**
 
 Two sampling runs on this bench with **identical code and identical peer count**
-differed by **1.82x** on disk time per chunk — 225.83 µs against 123.94 µs. That
+differed by **1.82x** on disk time per chunk, 225.83 us against 123.94 us. That
 noise floor swamps most effects worth measuring, and it has already produced one
 wrong published figure and one prematurely closed issue.
 
@@ -131,8 +131,8 @@ Rules:
 
 ## Go microbenchmarks drift with position in the process
 
-The three-runs rule above is about live-node noise. Go microbenchmarks — the
-`storagetest` suite, `beebench` — have a second, quieter trap that the spread
+The three-runs rule above is about live-node noise. Go microbenchmarks, the
+`storagetest` suite, `beebench`, have a second, quieter trap that the spread
 alone does not catch: **the same benchmark reports a different number depending
 on how much ran in the process before it.** It is directional, always making
 later runs look faster, so a before-and-after comparison that puts the "after"
@@ -142,7 +142,7 @@ The cause is garbage-collector pacing, established by measurement, not guessed.
 Running one allocation-free read benchmark six times in a single process, each
 with its own fresh store:
 
-**Table — `inmemchunkstore` ReadRandom, Apple M5 Pro, `-benchtime 3000x -count=6`, one process, ns/op**
+**Table: `inmemchunkstore` ReadRandom, Apple M5 Pro, `-benchtime 3000x -count=6`, one process, ns/op**
 
 | GC setting | run 1 | 2 | 3 | 4 | 5 | 6 | spread |
 |---|---|---|---|---|---|---|---|
@@ -150,7 +150,7 @@ with its own fresh store:
 | `GOGC=off` | 27.7 | 23.2 | 22.9 | 24.7 | 25.1 | 21.4 | 1.3x |
 
 The loop allocates nothing (`0 allocs/op`), so this is not the benchmark's own
-garbage — it is background GC driven by the heap the setup phase left live,
+garbage: it is background GC driven by the heap the setup phase left live,
 stealing cycles from early measured runs and settling as the process continues.
 `GOGC=off` removes it almost entirely. Longer `-benchtime` dampens it (the same
 benchmark at `40000x` spread 1.4x rather than 2.7x) but does not remove it. And
@@ -175,8 +175,8 @@ Rules for microbenchmarks:
 
 The method, fixed in advance in the experiment's `measurement.md`:
 
-1. **Baseline.** The stock build for the same upstream base — that is what
-   `v0.1.0` exists for, an unmodified `v2.8.1` with fork packaging.
+1. **Baseline.** The stock build for the same upstream base (that is what
+   `v0.1.0` exists for), an unmodified `v2.8.1` with fork packaging.
 2. **Same everything else.** Same machine, same config, same postage batch
    depth, same neighbourhood if it matters, same duration.
 3. **Repeat.** A single run of anything network-adjacent measures the network,
@@ -186,7 +186,7 @@ The method, fixed in advance in the experiment's `measurement.md`:
    to re-derive them.
 
 Every table in a result document gets a caption naming the build, the machine
-role, the network, and the conditions — results get read on their own, out of
+role, the network, and the conditions, results get read on their own, out of
 context.
 
 ## Self-hosted CI runner
@@ -202,7 +202,7 @@ owner, never `pull_request` from forks.
 Running non-reference code on a mainnet node that has stake at risk can cost
 real value if the node misbehaves during a redistribution round. Canary and
 bench nodes should be unstaked, or staked only with an amount that is acceptable
-to lose. This is not a theoretical caution — it is the main way an experiment
+to lose. This is not a theoretical caution; it is the main way an experiment
 here could cost money.
 
 ## When the index store stops accepting writes
@@ -236,7 +236,7 @@ clean shutdown slow; give it time before killing harder.
 **Reaching it is a slow-disk-under-contention concern, not a fast-disk one.** On
 fast NVMe with the machine otherwise idle, the `compaction-l0-trigger` experiment
 needed roughly 2 GB/s of sustained ingest to get here, about 16x a saturated
-1 Gbit/s link — effectively unreachable, and well above the puller's default
+1 Gbit/s link, effectively unreachable, and well above the puller's default
 `puller-max-chunks-per-second` (1000/s, roughly 4 MB/s). It becomes reachable when
 compaction throughput collapses: a slow disk, sharky chunk writes competing for
 the same device, or reserve sampling reads stealing seeks (that last is #23). On
@@ -259,7 +259,7 @@ rate.
 ## When the node crashes, read the crashing goroutine first
 
 Go dumps every goroutine on a fatal error, so a naive grep over the dump finds
-whatever the node happened to be doing — pullsync, kademlia, sharky — and invites
+whatever the node happened to be doing (pullsync, kademlia, sharky) and invites
 you to blame it. Only one goroutine is crashing. Find the `[running]` one, or the
 `runtime stack:` block that precedes it, and read that.
 
@@ -271,9 +271,9 @@ have nothing to do with each other:
 | `panic:` with a bee frame in the running goroutine | a real bee/wasp bug |
 | `fatal error:` with only `runtime.*` frames, on a GC worker or `runtime stack:` | a Go runtime bug, or genuine memory corruption from `unsafe`/cgo |
 
-The runtime's heap-integrity assertions — `found pointer to free object`,
+The runtime's heap-integrity assertions, `found pointer to free object`,
 `sweep increased allocation count`, `s.allocCount != s.nelems`, `fault`, and
-`index out of range` raised from `runtime.panicBounds` on the system stack — are
+`index out of range` raised from `runtime.panicBounds` on the system stack, are
 all the second class. With `CGO_ENABLED=0` and no `unsafe` in the change under
 test, a bee-level data race is not a sufficient explanation for them.
 
@@ -300,20 +300,20 @@ That is the culprit. Everything below it is context.
 
 This cost real time. A `pkg/api` timeout was diagnosed from its stacks as a websocket
 deadlock in `gsocListeningWs`, filed as a hang, and hunted with 225 reproduction runs of
-`-run 'TestGsocWebsocket|TestPss'` — a set that does not contain the test that was
+`-run 'TestGsocWebsocket|TestPss'`, a set that does not contain the test that was
 actually slow. The conclusion was "cannot reproduce". It then reproduced on the next
 unrelated pull request, one that changed only `.gitignore`.
 
 Also worth knowing: a slow test and a hung test look identical from the outside. Check
 before assuming. `TestBzzUploadDownloadWithRedundancy` takes 6 s normally and 123 s under
-`-race` — a 20x multiplier that turns a comfortable test into most of a package's budget.
+`-race`, a 20x multiplier that turns a comfortable test into most of a package's budget.
 Time it both ways before calling anything deadlocked.
 
 ## GOEXPERIMENT is a build-time variable
 
 `GOEXPERIMENT` configures the Go toolchain when it compiles. Setting it in a
 systemd unit, a shell profile, or any other runtime environment has **no effect
-whatsoever** — and it fails silently, so an experiment that "disabled" a GC feature
+whatsoever**, and it fails silently, so an experiment that "disabled" a GC feature
 this way produces confident, entirely meaningless results.
 
 Set it for the build, and then verify it landed in the binary rather than assuming:
@@ -324,8 +324,8 @@ go version -m dist/bee | grep GOEXPERIMENT     # must print: build GOEXPERIMENT=
 ```
 
 The Makefile assigns it with `:=`, so an inherited `GOEXPERIMENT` in your environment
-cannot silently override it. To deliberately build *with* Green Tea — to retest it
-once Go ships a fix — pass it on the command line, which does win:
+cannot silently override it. To deliberately build *with* Green Tea, to retest it
+once Go ships a fix, pass it on the command line, which does win:
 
 ```bash
 make GOEXPERIMENT=greenteagc binary
@@ -337,7 +337,7 @@ Verify the **deployed** binary too, not just the one you built:
 go version -m /usr/bin/bee | grep GOEXPERIMENT
 ```
 
-Do not try to confirm this by looking for GC symbols with `go tool nm` — release
+Do not try to confirm this by looking for GC symbols with `go tool nm`, release
 binaries are linked with `-s -w` and carry no symbol table, so the check returns
 zero for both a correct and an incorrect build. The build info is the only
 trustworthy signal. CI enforces it on every push; see `.github/workflows/go.yml`.
@@ -361,7 +361,7 @@ precondition, not an assumption:
 - **Load average above idle**, from `/proc/loadavg`.
 - For read-path work, **drive load explicitly**. A node whose reserve is already full
   does very little on its own. `/rchash/{depth}/{anchor1}/{anchor2}` in a loop
-  produces sustained heavy reads — roughly 137 s per run at depth 9 on a 4M-chunk
+  produces sustained heavy reads, roughly 137 s per run at depth 9 on a 4M-chunk
   reserve, taking load average to about 6. `anchor1` must be the node's own overlay
   from `/addresses`.
 
@@ -383,7 +383,7 @@ a window containing two crashes and two restarts.
 
 Do the parsing on the remote host inside an explicit `bash -s`, emit one
 `key=value` line, and parse that. Then **validate the harness against a live tick
-before trusting it** — print the raw line and the parsed fields, and confirm they
+before trusting it**, print the raw line and the parsed fields, and confirm they
 match.
 
 **Silent skips.** An SSH failure that is logged and skipped will hide the very outcome
@@ -392,7 +392,7 @@ answering SSH. Retry, then escalate: after a small number of consecutive unreach
 ticks, abort the run with a distinct status rather than continuing to report ticks.
 
 A harness that cannot produce a failure is not measuring anything. Before trusting
-one, ask what it would print if the node died right now — and if the honest answer is
+one, ask what it would print if the node died right now, and if the honest answer is
 "the same thing it prints now", fix it before starting the run.
 
 ## SIMD hashing: fixed, and what the fix was
@@ -402,20 +402,20 @@ one, ask what it would print if the node died right now — and if the honest an
 stack** rather than the goroutine stack.
 
 Two panics exist to make a future regression here loud instead of silent, because no test
-of hash output can catch one — the digests are correct either way:
+of hash output can catch one, the digests are correct either way:
 
 ```
 panic: keccak: SIMD blob overflowed its 65536-byte scratch stack ...
 panic: keccak: SIMD blob moved the stack pointer by N bytes and did not put it back ...
 ```
 
-The first means a blob outgrew its 64 KiB buffer — expected only after regenerating the
+The first means a blob outgrew its 64 KiB buffer, expected only after regenerating the
 `.syso` files from a newer XKCP. The second means the blob violated the SysV ABI. Either
 way the node is telling you the truth immediately rather than dying in an unrelated
 subsystem twelve minutes later, which is what the original bug did. Do not work around
 either by enlarging the buffer or removing the check until the cause is understood.
 
-Go's goroutine stacks are small, growable and movable — the runtime relocates them and
+Go's goroutine stacks are small, growable and movable, the runtime relocates them and
 the collector scans them. Foreign machine code executing on one is unsafe, which is why
 cgo switches to the system stack before entering C. The stub now does the same, using a
 pooled 64 KiB byte slice: no pointers, never scanned, never moved.
@@ -427,6 +427,6 @@ Measured, same node and load, SIMD on throughout:
 | goroutine stack (original) | crash ~12 min |
 | scratch stack | **7.6 h clean, 113 peers, 305 rchash runs** |
 
-Two cheap corrections were tried first and both failed — `runtime.Pinner` (~4.5 min) and
+Two cheap corrections were tried first and both failed, `runtime.Pinner` (~4.5 min) and
 `NO_LOCAL_POINTERS` (~3 min). Record them before trying either again: the pointer map and
 pointer pinning were not the problem, the execution context was.

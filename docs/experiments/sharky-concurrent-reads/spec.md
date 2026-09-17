@@ -49,7 +49,7 @@ that it crashed bench-1 with Go runtime heap corruption
 **That diagnosis was wrong.** The crash was **SIMD memory corruption**
 ([#92](https://github.com/crtahlin/wasp/issues/92)): the SIMD assembly stub ran
 foreign code on the goroutine stack and passed Go pointers to it, corrupting memory
-that then failed wherever it was next touched — "nine distinct runtime assertions
+that then failed wherever it was next touched, "nine distinct runtime assertions
 across seven subsystems," the allocator among them. The `allocCount` assertion the
 revert pinned on this change was one of those, and the corruption is layout
 sensitive, which is why it was easy to blame the nearest concurrency change. After
@@ -99,7 +99,7 @@ None. No on-disk format change, no wire change, nothing in
    before-and-after on the bench, three matched runs per condition, or it stays out.
 2. Include the in-memory-backend wrapper above.
 3. A real-node run remains sensible defence, but note that it can only show the code
-   is stable, not that the guard earns its place — the unguarded post-SIMD code was
+   is stable, not that the guard earns its place, the unguarded post-SIMD code was
    stable too. The node-level *measurement* is the gate, not the absence of a crash.
 
 Generated with help of AI.
