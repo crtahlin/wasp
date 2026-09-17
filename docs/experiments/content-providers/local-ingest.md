@@ -5,10 +5,10 @@ into its own store, pays no postage, and serves it to anyone who asks for it.
 
 Code references are to `main` at `7bd5da14`, base `upstream/v2.8.2`.
 
-**This is revision 4.** Three adversarial reviews found four load-bearing
-sections wrong and about thirty things missing between them. Revision 4 fixes
-three mechanisms that could not be built as described. Where a claim has
-changed, the earlier one is marked rather than removed.
+**This is revision 5.** Four adversarial reviews. Revision 5 fixes a crash this
+document's own design would have caused, and three mechanisms that could not be
+built as described. Where a claim has changed, the earlier one is marked rather
+than removed.
 
 ## Terms
 
@@ -127,15 +127,24 @@ that always refuses are indistinguishable to anyone probing the API.
 - it registers `/v1/wasp/ingest` alongside the bare path, so the mirror exists
   whether or not this document asks for it;
 - it wraps the route in `s.checkRouteAvailability`, so the route answers 503
-  while the node is syncing. **That is wrong for this operation**, which touches
-  no network at all and is exactly what an operator might want while a node is
-  still catching up.
+  until the node is fully up.
 
-Registering outside `handle` loses the `/v1/` mirror with it, since one closure
-does both. So the implementation registers **both paths itself**, bare and
-`/v1/`, without `checkRouteAvailability`. The pull request says so, because
-deviating from the group's default is the kind of thing a reviewer should see
-rather than discover.
+**The route is registered through `handle`, with that wrapper, and an earlier
+draft of this document was wrong to drop it.** The argument for dropping it was
+that an ingest touches no network and so ought to work while a node is still
+catching up. That nicety buys a crash.
+
+The API server starts serving at `pkg/node/node.go:706`. `storer.New` is not
+called until `:1056`, and `s.storer` is not assigned until `Configure` at
+`:1669`. Every ordinary route survives that gap **because** `checkRouteAvailability`
+answers 503 until `EnableFullAPI` at `:1674`, which runs after both. A route
+registered outside it is reachable with `s.storer` still nil, which is a nil
+dereference reached from an ordinary local HTTP request, for the whole of chain
+sync and kademlia bootstrap.
+
+The fork's own `/wasp/providers` routes go through `handle` for the same reason
+(`pkg/api/router.go:416-427`). The `providersEnabled` precedent this document
+cites is a precedent for the 403 flag, not for dropping the availability guard.
 
 CORS needs nothing new: `Swarm-Redundancy-Level` and `Swarm-Encrypt` are already
 allowed (`pkg/api/api.go:615-622`).
@@ -332,8 +341,30 @@ The transaction lives in the `done` closure of `DB.NewCollection`
 `db.storage.Run(ctx, func(s transaction.Store) error { ... })`, and `pkg/api`
 cannot reach `s.IndexStore()`. **So this needs a fork-authored
 `DB.NewLocalIngestCollection` in `pkg/storer`**, which is the same shape with
-the extra write inside the same `Run`. It follows that the item never exists for
-an uncommitted collection, so it takes no part in startup cleanup.
+the extra write inside the same `Run`. That is buildable without touching the
+internal package: `pinstore.NewCollection` is exported, `putterSession` is in
+`package storer`, and `indexTrx.Put` writes into the same batch that `Run`
+commits, so the item and the collection commit atomically.
+
+**But the count has to reach that closure, and `Done` has nowhere to put it.**
+`PutterSession.Done` is `Done(swarm.Address) error` (`storer.go:62`), and the
+closure cannot see a wrapper living in `pkg/api`. An earlier draft had the
+counter in the handler and the write in the storer with no route between them.
+
+So `NewLocalIngestCollection` returns a **fork-specific session type** whose
+`Done` carries the count:
+
+```go
+type LocalIngestSession interface {
+    storage.Putter
+    Done(root swarm.Address, chunks uint64) error
+    Cleanup() error
+}
+```
+
+It follows that no commit-time crash can leave an orphan item, because the item
+and the collection are written together. The startup pass below is not for that
+case; it is for the unpin case in section 5.
 
 **The item must size its buffer for a 64-byte reference**, as
 `pinCollectionItem` does with `encryption.ReferenceSize` (`pinning.go:350`,
@@ -355,11 +386,26 @@ Four things an earlier draft left unanswered:
   always correct. The same pass drops any item whose root no longer answers
   `HasPin`, which is what repairs the orphan case in section 5.
 - **Unpin decrements it**, section 5.
-- **Concurrent ingests**: `uploadsLock` is per chunk, not per session, so two
-  ingests interleave and each could pass a check against the same stale total.
-  The total is therefore guarded by its own mutex and the check and the
-  increment happen under it, or the limit is not enforced across concurrent
-  sessions at all.
+- **Concurrent ingests need a reservation, not a check.** `uploadsLock` is per
+  chunk, not per session, so two ingests interleave. Checking a committed total
+  lets both pass and together exceed the limit; incrementing the committed total
+  as chunks arrive inflates it for good on every 507, every abandoned request
+  and every duplicate re-ingest, which would also break this document's own
+  acceptance assertion that the usage figure returns to its previous value.
+
+  So: under the total's mutex, **reserve** one unit for each newly distinct
+  address, and refuse when `committed + reserved` would cross the limit. The
+  session's whole reservation is released on `Cleanup`, on the duplicate-root
+  path and on any error, and is converted into the committed total when the
+  `done` transaction commits.
+
+- **Lock order.** Two mutexes exist: one guarding a session's distinct-address
+  set, because the replicas putter calls `Put` from several goroutines, and one
+  guarding the node-wide total. **The total's mutex is never held while calling
+  into the storer.** That is what keeps it clear of `uploadsLock`, which
+  `DB.DeletePin` holds for its whole body (`pinstore.go:65-81`) and would
+  otherwise give an AB/BA inversion against a non-reentrant multex
+  (`storer.go:1046-1052`).
 
 **An earlier draft of this document said "no on-disk format change". That was
 wrong** and it made the work look smaller than it is. There is still **no
@@ -410,9 +456,24 @@ no read-back, no access to unexported internals, and no second transaction. The
 mid-stream limit and the recorded usage become the same quantity, which is one
 fewer thing to explain and one fewer way for two records to disagree.
 
-**The cost is memory during an ingest**, about 32 bytes per distinct chunk, so
-roughly 32 MB for a million-chunk ingest. That is the price of not needing the
-read-back, and it is stated rather than hidden.
+**The equality holds for a reason worth writing down, because a later change
+could break it silently.** `Total` rises on every `Put` (`pinning.go:95`) and
+`DupInCollection` rises exactly when the chunk is already in *this* collection
+(`:101`, `:108`), keyed by the collection UUID, so a chunk the node already
+holds elsewhere counts as distinct and its refcount is bumped
+(`chunkstore.go:92`). The wrapper sits one-to-one above that call. It works
+**only because each chunk is its own `db.storage.Run`** (`pinstore.go:42`) and
+`indexTrx.Has` reads the underlying store rather than the pending batch
+(`transaction.go:291`). Batch a session's puts into one transaction and
+`DupInCollection` stops counting, and this equality goes with it.
+
+**The cost is memory during an ingest**, and an earlier draft understated it by
+naming the address width rather than the cost of holding it. A
+`map[[32]byte]struct{}` costs roughly 60 bytes an entry at realistic load
+factors, so a million-chunk ingest is of the order of 60 MB, and a
+`map[string]struct{}` would be nearer 110. The implementation uses the array key
+for that reason. That is the price of not needing the read-back, and it is
+stated rather than hidden.
 
 Two things it still does not count, so the figure remains an **upper bound on
 disk**: `chunkstore.Put` only increments a refcount for a chunk the node already
@@ -464,13 +525,32 @@ lives inside the internal package (`pinning.go:309-315`). Putting the removal
 inside it would mean editing that package, which cannot reference a
 `localIngestItem` defined in `pkg/storer` without an import cycle.
 
-**So it is a second step, and a crash between the two leaves an orphan item.**
-That is repairable, unlike the commit case: the startup pass below already walks
-the namespace, so it drops any item whose root no longer answers `HasPin`.
+**The order of the two steps matters and only one of them is repairable.**
+`pinstore.DeletePin` runs **first**. Only once it returns does the item get read,
+deleted, and its count subtracted from the total. The other order is
+unrepairable: item gone, root still answering `HasPin`, chunks still on disk,
+and nothing to detect it. A missing item is a no-op, because an ordinary pin has
+none.
 
-**It must also decrement the running total**, which an earlier draft omitted
-while requiring the item's removal. Without it the usage figure drifts upward
-for good, which is the exact failure the item exists to prevent.
+**The decrement needs the item's count**, so the item is read before it is
+deleted. And it happens outside the total's mutex-with-storer rule from section
+4: `DB.DeletePin` holds `uploadsLock` for its whole body, so taking the total's
+mutex inside it is only safe because the ingest path never holds that mutex
+while taking `uploadsLock`.
+
+**What the startup repair covers, and what it does not.** It covers the window
+after `pinstore.DeletePin` returns. It does not cover a crash **inside** it:
+that function deletes the collection chunks in many independent per-chunk
+transactions and the root last (`pinning.go:275-286`, `:309-315`), so a crash
+part way leaves the root present, `HasPin` true, the item surviving, and its
+count referring to chunks that are gone. `CleanupDirty` handles only
+`dirtyCollection` and `DeletePin` writes no dirty marker. That is upstream
+behaviour rather than something introduced here, and it is stated so the repair
+is not read as covering more than it does.
+
+One more case the repair cannot distinguish: a root that is ingested locally,
+unpinned, then pinned again from the network leaves an item `HasPin` cannot tell
+from a live one.
 
 **"Ingested and also pinned for another reason" cannot exist**, so the earlier
 requirement to keep them from dropping each other has no referent. Collections
@@ -683,8 +763,10 @@ what the next upstream sync will meet:
    `pkg/api` tests stop compiling. Upstream file.
 4. **The unpin hook** in `DB.DeletePin` (`pkg/storer/pinstore.go:64-80`).
    Upstream file.
-5. **A 507 helper in `pkg/jsonhttp`**, which has none: there is no
-   `InsufficientStorage` anywhere in `pkg/jsonhttp` or `pkg/api`. Upstream file.
+5. **Nothing in `pkg/jsonhttp`.** It has no `InsufficientStorage` helper, but
+   `jsonhttp.Respond(w, statusCode, response)` is generic (`jsonhttp.go:47`), so
+   the fork's handler answers 507 through it and no upstream file is touched.
+   Counted here because an earlier draft listed it as an edit.
 6. **The two settings** in `cmd/bee/cmd/cmd.go` and their wiring in
    `pkg/node/node.go`. Both upstream files, and the Configuration section
    requires them.
