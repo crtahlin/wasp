@@ -147,6 +147,7 @@ type accountingPeer struct {
 	fullNode                       bool     // the peer connected as full node or light node
 	totalDebtRepay                 *big.Int // since being connected, amount of cumulative debt settled by the peer
 	thresholdGrowAt                *big.Int // cumulative debt to be settled by the peer in order to give threshold upgrade
+	providerGrant                  *big.Int // wasp #327: extra threshold granted to this peer as a provider requester, nil if none
 }
 
 // Accounting is the main implementation of the accounting interface.
@@ -156,6 +157,14 @@ type Accounting struct {
 	accountingPeers   map[string]*accountingPeer
 	logger            log.Logger
 	store             storage.StateStorer
+	// wasp #327: the threshold announced to a peer asking this node as a
+	// provider, and how much extra credit may be granted across all
+	// connections holding a grant at one time. Both zero when off.
+	providerThreshold  *big.Int
+	providerBudget     *big.Int
+	providerBudgetMu   sync.Mutex
+	providerBudgetUsed *big.Int
+
 	// The payment threshold in BZZ we communicate to our peers.
 	paymentThreshold *big.Int
 	// The amount in percent we let peers exceed the payment threshold before we
@@ -219,6 +228,9 @@ func NewAccounting(
 	lightRefreshRate := new(big.Int).Div(refreshRate, big.NewInt(lightFactor))
 	return &Accounting{
 		accountingPeers:          make(map[string]*accountingPeer),
+		providerThreshold:        new(big.Int),
+		providerBudget:           new(big.Int),
+		providerBudgetUsed:       new(big.Int),
 		paymentThreshold:         new(big.Int).Set(PaymentThreshold),
 		paymentTolerance:         PaymentTolerance,
 		earlyPayment:             EarlyPayment,
@@ -1431,6 +1443,9 @@ func (a *Accounting) Connect(peer swarm.Address, fullNode bool) {
 	accountingPeer.paymentThresholdForPeer.Set(paymentThreshold)
 	accountingPeer.thresholdGrowAt.Set(thresholdGrowStep)
 	accountingPeer.disconnectLimit.Set(disconnectLimit)
+	// wasp #327: a grant belongs to one connection. Connect knows nothing about
+	// it otherwise, so a reconnecting peer would carry a stale delta.
+	accountingPeer.providerGrant = nil
 
 	err := a.store.Put(peerBalanceKey(peer), zero)
 	if err != nil {
@@ -1496,17 +1511,34 @@ func (a *Accounting) decreaseOriginatedBalanceBy(peer swarm.Address, amount *big
 func (a *Accounting) Disconnect(peer swarm.Address) {
 	accountingPeer := a.getAccountingPeer(peer)
 
-	accountingPeer.lock.Lock()
-	defer accountingPeer.lock.Unlock()
+	// wasp #327: the grant this connection held, taken under the peer lock and
+	// given back after it. The budget lock is never held with a peer lock, in
+	// either order.
+	var grant *big.Int
 
-	if accountingPeer.connected {
-		disconnectFor, err := a.blocklistUntil(peer, 1)
-		if err != nil {
-			disconnectFor = int64(10)
+	func() {
+		accountingPeer.lock.Lock()
+		defer accountingPeer.lock.Unlock()
+
+		if accountingPeer.connected {
+			disconnectFor, err := a.blocklistUntil(peer, 1)
+			if err != nil {
+				disconnectFor = int64(10)
+			}
+			accountingPeer.connected = false
+			_ = a.p2p.Blocklist(peer, time.Duration(disconnectFor)*time.Second, "accounting disconnect")
+			a.metrics.AccountingDisconnectsReconnectCount.Inc()
+
+			// Inside the connected check on purpose. terminate is registered as
+			// both DisconnectIn and DisconnectOut, so an initiated disconnect
+			// runs this twice, and releasing outside the check would free the
+			// slot twice.
+			grant = clearProviderGrant(accountingPeer)
 		}
-		accountingPeer.connected = false
-		_ = a.p2p.Blocklist(peer, time.Duration(disconnectFor)*time.Second, "accounting disconnect")
-		a.metrics.AccountingDisconnectsReconnectCount.Inc()
+	}()
+
+	if grant != nil {
+		a.releaseProviderBudget(grant)
 	}
 }
 

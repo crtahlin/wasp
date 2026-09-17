@@ -35,6 +35,11 @@ type metrics struct {
 	ErrTimeOutOfSyncInterval                 prometheus.Counter
 	ErrRefreshmentBelowExpected              prometheus.Counter
 	ErrRefreshmentAboveExpected              prometheus.Counter
+
+	// wasp #327
+	ProviderGrants        prometheus.Counter
+	ProviderGrantsRefused prometheus.Counter
+	ProviderBudgetUsed    prometheus.Gauge
 }
 
 func newMetrics() metrics {
@@ -155,6 +160,24 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "refreshment_above_expected",
 			Help:      "Number of times the peer received a refreshment that is above expected",
+		}),
+		ProviderGrants: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "provider_grants",
+			Help:      "Number of times a larger payment threshold was granted to a peer asking this node as a provider.",
+		}),
+		ProviderGrantsRefused: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "provider_grants_refused",
+			Help:      "Number of provider credit grants refused because the budget was exhausted.",
+		}),
+		ProviderBudgetUsed: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "provider_budget_used",
+			Help:      "Sum of the credit deltas granted across connections currently holding a provider grant.",
 		}),
 		ErrTimeOutOfSyncAlleged: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
