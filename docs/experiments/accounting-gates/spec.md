@@ -155,20 +155,21 @@ rather than nothing.
 1. **#303 binds only where debt rebuilds faster than a payment is reported.**
    Removing `paymentOngoing` cannot make clearing unbounded, because the trigger
    already subtracts `shadowReservedBalance`, which the in-flight payment raises
-   (`:501-503`, `:294-300`), and the report subtracts the same amount from both
-   that reserve and the balance (`:957`, `:975-979`), leaving the tested
-   quantity unchanged. So a second cheque needs one early payment threshold of
-   **new** debt whether or not the flag exists. The flag can only bind when that
-   new debt arrives before the report does. Measured: 1.2 s to rebuild against
-   about 0.3 s to report, so it did not bind. Starting to bind needs about four
-   times the rate at which the tested quantity climbs, net of refreshment, which
-   is about 2.7 times the gross rate of credit with the peer, since refreshment
-   clears a fixed 4,500,000 a second however fast traffic arrives. **Predicted
-   effect on this bench: none.** Note that the regime where #303 starts to bind
-   is also where the overdraft block must start firing, since by the condition 3
-   arithmetic below there are only 22 to 37 chunks of headroom at the default.
-   So a run that shows #303 helping should show blocks rising too, and
-   Acceptance treats that as cost moved rather than removed.
+   (`:501-503`, `:294-300`), and the report takes that amount off the reserve
+   (`:957`) and adds it to the balance (`:975-979`), reducing the debt by the
+   same amount and so leaving the tested quantity unchanged. So a second cheque
+   needs one early payment threshold of **new** debt whether or not the flag
+   exists. The flag can only bind when that new debt arrives before the report
+   does. Measured: 1.2 s to rebuild against about 0.3 s to report, so it did not
+   bind. Starting to bind needs about four times the rate at which the tested
+   quantity climbs, net of refreshment, which is about 2.7 times the gross rate
+   of credit with the peer, since refreshment clears a fixed 4,500,000 a second
+   however fast traffic arrives. **Predicted effect on this bench: none.** Note
+   that the regime where #303 starts to bind is also where the overdraft block
+   must start firing, since by the condition 3 arithmetic below there are only
+   22 to 37 chunks of headroom at the default. So a run that shows #303 helping
+   should show blocks rising too, and Acceptance treats that as cost moved
+   rather than removed.
 2. **#304 binds only where a full second passes with no completed refreshment.**
    The term is zero otherwise, and it was zero in all nine measured cheques, so
    #304 would have changed none of them. Where the term is 4,500,000 it makes
