@@ -257,7 +257,7 @@ it cost a cleanup commit. Check before merging, not after.
 | Looking for how wasp differs from Bee | `docs/DIFFERENCES.md` |
 | Looking for what also applies to upstream Bee | `docs/UPSTREAM.md` |
 | Looking for what has been tried | `docs/experiments/INDEX.md` |
-| Looking for what is planned | `docs/ROADMAP.md` |
+| Looking for what is planned | the issue tracker: `needs-spec` has no merged spec yet, `spec-ready` has one and is waiting on code |
 
 ## Fork-specific facts
 
