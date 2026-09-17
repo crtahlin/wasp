@@ -79,6 +79,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#301](https://github.com/crtahlin/wasp/issues/301) | chequebook: read the chequebook issuer once instead of on every cheque | done, neutral | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done, neutral (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#316](https://github.com/crtahlin/wasp/issues/316) | accounting: refreshDue is computed without the one second cap in settle, which can suppress cheques entirely | open | - | - |
+| [#333](https://github.com/crtahlin/wasp/issues/333) | accounting: Connect rewinds the threshold-growth checkpoint but not the counter it is compared against | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
@@ -100,6 +101,17 @@ the changes:
   `refreshDue`, is tagged and has its row above. It was verified in
   `upstream/v2.8.2` against the four capped sites, and it is rule 11's own
   example of a defect, one quantity computed two different ways.
+- [#333](https://github.com/crtahlin/wasp/issues/333), the growth checkpoint
+  rewound on connect while `totalDebtRepay` is not, is tagged and has its row
+  above. `Connect` sets `thresholdGrowAt` back to 450,000,000 but nothing ever
+  re-zeroes the cumulative figure it is tested against, which is written once at
+  record creation, and the per-peer record is never deleted from the map. So a
+  returning peer with a long history fires the threshold upgrade on every
+  settlement until the checkpoint catches up, raising its granted threshold past
+  a limit the node refuses to start with and sending an announce under the peer
+  lock each time. Verified byte-identical to `upstream/v2.8.2` across
+  `pkg/accounting`, `pkg/pricing` and `pkg/settlement/pseudosettle`. It is read
+  from the code and not measured, and the issue says what would confirm it.
 - [#317](https://github.com/crtahlin/wasp/issues/317), the unlocked allocation
   in `chequebook.Issue`, is **not** tagged and has no row. The code is the same
   upstream, but no caller there or here can reach it: `Issue` has a single
