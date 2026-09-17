@@ -3,7 +3,7 @@
 The point of this fork is to run modified Bee nodes **on the real Swarm
 network, alongside stock Bee nodes**. Everything else is negotiable; this is
 not. A change that makes stock peers refuse to talk to us has not optimized
-anything — it has removed the node from the network.
+anything, it has removed the node from the network.
 
 ## What is frozen
 
@@ -18,7 +18,7 @@ moved.
 | `protocolName` / `protocolVersion` | `pkg/hive`, `pkg/pushsync`, `pkg/pullsync`, `pkg/retrieval`, `pkg/status`, `pkg/pricing`, `pkg/pingpong`, `pkg/settlement/pseudosettle`, `pkg/settlement/swap/swapprotocol` | Matched per-protocol on connect. See the semver rule below |
 | `ProtocolVersion` | `pkg/p2p/libp2p/internal/handshake/handshake.go` | The handshake itself. A mismatch means no connection at all |
 | Handshake field numbers | `pkg/p2p/libp2p/internal/handshake/pb/handshake.proto` | Protobuf field numbers are permanent. Reusing one silently misinterprets peer data |
-| Chunk geometry | `pkg/swarm/swarm.go` — `ChunkSize`, `Branches`, `SectionSize`, `HashSize`, `MaxPO`, the SOC sizes | These determine chunk **addresses**. Changing one makes our hashes disagree with every other client, including the JavaScript ones |
+| Chunk geometry | `pkg/swarm/swarm.go`, `ChunkSize`, `Branches`, `SectionSize`, `HashSize`, `MaxPO`, the SOC sizes | These determine chunk **addresses**. Changing one makes our hashes disagree with every other client, including the JavaScript ones |
 | `NetworkID`, `ChainID`, contract addresses | `pkg/config/chain.go` | `NetworkID` is checked in the handshake **and** mixed into the overlay address and the signed `BzzAddress`. It is the switch that deliberately creates a separate network |
 
 ## The semver rule, which is subtler than the freeze
@@ -48,7 +48,7 @@ the old minor before you argue with it.
 1. Say so in the spec's **Protocol impact** section: what changes, which peers
    stop interoperating, and what the operator-visible symptom would be.
 2. Apply the `protocol-change` label to the pull request. The freeze check is
-   gated on its absence, so the label is what lets CI pass — treat applying it as
+   gated on its absence, so the label is what lets CI pass, treat applying it as
    a deliberate act, not a way to make a red check go away.
 3. Regenerate the lock in the same pull request:
 
@@ -62,7 +62,7 @@ the old minor before you argue with it.
 
 Upstream bumps these values as a normal part of releasing, and the sync workflow
 regenerates the lock in the same commit. The check is skipped for branches named
-`sync/upstream/*` carrying the `upstream-sync` label — both conditions, so a
+`sync/upstream/*` carrying the `upstream-sync` label, both conditions, so a
 hand-pushed branch cannot claim the exemption with a label alone.
 
 On a sync pull request the lock diff **is** the protocol review:
@@ -72,7 +72,7 @@ git diff main...HEAD -- .github/protocol-freeze.lock
 ```
 
 Read it. If upstream raised a protocol minor, our nodes will stop being dialable
-by peers still on the previous release until they upgrade — which is normal and
+by peers still on the previous release until they upgrade, which is normal and
 expected, but it is worth knowing before it happens rather than after.
 
 ## What is not frozen, and is safe to change
@@ -82,7 +82,7 @@ expected, but it is worth knowing before it happens rather than after.
   extends it to advertise both the upstream base and the fork version.
 - Anything in the HTTP API. It is versioned independently in
   `openapi/Swarm.yaml` and is a local operator interface, not a peer interface.
-- Internal storage layout, scheduling, concurrency, caching — the places most
+- Internal storage layout, scheduling, concurrency, caching, the places most
   optimizations belong.
 - The `status` protocol snapshot carries no version field, so nothing about our
   version identity reaches peers through it.

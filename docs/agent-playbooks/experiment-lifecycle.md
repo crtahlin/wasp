@@ -1,7 +1,7 @@
 # Experiment lifecycle
 
 Every feature, optimization, and fork-local fix follows this path. There are no
-shortcuts for small changes — a small change that skips the spec is how the
+shortcuts for small changes, a small change that skips the spec is how the
 repository stops being useful to anyone but its author.
 
 ## 1. Issue
@@ -12,7 +12,7 @@ rather than "someone's idea once".
 
 Required labels: one **type** (`experiment`, `optimization`, `fix`, `docs`,
 `chore`) and one **priority** (`p0`, `p1`, `p2`). Add `area/*` and `source/*`
-where they apply. Verify they actually stuck — `--label` on `gh issue create`
+where they apply. Verify they actually stuck, `--label` on `gh issue create`
 silently drops labels that do not exist yet:
 
 ```bash
@@ -39,16 +39,16 @@ built yet.
 
 | Section | Contents |
 |---|---|
-| Problem | What is wrong today, with evidence — logs, measurements, upstream issue links |
+| Problem | What is wrong today, with evidence, logs, measurements, upstream issue links |
 | Hypothesis | What you believe is happening and why the proposed change addresses it |
 | Design | What changes, which packages, which interfaces |
 | Protocol impact | Explicitly: does this touch the frozen surface? If no, say why not. If yes, what breaks and for whom |
 | Measurement | How the effect will be demonstrated; what a negative result would look like |
 | Rollout and rollback | How an operator turns it on, and how they get back to stock behaviour |
 | Upstream portability | What Ethersphere would need in order to adopt this. This is what makes the work reusable |
-| Configuration | If the change tunes a constant: the flag name, its default (the current value), and what raising **and lowering** it costs — including what it costs *other nodes*, where that applies. See rule 8 in `AGENTS.md` |
+| Configuration | If the change tunes a constant: the flag name, its default (the current value), and what raising **and lowering** it costs, including what it costs *other nodes*, where that applies. See rule 8 in `AGENTS.md` |
 
-`measurement.md` and `results.md` join it later — `measurement.md` when the
+`measurement.md` and `results.md` join it later, `measurement.md` when the
 method is fixed, `results.md` once the change has run on a real node.
 
 ## 3. Branch
@@ -76,7 +76,7 @@ make format && make build && make test && make lint && make protocol-freeze
 wire-surface change is something you decided to make, rather than something a
 red check tells you about after the fact.
 
-Upstream's conventions apply in full — `package foo_test` tests, `t.Parallel()`
+Upstream's conventions apply in full, `package foo_test` tests, `t.Parallel()`
 only where safe, errors wrapped with `%w`, no casual `go.mod` changes. See the
 upstream half of `AGENTS.md`, plus `CODING.md` and `CODINGSTYLE.md`.
 
@@ -98,7 +98,7 @@ gh pr create --repo crtahlin/wasp --base main \
 ```
 
 The title is linted as a conventional commit. The template's checklist includes
-the protocol-compatibility question — answer it honestly rather than ticking it.
+the protocol-compatibility question, answer it honestly rather than ticking it.
 
 ## 6. Merge, then record
 
@@ -118,7 +118,7 @@ git tag -a "exp-<slug>" -m "<one line: what this experiment does>"
 git push origin "exp-<slug>"
 ```
 
-The `exp-*` tag is the durability backstop — it survives even if the branch
+The `exp-*` tag is the durability backstop, it survives even if the branch
 pointer is ever lost, and `scripts/export-patch.sh` resolves experiments through
 it. It can never be mistaken for a release tag: the Makefile matches `v[0-9]*`
 and experiment tags contain no slash.
@@ -142,7 +142,7 @@ a node does compared with Bee, the pull request should already have updated
 
 Merged is not the same as proven. Deploy to the bench, confirm the node connects
 to stock peers and stays healthy, and write `results.md`. See
-`docs/agent-playbooks/test-bench.md`. A negative result is a genuine outcome —
+`docs/agent-playbooks/test-bench.md`. A negative result is a genuine outcome -
 record it and say so in the ledger rather than quietly abandoning the branch.
 
 ## Extracting an experiment for upstream

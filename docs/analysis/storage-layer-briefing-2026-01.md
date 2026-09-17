@@ -105,7 +105,7 @@ APFS, Go 1.26.4.
 
 Corpus of 67 GB, which exceeds RAM, so reads reach the storage device.
 
-**Table — Sharky against direct pread, 67 GB corpus, device-bound, Apple M5 Pro NVMe**
+**Table, Sharky against direct pread, 67 GB corpus, device-bound, Apple M5 Pro NVMe**
 
 | Goroutines | Sharky (reads/s) | Direct pread (reads/s) | Ratio |
 |---|---|---|---|
@@ -128,7 +128,7 @@ overstates the benefit available on a real node.
 
 ### 3.2 Physical-order reads
 
-**Table — Bin-order against physical-order reads, 67 GB corpus, 64 readers, NVMe**
+**Table, Bin-order against physical-order reads, 67 GB corpus, 64 readers, NVMe**
 
 | Fraction of slots read | Reads | Unsorted (reads/s) | Sorted (reads/s) | Ratio |
 |---|---|---|---|---|
@@ -138,7 +138,7 @@ overstates the benefit available on a real node.
 
 ### 3.3 LevelDB block cache size
 
-**Table — LevelDB block cache sweep, 4.19M retrievalIdx entries, 32 readers, NVMe**
+**Table, LevelDB block cache sweep, 4.19M retrievalIdx entries, 32 readers, NVMe**
 
 | Block cache | Lookups/s | Ratio to 32 MB |
 |---|---|---|
@@ -166,11 +166,11 @@ BenchmarkTransformedAddressCAC-15    26119 ns/op   5924 B/op  194 allocs/op
 
 Recorded so the same estimates are not repeated.
 
-**Table — Pre-measurement estimates against measured results, storage layer**
+**Table, Pre-measurement estimates against measured results, storage layer**
 
 | Claim | Estimated | Measured | Status |
 |---|---|---|---|
-| BMT transform cost per chunk | ~40 µs | 26 µs | Confirmed, correct magnitude |
+| BMT transform cost per chunk | ~40 us | 26 us | Confirmed, correct magnitude |
 | `retrievalIdx` size on disk | ~220 MB | 213 MB | Confirmed |
 | Ordered reads, SSD | 1.2-1.5x | 1.11-1.25x | Confirmed at lower bound |
 | Sharky concurrency change | 3-5x | 1.8x idle, 2.3x under write load | Overstated |

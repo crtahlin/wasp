@@ -96,7 +96,7 @@ Then:
 Accounting limits hypothesis 1. Without SWAP, the sustained rate one provider can
 give one requester is about its refresh rate divided by the chunk price. At the
 highest price, a chunk at proximity 0 (`pkg/pricer/pricer.go:35`), that is:
-- about 4,500,000 / 320,000 ≈ 14 chunks per second to a full node;
+- about 4,500,000 / 320,000 about 14 chunks per second to a full node;
 - about 1.4 to a light node (`pkg/node/node.go:230-232`).
 
 Chunks closer to the provider cost less. Beyond this rate, `PrepareCredit` reports an

@@ -20,7 +20,7 @@ their defaults:
 Stock goleveldb gives four files of headroom between compaction starting and
 writes slowing, and eight before writes stop. At 8, compaction does not begin
 until the exact point writes start being throttled, leaving **four files instead
-of eight** before writes stop entirely. The half removed is the early half — the
+of eight** before writes stop entirely. The half removed is the early half, the
 part that lets compaction get ahead before back-pressure begins.
 
 A second default compounds it: `db-disable-seeks-compaction` defaults to `true`
@@ -41,10 +41,10 @@ error or the database closing. **There is no timeout.**
 ### It is not a deadlock, and that changes the goal
 
 There is no lock cycle. It is an unbounded wait on compaction. The symptom is
-indistinguishable — writes stop, the node stops working, nothing recovers — so
+indistinguishable (writes stop, the node stops working, nothing recovers) so
 the original operational report described what was seen accurately. But the
 distinction determines what any fix can claim, and the honest claim is *raises
-the margin*, not *removes the failure mode*. The pause path at L0 ≥ 12 exists at
+the margin*, not *removes the failure mode*. The pause path at L0 >= 12 exists at
 any trigger value.
 
 ### There is no documented rationale to overturn
@@ -65,7 +65,7 @@ than goleveldb expects, into a window that ends four files later at a hard block
 If that is right, returning the trigger to 4 should keep L0 depth well below the
 pause threshold under the same load, and the node should not stall.
 
-If it is wrong — if L0 depth still reaches 12 with the trigger at 4 — then the
+If it is wrong (if L0 depth still reaches 12 with the trigger at 4) then the
 binding constraint is compaction throughput itself, not when it starts, and the
 answer lies with the load rather than the threshold: [#23](https://github.com/crtahlin/wasp/issues/23)
 (pause pullsync during sampling) and [#29](https://github.com/crtahlin/wasp/issues/29)
@@ -79,7 +79,7 @@ restoring a consistent 4/8/12 triple.
 **Deliberately not** raising `WriteL0SlowdownTrigger` and `WriteL0PauseTrigger`
 to, say, 16/24 while keeping the trigger at 8. That would preserve the
 (undocumented) intent of fewer, larger compactions while restoring headroom, and
-it is the obvious alternative — but it invents a threshold triple nobody has
+it is the obvious alternative, but it invents a threshold triple nobody has
 tested, and more L0 files means more read amplification on a node whose sampling
 path is read-heavy. Returning to the configuration goleveldb is tuned for is the
 conservative move. If measurement shows the reverted trigger costs too much write
@@ -106,7 +106,7 @@ infer it from symptoms.
 1. Instrument L0 file count. goleveldb exposes it through
    `db.GetProperty("leveldb.num-files-at-level0")`; expose it as a metric from
    `pkg/storage/leveldbstore` so both arms are directly comparable.
-2. Sustained write load against a large reserve on bench-1 — pullsync ingest with
+2. Sustained write load against a large reserve on bench-1, pullsync ingest with
    sampling running concurrently, which is the combination the original report
    came from.
 3. Record, for each arm: peak L0 depth, time spent at or above the slowdown
@@ -123,7 +123,7 @@ constant. It should be reported that way rather than as a failed experiment.
 **The control is the current build**, and it matters more than the treatment: if
 the current setting cannot be driven to a stall on the bench, then this
 experiment has no signal and the whole issue rests on an unreproduced field
-report — which is worth knowing before writing code.
+report, which is worth knowing before writing code.
 
 **Compaction cost is not a side note.** Reverting is not free: more frequent
 compaction means more write amplification. Total compaction bytes is a required
@@ -133,7 +133,7 @@ on a node that is already disk-constrained is not obviously a win.
 ## Rollout and rollback
 
 A single constant in `pkg/storer/storer.go`, applied at store open. No migration,
-no persisted state, no format change — an existing database opens identically
+no persisted state, no format change, an existing database opens identically
 either way. Rollback is reverting the commit and restarting.
 
 It is deliberately not exposed as a flag. Per rule 8, expose what measurably
@@ -150,7 +150,7 @@ documented behaviour rather than anything wasp-specific. What Ethersphere would
 need is exactly what the measurement section produces: L0 depth traces for both
 arms, and the compaction-cost figure showing what the revert costs.
 
-The instrumentation is separable and worth offering regardless of the outcome —
+The instrumentation is separable and worth offering regardless of the outcome -
 L0 depth is not currently visible from bee at all, which is part of why this was
 diagnosed operationally rather than measured.
 

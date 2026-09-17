@@ -1,7 +1,7 @@
 # Changelog
 
 Changes this fork makes to upstream Bee. Upstream's own changes are absorbed as
-single `chore(upstream)` entries — see `.upstream-base` for the release this
+single `chore(upstream)` entries, see `.upstream-base` for the release this
 build derives from, and upstream's release notes for what it contains.
 
 ## [0.1.3](https://github.com/crtahlin/wasp/releases/tag/v0.1.3) - 2026-09-01

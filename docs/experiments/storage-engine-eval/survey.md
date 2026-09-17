@@ -1,6 +1,6 @@
 # Is there a database more suitable than Pebble for the index store?
 
-Issue: [#185](https://github.com/crtahlin/wasp/issues/185) · Related: [#15](https://github.com/crtahlin/wasp/issues/15)
+Issue: [#185](https://github.com/crtahlin/wasp/issues/185) - Related: [#15](https://github.com/crtahlin/wasp/issues/15)
 (Pebble evaluation), [#114](https://github.com/crtahlin/wasp/issues/114)
 (goleveldb race), [#176](https://github.com/crtahlin/wasp/issues/176) (write stall)
 
@@ -26,9 +26,9 @@ the release cross-compiles to linux, windows and darwin across amd64, 386, arm64
 and armv7. **The engine must be pure Go.** This removes, up front, the databases
 usually reached for as "better":
 
-- **RocksDB** (and the `gorocksdb`/`grocksdb` bindings) — CGO.
-- **LMDB** — CGO.
-- **SQLite-based** stores (including most "embedded SQL" options) — CGO, unless
+- **RocksDB** (and the `gorocksdb`/`grocksdb` bindings), CGO.
+- **LMDB**: CGO.
+- **SQLite-based** stores (including most "embedded SQL" options), CGO, unless
   using a pure-Go SQLite transpile whose performance and maturity do not suit a
   storage-engine hot path.
 
@@ -73,7 +73,7 @@ against the curated `awesome-go-storage` list, August 2026):
 | buntdb | in-memory + AOF | Rejected: in-memory model, not for a tens-of-GB reserve. |
 | rosedb, LotusDB, nutsdb | young LSM / hybrid | Rejected for now: not proven at this scale, and each would need a store adapter written from scratch. Betting a bench machine and a new adapter on unproven code is the wrong risk. |
 
-### Pebble — the primary candidate
+### Pebble: the primary candidate
 
 Actively maintained (it is CockroachDB's production storage engine), pure Go, an
 LSM that mirrors RocksDB's structure. It already has a conformant `pebblestore`
@@ -82,28 +82,28 @@ goleveldb does, so the build cost is low: parity work (metrics, options, the
 write-stall health signal), not a new store.
 
 The #15 microbenchmarks are the reason to test it on a real node rather than
-adopt or reject it now: much faster on writes (5–8x on sequential and batched),
-but slower on reads (1.16–3.47x) and 1.19x slower on prefix iteration. Two of
+adopt or reject it now: much faster on writes (5-8x on sequential and batched),
+but slower on reads (1.16-3.47x) and 1.19x slower on prefix iteration. Two of
 those are exactly the index store's hot paths, and microbenchmarks on a laptop do
-not capture compaction behaviour under a filling reserve — which is the setting
+not capture compaction behaviour under a filling reserve, which is the setting
 where goleveldb actually hurts. That is what the real-reserve A/B is for.
 
-### Badger — rejected for this workload
+### Badger: rejected for this workload
 
 Badger's distinguishing design is key/value separation (WiscKey): values live in
 a separate log, keys in the LSM. That reduces write amplification **for large
 values**, by keeping big payloads out of the tree. The index store's values are
-small — the large payloads are already elsewhere, in sharky. So Badger's one real
+small, the large payloads are already elsewhere, in sharky. So Badger's one real
 advantage does not apply here, while its costs do: value-log garbage collection,
 a larger memory footprint, and more operational moving parts. It would also need
 a store adapter written and made to pass the conformance suite. Rejected: it does
 not fit the shape of this workload, and there is no evidence it would beat Pebble
 on it to justify the build cost.
 
-### bbolt — the read-optimised wildcard, deferred
+### bbolt: the read-optimised wildcard, deferred
 
 bbolt is a B+tree, very actively maintained (etcd depends on it), with excellent
-read and ordered-iteration performance — the very axes Pebble lost on in #15. But
+read and ordered-iteration performance, the very axes Pebble lost on in #15. But
 it allows only one read-write transaction at a time, so it serialises the whole
 concurrent write path, and a B+tree suffers heavy random-write amplification. For
 a write-heavy sync workload with many concurrent writers, that is very likely
@@ -116,7 +116,7 @@ needs a from-scratch adapter and the prior is against it. Not the primary.
 **Test Pebble against goleveldb under a real reserve. Keep goleveldb as the
 control and the default.** The honest finding of the survey is that the pure-Go
 constraint, plus a write-heavy workload that also needs prefix iteration and
-concurrent writers, leaves Pebble as the best-available maintained alternative —
+concurrent writers, leaves Pebble as the best-available maintained alternative -
 and the only one with an existing conformant adapter. The alternatives were not
 dismissed by assumption:
 
@@ -126,7 +126,7 @@ dismissed by assumption:
 
 So this is not "Pebble by default"; it is "Pebble because the survey eliminated
 the alternatives on their merits." If the A/B confirms Pebble is not better under
-a real reserve, the conclusion is not "try the next database" — it is that the
+a real reserve, the conclusion is not "try the next database", it is that the
 pure-Go field has no clearly better option today, and the effort should go to the
 goleveldb-contention work ([#23](https://github.com/crtahlin/wasp/issues/23),
 [#28](https://github.com/crtahlin/wasp/issues/28),
@@ -134,9 +134,9 @@ goleveldb-contention work ([#23](https://github.com/crtahlin/wasp/issues/23),
 
 ## Shortlist for the A/B
 
-1. **goleveldb** — control, current default, bench-1's existing reserve.
-2. **Pebble** — primary treatment, on bench-2 with a fresh reserve.
-3. *(optional, deferred)* **bbolt** — a read-optimised third arm, only if the
+1. **goleveldb**, control, current default, bench-1's existing reserve.
+2. **Pebble**, primary treatment, on bench-2 with a fresh reserve.
+3. *(optional, deferred)* **bbolt**, a read-optimised third arm, only if the
    from-scratch adapter is judged worth it after the first comparison.
 
 ## What would change this recommendation
@@ -144,7 +144,7 @@ goleveldb-contention work ([#23](https://github.com/crtahlin/wasp/issues/23),
 - A pure-Go LSM reaching production maturity and adoption (rosedb, LotusDB, or a
   newcomer) with evidence on a write-heavy, small-value, prefix-scan workload.
 - Evidence that Badger's non-value-log path is competitive for small values.
-- A decision to relax `CGO_ENABLED=0`, which would reopen RocksDB and LMDB — but
+- A decision to relax `CGO_ENABLED=0`, which would reopen RocksDB and LMDB, but
   that trades the static build and five-platform cross-compilation for it, which
   is a much larger change than swapping a pure-Go engine.
 

@@ -1,6 +1,6 @@
-# Results — Pebble evaluated against goleveldb
+# Results: Pebble evaluated against goleveldb
 
-Issue: [#15](https://github.com/crtahlin/wasp/issues/15) ·
+Issue: [#15](https://github.com/crtahlin/wasp/issues/15) -
 Spec: [`spec.md`](spec.md)
 
 ## Verdict: do not adopt Pebble now, and keep the evidence
@@ -21,7 +21,7 @@ That is a genuine trade rather than a dismissal: an engine that writes several
 times faster and reads modestly slower may well suit a node that ingests
 continuously and reads its reserve rarely. Deciding that needs a workload shaped
 like a node's, which is the third item under "what would change the verdict"
-below — not a microbenchmark.
+below, not a microbenchmark.
 
 ## Conformance: passes, after two adaptations in the store
 
@@ -53,7 +53,7 @@ way they were wrong is the useful part.
 Apple M5 Pro, `-benchtime 200ms -count 3`, median of three. Both engines on
 disk, a fresh store per sub-benchmark, 100,000-entry datasets.
 
-**Table — Store operations, goleveldb against Pebble, like for like**
+**Table, Store operations, goleveldb against Pebble, like for like**
 
 | operation | goleveldb ns | Pebble ns | verdict |
 |---|---|---|---|
@@ -63,7 +63,7 @@ disk, a fresh store per sub-benchmark, 100,000-entry datasets.
 | `IterateSequential` (per entry) | 19.0 ms | 22.7 ms | 1.19x slower |
 | `WriteInFixedSizeBatches` | 1,110 | 1,789 | 1.61x slower |
 | `ReadSequential` | 1,533 | 5,312 | 3.47x slower |
-| `ReadRandomMissing` | 232 | 6,249 | *see below — measures nothing useful* |
+| `ReadRandomMissing` | 232 | 6,249 | *see below, measures nothing useful* |
 
 Pebble is substantially faster at writing and slower at reading. That is a
 coherent result for an LSM tuned differently, and unlike the first attempt it is
@@ -101,13 +101,13 @@ overwriting *the same key* as distinct writes. Nothing failed; the number simply
 meant something other than its name.
 
 **The two engines were not both on disk.** `leveldbstore`'s benchmark store was
-built with `New("", ...)` — goleveldb's in-memory backend — while
+built with `New("", ...)` (goleveldb's in-memory backend) while
 `pebblestore`'s used `b.TempDir()`. Every published figure compared memory
 against disk. On the corrected harness the same leveldb `ReadRandom` moves from
 226 ns in memory to 9,198 ns on disk: a 40x difference, which was the dominant
 term in the original table.
 
-Both are fixed — the first in [#159](https://github.com/crtahlin/wasp/pull/159),
+Both are fixed, the first in [#159](https://github.com/crtahlin/wasp/pull/159),
 the second here.
 
 The earlier conclusion that the level-0 file count explained the missing-key gap
@@ -121,8 +121,8 @@ Both affect `leveldbstore` exactly as much as `pebblestore`. Neither was
 introduced here; both were found by trying to use the harness for its purpose.
 
 **1. Seven benchmarks fail outright on Go 1.26.** `B.Loop called with timer
-stopped`. The harness calls `b.Loop()` twice in one benchmark — once in
-`populate` as setup, once in the measured phase — which was valid under the
+stopped`. The harness calls `b.Loop()` twice in one benchmark, once in
+`populate` as setup, once in the measured phase, which was valid under the
 `for i := 0; i < b.N; i++` idiom and is not under `b.Loop()`. Broken:
 `ReadSequential`, `ReadReverse`, `ReadRedHot`, `DeleteRandom`,
 `DeleteSequential`, `WriteRandom`, `DeleteInBatches`,
@@ -153,17 +153,17 @@ Everything the spec said it would not, and one thing more.
 
 Importing Pebble promotes it to a direct requirement and adds eleven modules to
 `go.mod`'s indirect list that nothing in the build previously needed. It is in
-`go.sum` already, so no new source becomes reachable — but reachable and built
+`go.sum` already, so no new source becomes reachable, but reachable and built
 are different, and the spec's first draft got that wrong.
 
 ## What would change the verdict
 
 In order of what it would cost:
 
-1. **Done** — the harness is fixed ([#146](https://github.com/crtahlin/wasp/issues/146),
+1. **Done**, the harness is fixed ([#146](https://github.com/crtahlin/wasp/issues/146),
    [#159](https://github.com/crtahlin/wasp/pull/159)) and the numbers above are
    the result.
-2. **Done** — prefix iteration now reports per-entry cost, and Pebble is 1.19x
+2. **Done**, prefix iteration now reports per-entry cost, and Pebble is 1.19x
    slower. That is the half of the criterion that decides this.
 3. **Run both engines under a real reserve**, which is the only setting where
    compaction behaviour appears at all.

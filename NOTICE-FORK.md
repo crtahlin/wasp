@@ -14,7 +14,7 @@ Under clause 3 of that licence, the names of the copyright holder and its
 contributors may not be used to endorse or promote this derivative work. This
 project therefore makes no claim of affiliation with, endorsement by, or support
 from the Swarm Foundation, the Ethersphere organisation, or any Bee contributor.
-Any such impression is unintended — please open an issue if something here reads
+Any such impression is unintended, please open an issue if something here reads
 that way.
 
 ## Copyright headers
@@ -26,7 +26,7 @@ the `goheader` linter, configured in [`.golangci.yml`](.golangci.yml).
 
 ## What has been changed
 
-The authoritative answer is the git history — every change this fork makes to
+The authoritative answer is the git history, every change this fork makes to
 upstream Bee is one merge commit on `main`:
 
 ```bash

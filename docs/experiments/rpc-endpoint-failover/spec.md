@@ -20,7 +20,7 @@ When the endpoint fails at startup, the node refuses to start; the log tells the
 operator to reconfigure and restart. When it fails at runtime the outcome is
 worse, because it is delayed and then terminal:
 
-1. Chain calls fail. The node stays up but degrades — batch events stop syncing
+1. Chain calls fail. The node stays up but degrades, batch events stop syncing
    so stamp validity drifts from consensus, the redistribution agent cannot play
    its rounds, chequebook operations fail.
 2. After `postageSyncingStallingTimeout` (10 minutes, `pkg/node/node.go:208`)
@@ -46,7 +46,7 @@ node ride out an outage of any single provider with no operator action and no
 change to what the node computes.
 
 If it is wrong, the failure will be that endpoints disagree in ways bee cannot
-tolerate — most plausibly head-block regression on failover being read as a
+tolerate, most plausibly head-block regression on failover being read as a
 reorg by the postage listener. That is the risk the design below spends most of
 its care on, and a negative result would look like the listener re-processing or
 stalling after a switch. That outcome would still be worth knowing, and would
@@ -61,12 +61,12 @@ exactly where the single backend sits today, so nothing downstream changes.
 
 ```
 InitChain
-  └─ for each endpoint: rpc.DialOptions → ethclient → wrapped.NewBackend
-       └─ failover.New([]transaction.Backend, logger) → transaction.Backend
+  +- for each endpoint: rpc.DialOptions -> ethclient -> wrapped.NewBackend
+       +- failover.New([]transaction.Backend, logger) -> transaction.Backend
 ```
 
 **Selection is priority order, not round-robin.** Operators generally have a
-preferred provider — paid, closer, higher rate limit — and a worse standby.
+preferred provider (paid, closer, higher rate limit) and a worse standby.
 Round-robin would send half the traffic to the worse one permanently and would
 double the exposure to any one provider's inconsistency.
 
@@ -137,7 +137,7 @@ On bench-1, with a primary and a secondary configured.
 1. Confirm the node is healthy and the postage listener is advancing.
 2. Block the primary at the firewall.
 3. Assert: chain calls keep succeeding, the listener keeps advancing, a switch is
-   logged, and **the node is still running after 15 minutes** — past the
+   logged, and **the node is still running after 15 minutes**, past the
    ten-minute stall timeout that currently kills it.
 4. Restore the primary; confirm the node returns to it and does not flap.
 
@@ -151,7 +151,7 @@ observe failure.
 switch because the secondary was behind. That would mean `maxBlockLag` is doing
 its job badly, or that bee's event handling is less tolerant of a backwards step
 than assumed, and it should be reported as a constraint on how far apart
-endpoints may be — not as a reason to drop failover.
+endpoints may be, not as a reason to drop failover.
 
 ## Rollout and rollback
 
@@ -165,7 +165,7 @@ restores the single-string option.
 
 Good. The change is contained in one new package plus config plumbing, it does
 not touch consensus or protocol code, and it keeps the existing behaviour as the
-default. That is the shape Ethersphere is most likely to accept — it changes
+default. That is the shape Ethersphere is most likely to accept, it changes
 nothing for an operator who does not opt in.
 
 The failover package has no wasp-specific dependencies and would apply to
@@ -177,7 +177,7 @@ generates the series against current upstream.
 | | |
 |---|---|
 | flag | `blockchain-rpc-endpoint` (now repeatable) |
-| default | unchanged — whatever single endpoint is configured today; no fallback unless a second is listed |
+| default | unchanged, whatever single endpoint is configured today; no fallback unless a second is listed |
 | adding endpoints costs | more startup validation calls; a chance of serving reads from a slightly stale secondary; more provider accounts to hold |
 | listing none costs | today's behaviour: a single point of failure that shuts the node down after ten minutes |
 | costs other nodes | nothing. This is the node's own upstream connection and is not peer-facing |
