@@ -197,16 +197,50 @@ requests keeps the benefit.
   fixed method rather than outside it. Both existing measurements are
   exploratory, and this is the one that should not be.
 
-## What this does not fix
+## What this does not fix, and a correction
 
-**The download still gives up.** In the expired-content case
-([#313](https://github.com/crtahlin/wasp/issues/313)) the requester asked the
-provider for 45 chunks, was served 43, asked ordinary peers for chunks that no
-longer exist, and abandoned the download with nothing transferred. Credit was
-never the limit there: the requester's balance moved 40,000 units against an
-18,000,000 window and `prepareCredit` refused nothing. A larger threshold lets a
-provider serve more; it does not make a requester ask it for the rest instead of
-giving up. For availability this is necessary and clearly not sufficient.
+**Correcting an earlier draft of this section.** It said that in the
+expired-content case ([#313](https://github.com/crtahlin/wasp/issues/313))
+"credit was never the limit", on the evidence of one diagnostic download whose
+balance moved 40,000 units against an 18,000,000 window. That reading was wrong.
+The run it rested on was spaced far enough apart for debt to settle between
+requests, so the condition under test was absent from the very measurement used
+to rule it out. Credit is the trigger, and
+[#324](https://github.com/crtahlin/wasp/issues/324) is where that was
+established: `retrieval.go` consumed the preferred candidate before
+`prepareCredit` ran, so a refusal lasting `overDraftRefresh`, 600 ms, removed the
+only holder of a chunk permanently. The chunk then fell to peers that never had
+it, spent its 32 origin retries and returned `storage.ErrNotFound`.
+
+**The fix for that is necessary and it is not sufficient, which is this
+document's case.** Measured on the bench with the #324 fix in place, three runs,
+sole-source content at the shipped lookahead buffer, that is with no header
+overrides as a real client sends:
+
+| Runs | Bytes of 4,194,304 | Time | Rate | Overdrafts |
+|---|---|---|---|---|
+| 3 of 3 | 1,310,720, so 31.2% | 1.34 to 1.42 s | 924,411 to 976,922 B/s | 311 to 429 |
+
+All three truncate, with `curl` exit 18. The same build with
+`Swarm-Lookahead-Buffer-Size: 0`, which turns the prefetch off and puts one
+chunk in flight at a time, completes six runs of six at about 264,000 B/s.
+
+So the prefetch is what breaks it, through credit. With many chunks in flight at
+once, many overdraft at once; the #324 fix keeps the peer but tries ordinary
+selection immediately rather than waiting, because waiting cost about 3x on
+content the network also holds; and for content only this peer holds, ordinary
+selection is where the chunk is lost. **Removing the permanent drop does not
+remove the overdraft.** A limit set by a credit window is not removed by
+changing which peer is asked next, and a per-peer window large enough that
+provider requests do not overdraft at all is the direct answer to the
+measurement above.
+
+That makes the two changes complementary rather than alternatives, and it is
+also a measurable prediction this proposal can be judged against: with the
+per-peer raise in place, the sole-source download at the shipped buffer should
+complete, and `bee_retrieval_preferred_overdrafts` should fall towards zero. If
+the overdraft count does not fall, the threshold was not the constraint and the
+rest of this document does not follow.
 
 ## The alternative, and why it is second
 
