@@ -1,15 +1,15 @@
 # Make the index-store engine selectable, and A/B Pebble under a real reserve
 
-Issue: [#185](https://github.com/crtahlin/wasp/issues/185) - Survey:
-[`survey.md`](survey.md) - Related: [#15](https://github.com/crtahlin/wasp/issues/15)
+Issue: [#185](https://github.com/crtahlin/wasp/issues/185), Survey:
+[`survey.md`](survey.md), Related: [#15](https://github.com/crtahlin/wasp/issues/15)
 
 ## What this builds
 
 An operator-selectable index-store engine, either goleveldb (the default) or
-Pebble, and
-the observability parity needed to compare them fairly on real nodes. goleveldb
-stays the default and only value; Pebble is opt-in. Per rule 8 this is experiment
-surface, not a migration: no engine becomes the default without the A/B verdict.
+Pebble, and the observability parity needed to compare them fairly on real
+nodes. goleveldb stays the default and only value; Pebble is opt-in. Per rule 8
+this is experiment surface, not a migration: no engine becomes the default
+without the A/B verdict.
 
 The survey (`survey.md`) settled *which* alternative to test and why. This spec is
 the *how*.

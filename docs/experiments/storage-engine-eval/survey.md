@@ -1,6 +1,6 @@
 # Is there a database more suitable than Pebble for the index store?
 
-Issue: [#185](https://github.com/crtahlin/wasp/issues/185) - Related: [#15](https://github.com/crtahlin/wasp/issues/15)
+Issue: [#185](https://github.com/crtahlin/wasp/issues/185), Related: [#15](https://github.com/crtahlin/wasp/issues/15)
 (Pebble evaluation), [#114](https://github.com/crtahlin/wasp/issues/114)
 (goleveldb race), [#176](https://github.com/crtahlin/wasp/issues/176) (write stall)
 
@@ -126,7 +126,7 @@ dismissed by assumption:
 
 So this is not "Pebble by default"; it is "Pebble because the survey eliminated
 the alternatives on their merits." If the A/B confirms Pebble is not better under
-a real reserve, the conclusion is not "try the next database", it is that the
+a real reserve, the conclusion is not "try the next database"; it is that the
 pure-Go field has no clearly better option today, and the effort should go to the
 goleveldb-contention work ([#23](https://github.com/crtahlin/wasp/issues/23),
 [#28](https://github.com/crtahlin/wasp/issues/28),

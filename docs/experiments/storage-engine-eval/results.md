@@ -1,7 +1,7 @@
 # Results: Pebble vs goleveldb under a real reserve
 
-Issue: [#185](https://github.com/crtahlin/wasp/issues/185) - Spec:
-[`spec.md`](spec.md) - Survey: [`survey.md`](survey.md) - Supersedes the
+Issue: [#185](https://github.com/crtahlin/wasp/issues/185), Spec:
+[`spec.md`](spec.md), Survey: [`survey.md`](survey.md). Supersedes the
 microbenchmark verdict in [#15](https://github.com/crtahlin/wasp/issues/15) once
 this completes.
 

@@ -21,7 +21,7 @@ starts by measuring.
 storage radius, so the chunks below radius are read and discarded. The question
 is how many that is.
 
-**Table 1, Reserve composition on bench-1, from `/status` on 2026-08-26**
+**Table 1: Reserve composition on bench-1, from `/status` on 2026-08-26**
 
 | Quantity | Chunks | Share of reserve |
 |---|---|---|
@@ -107,7 +107,7 @@ why the cheap version of this issue was not done.
 
 Split the loop into two, and give each the cadence its job needs.
 
-1. **Count, every wake-up.** `countChunksWithinRadius()` already exists, it was
+1. **Count, every wake-up.** `countChunksWithinRadius()` already exists: it was
    added in [#127](https://github.com/crtahlin/wasp/pull/127) to give
    `reserveSizeWithinRadius` one definition, and it iterates from the storage
    radius. The wake-up path uses it and gets the 10.3% for free, because it no

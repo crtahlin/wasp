@@ -75,7 +75,7 @@ a shape the code no longer has is worse than no benchmark.
 
 ## Reproduced at v2.8.1
 
-**Table, Micro-benchmarks re-run on this fork's v2.8.1 base, Apple M5 Pro, 3s x 3**
+**Table: Micro-benchmarks re-run on this fork's v2.8.1 base, Apple M5 Pro, 3s x 3**
 
 | Benchmark | Briefing (`3e157a04`) | Measured at `v2.8.1` |
 |---|---|---|

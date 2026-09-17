@@ -12,7 +12,7 @@ if _, err = l.sink.Write(buf); err != nil {
 ```
 
 It is a bare, unbounded, synchronous write. The production sink is
-`cmd.OutOrStdout()` (`os.Stdout`) set once at `cmd/bee/cmd/cmd.go:540`, which
+`cmd.OutOrStdout()` (`os.Stdout`), set once at `cmd/bee/cmd/cmd.go:540`, which
 under systemd, Docker, or a desktop launcher is a pipe or a socket. When the
 consumer at the far end stops reading, the buffer fills and `write(2)` never
 returns.
@@ -36,7 +36,7 @@ Seven dial goroutines were stuck there, and kademlia's manage loop was blocked i
 peers, had made zero dial attempts, and reported `/health` `ok` throughout. Only
 a restart recovered it.
 
-**Table 1, bench readings from the affected node, three samples 20s apart**
+**Table 1: bench readings from the affected node, three samples 20s apart**
 
 | reading | value |
 |---|---|

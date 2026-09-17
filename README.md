@@ -5,7 +5,7 @@
 An experimental downstream distribution of [Ethereum Swarm
 Bee](https://github.com/ethersphere/bee).
 
-> ### Read this before running it
+> ### WARNING: read this before running it
 >
 > This is **not** the Bee client. It is a personal fork carrying changes that
 > the upstream project has not adopted, has declined, or has not evaluated.
@@ -28,7 +28,7 @@ Bee](https://github.com/ethersphere/bee).
 ## What it is
 
 Upstream Bee is the reference implementation, and it is conservative for good
-reasons, it is the client most of the network runs. That conservatism means
+reasons: it is the client most of the network runs. That conservatism means
 some optimizations and fixes are not worth upstream's risk budget, even when
 they are worth an individual operator's.
 
