@@ -197,6 +197,8 @@ type Options struct {
 	Resync                          bool
 	RetrievalCaching                bool
 	ProvidersEnable                 bool
+	ProvidersPaymentThreshold       string
+	ProvidersCreditBudget           string
 	SkipPostageSnapshot             bool
 	StakingContractAddress          string
 	StatestoreCacheCapacity         uint64
@@ -1237,6 +1239,20 @@ func NewBee(
 	}
 	b.accountingCloser = acc
 
+	// wasp #327: a larger payment threshold announced to a peer downloading
+	// content this node announced. Off unless both settings are given, and
+	// useless without providers-enable, which is also off by default.
+	providerThreshold, providerBudget, err := providerCreditSettings(o, paymentThreshold)
+	if err != nil {
+		return nil, err
+	}
+	if providerThreshold.Sign() > 0 {
+		acc.SetProviderCredit(providerThreshold, providerBudget)
+		if !o.ProvidersEnable {
+			logger.Warning("providers-payment-threshold is set but providers-enable is off, so no peer can ever be granted it")
+		}
+	}
+
 	pseudosettleService := pseudosettle.New(p2ps, logger, stateStore, acc, new(big.Int).Set(enforcedRefreshRate), big.NewInt(lightRefreshRate), p2ps)
 	if err = p2ps.AddProtocol(pseudosettleService.Protocol()); err != nil {
 		return nil, fmt.Errorf("pseudosettle service: %w", err)
@@ -1347,6 +1363,9 @@ func NewBee(
 	b.retrievalCloser = retrieval
 	localStore.SetRetrievalService(retrieval)
 	retrieval.SetProvidersEnabled(o.ProvidersEnable)
+	if providerThreshold.Sign() > 0 {
+		retrieval.SetProviderCreditor(acc)
+	}
 
 	statusMetricsRegistry.MustRegister(retrieval.StatusMetrics()...)
 
