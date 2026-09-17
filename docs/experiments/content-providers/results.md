@@ -593,6 +593,10 @@ more unsecured credit to every peer, not only to the peer it wants to help. That
 is the cost to the provider, and it is the reason this is not simply a setting
 to recommend.
 
+That follow-up is [per-peer-credit.md](per-peer-credit.md), which proposes
+extending the larger credit only to a peer downloading content this node
+announced, and lists what a spec for it must settle.
+
 **Raw rows**, in the order they ran. The 54,000,000 step has no third run of
 condition 3.
 
