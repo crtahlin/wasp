@@ -73,9 +73,10 @@ likewise records a skip and retries.
 
 So a chunk refused for credit and a chunk that is genuinely gone both surface as
 `storage.ErrNotFound`: the retrieval loop returns it at `retrieval.go:414` once
-the attempt budget is spent, with nothing distinguishing why the budget went. The lock-contention path at `:285` **does** log, at plain
-Debug, so a chunk delayed by lock contention is diagnosable and a chunk refused
-for credit is not. That asymmetry is the whole of this document.
+the attempt budget is spent, with nothing recording why the budget went. The
+lock-contention path at `:285` **does** log, at plain Debug, so a chunk delayed
+by lock contention is diagnosable and a chunk refused for credit is not. That
+asymmetry is the whole of this document.
 
 ## Hypothesis
 
@@ -91,11 +92,17 @@ where, from `getIncreasedExpectedDebt` (`accounting.go:256-279`),
 increasedExpectedDebt = max(-balance, 0) + reservedBalance + price + surplusBalance
 ```
 
+`balance` there is the **raw stored balance** (`accounting.go:259`), which
+`/accounting` exposes as `consumedBalance` rather than as `balance`
+(`:768-769`).
+
 Note `shadowReservedBalance` is **not** in it. The subtraction at `:306` decides
-whether `settle()` fires (`:312`); it is also subtracted at `:386`, `:429` and
-`:948-952`, and added at `:883` and `:911`. An earlier revision said "only at
-`:306`", which [overdraft-terms.md](overdraft-terms.md) already records as
-wrong.
+whether `settle()` fires (`:312`); it is also subtracted at `:386` and `:429`,
+and it feeds `peerDebt` (`:883`), `peerLatentDebt` (`:911-912`) and
+`shadowBalance`
+(`:948-952`). The field itself is incremented at `:515` and `:1238`. An earlier
+revision said "subtracted only at `:306`", which
+[overdraft-terms.md](overdraft-terms.md) already records as wrong.
 
 [overdraft-terms.md](overdraft-terms.md) measured twelve runs and established
 that **both** remaining terms move on the same timescale: the settled balance
@@ -125,6 +132,7 @@ the comparison, distinguishes them. Nothing else does.
 | settled balance (raw, = `consumedBalance`) | `/accounting`, `/balances` | aggregate only | yes, V(2) at `:364`, `:1208`, `:1309` |
 | `reservedBalance` | `/accounting` | no | never |
 | `shadowReservedBalance` | `/accounting` | no | never |
+| `surplusBalance` | `/accounting` (`accounting.go:774`) | no | never |
 | `refreshTimestampMilliseconds` | no | no | never |
 
 `/accounting` is a snapshot with no event semantics, so no sample is
@@ -160,14 +168,17 @@ Two consequences.
 **The gate itself is unmodified upstream code.** The body of `PrepareCredit`
 carries no fork change. But the **line numbers are not upstream's**: `:285`,
 `:325`, `:332-335` and `:1106` here are `273`, `313`, `320-323` and `1094` in
-`upstream/v2.8.2`, a constant offset of 12 through this function. Revision 2
+`upstream/v2.8.2`. The offset is a constant 12 at all four sites, though they
+are in two functions: the first three are in `PrepareCredit` and `:1106` is in
+`NotifyRefreshmentSent` (`:1097`). Revision 2
 gave the third of those as `321-322`, which excludes the `if` and the closing
 brace.
 
 **`paymentThreshold` is not static in this fork.** On the **granting** node,
 `provider.go:156-157` (inside `applyProviderGrant`, `:133`) raises
-`paymentThresholdForPeer`, "the threshold at which the peer is expected to pay"
-(`accounting.go:139`), and announces it. On the **requesting** node that arrives
+`paymentThresholdForPeer`, "individual payment threshold at which the peer is
+expected to pay" (`accounting.go:139`), and announces it. On the
+**requesting** node that arrives
 at `NotifyPaymentThreshold` (`accounting.go:1004-1013`), which is what actually
 writes `paymentThreshold`, the term the gate reads. So with the provider feature
 on, the term this analysis treats as fixed moves on the requester side, where
@@ -302,10 +313,22 @@ Revision 1 said this value "is the balance the gate then compares against".
 `overdraftLimit`; `currentBalance` is read only at `:312`, before the
 recomputation.
 
-The real reason to capture it is narrower and sufficient: otherwise the logged
-`settled_balance` is the **pre-settle** balance, so on exactly the calls where
-settlement ran, the line reports a debt that no longer exists. The capture is
-behaviour-neutral: `:319` already assigns with `=`, and nothing reads
+Revision 3 then gave a second reason that is also wrong: that the uncaptured
+value would be "the pre-settle balance, so the line reports a debt that no
+longer exists". **`settle()` is asynchronous.** It dispatches
+`go a.refreshFunction(...)` (`:476`) and `go a.payFunction(...)` (`:521`) and
+returns `nil` at `:527`, writing no balance. The store write happens later, in
+`NotifyRefreshmentSent` (`:1169`) or on the payment-sent path. So the re-read at
+`:319` normally returns the **same** value, and the only thing `settle()`
+changes synchronously is `shadowReservedBalance` (`:515`), which is in neither
+`settled_balance` nor `increasedExpectedDebt`.
+
+The reason that survives is weaker and still sufficient: **`settled_balance` and
+`expected_debt` should come from the same call**, so the logged terms actually
+reconcile with each other. Taking the balance from `:300` while the debt comes
+from `:319` would let a concurrently completed refreshment fall between them and
+produce a line whose own arithmetic does not close. The capture is
+behaviour-neutral, since `:319` already assigns with `=` and nothing reads
 `currentBalance` after `:312`.
 
 ## Protocol impact
@@ -323,10 +346,11 @@ surface area for something `/loggers` already controls at runtime.
 The existing control is the `all` verbosity on the `node/accounting` logger. Its
 costs, which rule 8 asks for in both directions:
 
-- **Raising it** costs this node only. Under sustained concurrent load against a
-  slow peer it can emit a line per refused request; on the bench a failing
-  download produced a few hundred over its life. It costs other nodes nothing:
-  the line is local and no peer can see it.
+- **Raising it** costs this node only. Under sustained concurrent load against
+  a slow peer it emits a line per refused request. For scale,
+  [per-peer-threshold.md](per-peer-threshold.md) records 311 to 429 refusals
+  per sole-source download at the shipped lookahead buffer. It costs other
+  nodes nothing: the line is local and no peer can see it.
 - **Leaving it low**, the default, costs the diagnosis. There is no other way to
   tell a credit refusal from a missing chunk.
 
@@ -371,8 +395,9 @@ the wrong mechanism for the right conclusion.
 
 Building `loggerV2` in `NewAccounting` removes the trap **for this line**: its
 V(2) entry exists from boot, so `SetVerbosity` clamps it to 2. It does not fix
-the other eight, which are still built per call, and two of those (`:364` and
-`:1208`) are the only log source for the settled balance. So step 1 stays
+the other eight, which are still built per call, and three of those (`:364`,
+`:1208` and `:1309`) are the only log source for the settled balance. So step 1
+stays
 required even on a build carrying this change, whenever those lines are wanted
 too.
 
@@ -418,8 +443,14 @@ the line enables, which is #343's and is reported separately.
 3. With the level below V(2), neither case emits it.
 4. `PrepareCredit` returns the same value and error in every case above. This
    makes "no behaviour change" a test rather than a claim.
-5. On a call where the settle branch at `:312` fires, the logged
-   `settled_balance` is the post-settle balance, not the pre-settle one.
+5. On a call where the settle branch at `:312` fires, `settled_balance` and
+   `expected_debt` are **mutually consistent**, that is both come from the
+   recomputation at `:319`. Assert the arithmetic, not a post-settle value:
+   `expected_debt == max(-settled_balance, 0) + reserved_balance + price +
+   surplus_balance`. An earlier draft asked for "the post-settle balance", which
+   is not deterministically satisfiable, because `settle()` only dispatches
+   goroutines and writes no balance before returning. Such a test would have
+   asserted that an injected goroutine happened to win a race.
 
 These need a harness change. Every `NewAccounting` call in `accounting_test.go`
 passes `log.Noop`, and so do the three in `provider_test.go`; the package has no
