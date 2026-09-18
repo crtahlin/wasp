@@ -176,7 +176,7 @@ a quantity the credit window does not bind.
 
 **So the pre-registered prediction is two-sided**: the candidate count rises,
 and `preferred_overdrafts` rises with it, possibly far enough to make truncation
-more likely. A result showing that closes #299 as "the set can be carried and
+more likely. A result showing that settles #299 as "the set can be carried and
 should not be, unbounded", and produces the bound as the next issue.
 
 ### One effect points the other way
