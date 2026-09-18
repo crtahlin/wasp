@@ -7,7 +7,13 @@ Issue: [#343](https://github.com/crtahlin/wasp/issues/343). Instrument:
 [overdraft-terms.md](overdraft-terms.md), which established that polling could
 not answer this.
 
-This document went through five drafts and five reviews. The measurement never
+**Why this needed an instrument.** The mechanism measured here was proposed on
+#343, then retracted on the grounds that the code forbids it, which was wrong,
+then restated as possible and unmeasured. Four designs were withdrawn before it,
+each derived by reading the code. `overdraft-terms.md` carries that history in
+full.
+
+This document went through six drafts and six reviews. The measurement never
 changed and every figure below reproduces from the raw capture. What kept
 failing was the running commentary about which draft had said what, so that
 commentary is gone: the claims that were wrong are collected once, under
@@ -79,8 +85,9 @@ against peers this node owes nothing, and all 59 of their refusals are at the
 ceiling.
 
 A zero `refresh_timestamp_ms` does not prove no refreshment was attempted: every
-pseudosettle error path passes `timestamp = 0`, so a failed one leaves the same
-value. What follows either way is that their elapsed term is pinned at the cap,
+error path in `pseudosettle`, the time-based settlement protocol, passes
+`timestamp = 0`, so a failed one leaves the same value. What follows either
+way is that their elapsed term is pinned at the cap,
 which is why they sit permanently at the ceiling.
 
 **Everything below is peer A unless stated.**
@@ -121,8 +128,8 @@ floor.
 
 In run 1 all 18 refusals landed **433 to 928 ms** after
 `refreshTimestampMilliseconds`, inside one integer second. Peer A's ceiling
-refusals begin at **+1,018 ms**, range 1,018 to 1,063 ms, which is when the
-elapsed term first reaches 1.
+refusals begin at **+1,017.8 ms**, range 1,017.8 to 1,063.1 ms, which is when
+the elapsed term first reaches 1.
 
 ## Why no refusal misses by much
 
@@ -140,13 +147,18 @@ margin = sum + price - limit  <=  price
 Measured: `max(sum - limit_in_force) = -20,000`. The sum never reaches the limit
 in force at all.
 
-**The induction holds only while two things do not happen**, neither of which
-fires here:
+The step from the gate's own quantity to `sum` drops `surplusBalance`, so it
+also assumes that term stays zero. It does here: **`surplus_balance` reads 0 in
+all 2,381 rows**. `NotifyPaymentReceived` can raise it, and this is a SWAP block
+where cheques arrive, so it is a precondition rather than a constant.
+
+**The induction holds only while two further things do not happen**, neither of
+which fires here:
 
 - `NotifyRefreshmentReceived` (`:1253-1287`) lowers the balance without lowering
   `reservedBalance`, and its comment says it may "potentially put us into debt".
   That raises the sum with no admission.
-- `NotifyPaymentThreshold` (`:1074-1080`) sets `paymentThreshold` to whatever
+- `NotifyPaymentThreshold` (`:1074-1083`) sets `paymentThreshold` to whatever
   the peer announces, which can lower the limit.
 
 Neither is a race, since both take the same lock. **`payment_threshold` reads
@@ -206,7 +218,7 @@ than delivered bytes.
 ## A sampling error corrected inside this run
 
 The harness capped **each run's** journal at 400 lines. Three runs were under
-that; the three dense runs were cut at 400 of 751 to 778, giving 1,282 lines.
+that; the three dense runs were cut at 400 of 760 to 778, giving 1,282 lines.
 Because peer A's ceiling refusals only begin past +1 s, they fell beyond the cap
 in every run, at the 706th, 689th and 662nd line of their runs. So the capped
 sample contained **zero** ceiling refusals and suggested a single universal
@@ -237,14 +249,20 @@ source of error across five reviews.
   as derived above.
 - **That reservations do not survive the step-down.** In two of three they are
   bit-identical across it.
-- **That the ceiling refusals are concurrency alone.** At the ceiling the median
-  settled balance is -13,230,000 against a median reserved balance of 4,480,000,
+- **That the ceiling refusals are concurrency alone.** At peer A's ceiling the median
+  settled balance is -13,450,000 against a median reserved balance of 4,480,000,
   so the debt carries about 75 per cent of the load.
 - **That a refreshment completed**, asserted from a recent
   `refresh_timestamp_ms`. The timestamp is written unconditionally.
 - **That #327 delivered 416, 347 and 127 chunks against 43 and 57.** Those chunk
   counts appear nowhere in the repository; 43 and 57 trace to the #313 and #324
   diagnostics, a different measurement.
+- **That overdraft-terms.md's 12,860,000 peak was confirmed here and
+  exceeded, at 17,980,000.** That maximum is peer B's. Peer A's is exactly
+  12,860,000, so it is confirmed and not exceeded.
+- **Two timing claims**: 0.925 s quoted as exact, which was the seventeenth of
+  eighteen refusals; and ceiling refusals beginning at +0.95 s, which was
+  measured from each run's first refusal rather than from the refresh timestamp.
 - **Two mislabelled conditions**: an arm called the shipped lookahead default
   that is twice it, and a three-peer capture reported as one relationship.
 
