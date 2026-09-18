@@ -253,6 +253,7 @@ it cost a cleanup commit. Check before merging, not after.
 | Cutting a release | `docs/agent-playbooks/release-process.md` |
 | Touching anything protocol-adjacent | `docs/agent-playbooks/protocol-compatibility.md` |
 | Running or measuring on real nodes | `docs/agent-playbooks/test-bench.md` |
+| Working on accounting, settlement or retrieval cost | `docs/bandwidth-incentives.md` |
 | Provisioning a bench machine | `docs/agent-playbooks/bench-vm-spec.md` |
 | Looking for how wasp differs from Bee | `docs/DIFFERENCES.md` |
 | Looking for what also applies to upstream Bee | `docs/UPSTREAM.md` |
