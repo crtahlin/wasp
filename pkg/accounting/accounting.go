@@ -316,13 +316,16 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 	// and we are actually in debt, trigger settlement.
 	// we pay early to avoid needlessly blocking request later when concurrent requests occur and we are already close to the payment threshold.
 
-	// wasp #353: recorded for the refusal log line below. settle dispatches
-	// its work to goroutines and writes no balance itself, so this says a
-	// settlement was started on this call, not that one completed.
-	settleTriggered := false
+	// wasp #353: recorded for the refusal log line below. This says only that
+	// the branch was entered and settle was CALLED. settle itself does nothing
+	// when the amount is under one refresh rate, when a refreshment or payment
+	// is already in flight, or when a settlement failed recently, and it
+	// dispatches to goroutines rather than writing a balance. So true here
+	// does not mean a settlement started, still less that one completed.
+	settleCalled := false
 
 	if increasedExpectedDebtReduced.Cmp(threshold) >= 0 && currentBalance.Cmp(big.NewInt(0)) < 0 {
-		settleTriggered = true
+		settleCalled = true
 		err = a.settle(peer, accountingPeer)
 		if err != nil {
 			a.metrics.SettleErrorCount.Inc()
@@ -351,27 +354,40 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 		// wasp #353: the refusal is otherwise invisible. AccountingBlocksCount
 		// carries no peer and no amounts, and this chunk goes on to surface as
 		// storage.ErrNotFound, indistinguishable from one that does not exist.
-		// Read the surplus here rather than earlier: getIncreasedExpectedDebt
-		// does not return it, and this path is the rare one.
-		surplusBalance, surplusErr := a.SurplusBalance(peer)
-		if surplusErr != nil {
-			surplusBalance = big.NewInt(0)
+		//
+		// Guarded rather than left to Debug's own level check, because the
+		// arguments are evaluated first: the surplus read below is a state
+		// store Get, and a sole-source download can produce several hundred
+		// refusals. With the level down this costs one comparison.
+		if a.loggerV2.Verbosity() >= 2 {
+			// Read the surplus here rather than earlier:
+			// getIncreasedExpectedDebt reads the same key under this lock and
+			// does not return it, and this path is the rare one.
+			surplusBalance, surplusErr := a.SurplusBalance(peer)
+			if surplusErr != nil {
+				// Practically unreachable, since getIncreasedExpectedDebt read
+				// the same key and would have returned the error. Logged
+				// rather than swallowed so a zero here is never mistaken for a
+				// measured zero surplus.
+				surplusBalance = big.NewInt(0)
+			}
+			a.loggerV2.Debug("credit refused, would overdraw",
+				"peer_address", peer,
+				"price", bigPrice,
+				"expected_debt", increasedExpectedDebt,
+				"overdraft_limit", overdraftLimit,
+				"payment_threshold", accountingPeer.paymentThreshold,
+				"refresh_due", refreshDue,
+				"refresh_timestamp_ms", accountingPeer.refreshTimestampMilliseconds,
+				"elapsed_seconds", timeElapsedInSeconds,
+				"settled_balance", currentBalance,
+				"surplus_balance", surplusBalance,
+				"surplus_error", surplusErr,
+				"reserved_balance", accountingPeer.reservedBalance,
+				"shadow_reserved_balance", accountingPeer.shadowReservedBalance,
+				"settle_called", settleCalled,
+			)
 		}
-		a.loggerV2.Debug("credit refused, would overdraw",
-			"peer_address", peer,
-			"price", bigPrice,
-			"expected_debt", increasedExpectedDebt,
-			"overdraft_limit", overdraftLimit,
-			"payment_threshold", accountingPeer.paymentThreshold,
-			"refresh_due", refreshDue,
-			"refresh_timestamp_ms", accountingPeer.refreshTimestampMilliseconds,
-			"elapsed_seconds", timeElapsedInSeconds,
-			"settled_balance", currentBalance,
-			"surplus_balance", surplusBalance,
-			"reserved_balance", accountingPeer.reservedBalance,
-			"shadow_reserved_balance", accountingPeer.shadowReservedBalance,
-			"settle_triggered", settleTriggered,
-		)
 
 		return nil, ErrOverdraft
 	}

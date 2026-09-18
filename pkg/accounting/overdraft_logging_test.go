@@ -60,7 +60,7 @@ func logFieldInt(t *testing.T, line, key string) *big.Int {
 
 // overdraftingAccounting returns an accounting instance, a connected peer, and
 // a price guaranteed to cross the overdraft limit.
-func overdraftingAccounting(t *testing.T, logger log.Logger) (accounting.Interface, swarm.Address, uint64) {
+func overdraftingAccounting(t *testing.T, logger log.Logger) (*accounting.Accounting, swarm.Address, uint64) {
 	t.Helper()
 
 	store := mock.NewStateStore()
@@ -157,15 +157,22 @@ func TestAccountingOverdraftSilentBelowV2(t *testing.T) {
 
 // TestAccountingOverdraftLoggingIsBehaviourNeutral is #353's fourth
 // requirement. It makes "no behaviour change" a test rather than a claim.
+//
+// It asserts the concrete expected outcome of each case rather than only that
+// the two instances agree. Two instances running identical code agree by
+// construction, so an "are they equal" test cannot fail, and would pass for a
+// regression that affected both symmetrically.
 func TestAccountingOverdraftLoggingIsBehaviourNeutral(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name     string
-		overDraw bool
+		name         string
+		overDraw     bool
+		wantAction   bool
+		wantOverdraw bool
 	}{
-		{"refused", true},
-		{"allowed", false},
+		{"refused", true, false, true},
+		{"allowed", false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -179,18 +186,25 @@ func TestAccountingOverdraftLoggingIsBehaviourNeutral(t *testing.T) {
 				price = over
 			}
 
-			actionLoud, errLoud := loud.PrepareCredit(context.Background(), loudPeer, price, true)
-			actionQuiet, errQuiet := quiet.PrepareCredit(context.Background(), quietPeer, price, true)
+			for _, run := range []struct {
+				label string
+				acc   *accounting.Accounting
+				peer  swarm.Address
+			}{
+				{"with logging", loud, loudPeer},
+				{"without logging", quiet, quietPeer},
+			} {
+				action, err := run.acc.PrepareCredit(context.Background(), run.peer, price, true)
 
-			switch {
-			case errLoud == nil && errQuiet == nil:
-			case errLoud != nil && errQuiet != nil && errors.Is(errLoud, accounting.ErrOverdraft) == errors.Is(errQuiet, accounting.ErrOverdraft):
-			default:
-				t.Fatalf("errors differ with logging on and off: %v against %v", errLoud, errQuiet)
-			}
-
-			if (actionLoud == nil) != (actionQuiet == nil) {
-				t.Fatalf("returned action differs with logging on and off: %v against %v", actionLoud, actionQuiet)
+				if got := errors.Is(err, accounting.ErrOverdraft); got != tc.wantOverdraw {
+					t.Fatalf("%s: overdraft %v, want %v (err %v)", run.label, got, tc.wantOverdraw, err)
+				}
+				if !tc.wantOverdraw && err != nil {
+					t.Fatalf("%s: unexpected error %v", run.label, err)
+				}
+				if got := action != nil; got != tc.wantAction {
+					t.Fatalf("%s: action present %v, want %v", run.label, got, tc.wantAction)
+				}
 			}
 		})
 	}
@@ -226,9 +240,104 @@ func TestAccountingOverdraftTermsReconcile(t *testing.T) {
 		t.Fatalf("logged terms do not reconcile: expected_debt %v, terms sum to %v, in: %s", got, want, out)
 	}
 
-	// settle_triggered must be present and parse as a bool, since it is the
+	// settle_called must be present and parse as a bool, since it is the
 	// field the #343 question turns on and is derivable from nothing else.
-	if v := logField(t, out, "settle_triggered"); v != "true" && v != "false" {
-		t.Fatalf("settle_triggered is not a bool: %q", v)
+	if v := logField(t, out, "settle_called"); v != "true" && v != "false" {
+		t.Fatalf("settle_called is not a bool: %q", v)
+	}
+}
+
+// TestAccountingOverdraftTermsReconcileWithDebt is the case that matters for
+// #353: a refusal on a peer this node already owes, so the settle branch is
+// entered and the balance term is not zero.
+//
+// Without this, the reconciliation above runs with every term except the price
+// at zero, so it degenerates to expected_debt == price, settle_called is only
+// ever observed false, and the captured balance the change exists to preserve
+// is covered by nothing.
+func TestAccountingOverdraftTermsReconcileWithDebt(t *testing.T) {
+	t.Parallel()
+
+	buf := new(bytes.Buffer)
+	acc, peer, price := overdraftingAccounting(t, captureLogger(t.Name(), buf))
+
+	// settle dispatches to these, so they must exist or the branch panics on a
+	// nil func the first time it is entered.
+	acc.SetRefreshFunc(func(context.Context, swarm.Address, *big.Int) {})
+	acc.SetPayFunc(func(context.Context, swarm.Address, *big.Int) {})
+
+	// Put the peer into debt, so currentBalance < 0 and the settle branch can
+	// be entered on the refusal below.
+	const owed = uint64(9000)
+	action, err := acc.PrepareCredit(context.Background(), peer, owed, true)
+	if err != nil {
+		t.Fatalf("expected the first credit to be prepared, got %v", err)
+	}
+	if err := action.Apply(); err != nil {
+		t.Fatalf("applying the credit: %v", err)
+	}
+
+	buf.Reset()
+
+	if _, err := acc.PrepareCredit(context.Background(), peer, price, true); !errors.Is(err, accounting.ErrOverdraft) {
+		t.Fatalf("expected overdraft error, got %v", err)
+	}
+
+	out := buf.String()
+	if n := strings.Count(out, overdraftMsg); n != 1 {
+		t.Fatalf("expected exactly one refusal line, got %d in: %s", n, out)
+	}
+
+	// The balance term must actually be non-zero, or this test is the previous
+	// one again.
+	settled := logFieldInt(t, out, "settled_balance")
+	if settled.Sign() >= 0 {
+		t.Fatalf("settled_balance is %v, so this run does not exercise a non-zero debt term", settled)
+	}
+	if settled.Cmp(new(big.Int).SetUint64(owed)) != -1 && settled.CmpAbs(new(big.Int).SetUint64(owed)) != 0 {
+		t.Fatalf("settled_balance %v does not reflect the applied credit of %d", settled, owed)
+	}
+
+	if v := logField(t, out, "settle_called"); v != "true" {
+		t.Fatalf("settle_called is %q, so the settle branch was not entered and this test does not cover it", v)
+	}
+
+	// The identity must still hold with the debt term carrying weight.
+	debtTerm := new(big.Int).Neg(settled)
+	if debtTerm.Sign() < 0 {
+		debtTerm.SetInt64(0)
+	}
+	want := new(big.Int).Add(debtTerm, logFieldInt(t, out, "reserved_balance"))
+	want.Add(want, logFieldInt(t, out, "price"))
+	want.Add(want, logFieldInt(t, out, "surplus_balance"))
+
+	if got := logFieldInt(t, out, "expected_debt"); got.Cmp(want) != 0 {
+		t.Fatalf("logged terms do not reconcile: expected_debt %v, terms sum to %v, in: %s", got, want, out)
+	}
+}
+
+// TestAccountingOverdraftLineCarriesEveryField guards the fields no other test
+// reads. They are promised to operators in DIFFERENCES.md and operators.md, so
+// a rename or a drop should fail here rather than in a bench run.
+func TestAccountingOverdraftLineCarriesEveryField(t *testing.T) {
+	t.Parallel()
+
+	buf := new(bytes.Buffer)
+	acc, peer, price := overdraftingAccounting(t, captureLogger(t.Name(), buf))
+
+	if _, err := acc.PrepareCredit(context.Background(), peer, price, true); !errors.Is(err, accounting.ErrOverdraft) {
+		t.Fatalf("expected overdraft error, got %v", err)
+	}
+
+	out := buf.String()
+	for _, key := range []string{
+		"peer_address", "price", "expected_debt", "overdraft_limit",
+		"payment_threshold", "refresh_due", "refresh_timestamp_ms",
+		"elapsed_seconds", "settled_balance", "surplus_balance",
+		"reserved_balance", "shadow_reserved_balance", "settle_called",
+	} {
+		if v := logField(t, out, key); v == "" {
+			t.Errorf("field %q is present but empty in: %s", key, out)
+		}
 	}
 }
