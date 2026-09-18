@@ -93,9 +93,11 @@ belongs to a buffer no run used. The direction of that paragraph survives and
 strengthens: the gap between read-unit ratio and measured peak ratio is wider
 than stated, not narrower.
 
-The wrong label also reaches prediction 2 and the heading "Prediction 2 holds",
-not only the two result tables and the sentence beginning "The default lookahead
-raises the peak".
+The wrong label reaches more of this document than the two result tables: also
+prediction 2, the heading "Prediction 2 holds", the sentence beginning "The
+default lookahead raises the peak", and the read-unit sentence further down.
+Treat every unqualified "default" below as meaning the 524,288 buffer the runs
+used, not the shipped 262,144.
 
 ## Conditions
 
@@ -221,8 +223,10 @@ exact multiple of 32,768** (262,144, 557,056, 720,896, 196,608). That is the
 strongest evidence for the read unit here and does not depend on reading the
 standard library at all.
 
-So turning the prefetch off reduces the read unit eightfold; it does not reduce
-it to one chunk.
+So turning the prefetch off reduces the read unit; it does not reduce it to one
+chunk. Against the shipped 64-chunk unit that is eightfold, and against the
+524,288 buffer the runs actually used it is sixteenfold. See the correction at
+the top of this document.
 
 **A discrepancy this raises and does not settle.** The read units differ by a
 factor of 8, the measured peaks by 5.08. The gap is **wider** than that, not
