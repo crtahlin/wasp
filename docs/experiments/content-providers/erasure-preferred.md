@@ -8,9 +8,20 @@ Code references are to commit `ef00d3eb`, base `upstream/v2.8.2`.
 
 ## Terms
 
-- **The preferred set** is the list of providers a download tries first. It is a
-  mutable object shared by every download of one content key, carried to the
-  retrieval layer as a **context value** (`pkg/retrieval/preferred.go:139-151`).
+- **The preferred set** is the list of providers a download tries first, carried
+  to the retrieval layer as a **context value**
+  (`pkg/retrieval/preferred.go:139-151`). A set built from an explicit hint
+  applies to that request alone; a set built by discovery is shared by every
+  download of one content key (`pkg/api/providers.go:90-96`).
+- **Singleflight** is the deduplication that collapses concurrent fetches of one
+  chunk address into a single request. Its key includes a fingerprint of the
+  preferred peers, so a fetch with a set and one without do not share a flight
+  (`pkg/retrieval/retrieval.go:186-192`).
+- **A read unit** is the span of bytes one `ReadAt` covers. It is all or nothing:
+  one chunk failing fails the unit (`pkg/file/joiner/joiner.go:215-223`).
+- **An overdraft** is a credit refusal by this node's own accounting before a
+  request is sent. **A readmit** is the #324 path keeping a refused provider for
+  a later attempt instead of dropping it.
 - **A decoder** is the erasure-coding reader for one intermediate chunk. It is
   created when that chunk's children include parity references
   (`pkg/file/joiner/joiner.go:86-94,126`).
@@ -46,13 +57,16 @@ descends from it, so `PreferredPeers(ctx)` at `pkg/retrieval/retrieval.go:181`
 returns nil, no preferred candidate is built, and the chunk goes straight to
 ordinary peer selection.
 
-This is the only such loss in the download path. Searching the whole path for a
-context that starts fresh returns three results: this one,
-`getter.go:358` (a local write of a recovered chunk, no retrieval), and
-`pkg/storer/netstore.go:26` (the direct-upload path, not a download).
+This is the only such loss on a live retrieval path. Searching for a context
+that starts fresh returns three others, none of them live for this:
+`getter.go:358` (a local write of a recovered chunk, no retrieval),
+`pkg/storer/netstore.go:26` (the direct-upload path, not a download), and
+`pkg/manifest/simple.go:45`, which would lose it too but is unreachable from the
+API, since only the mantaray manifest is built today.
 
 **It is a race, not a total loss, and the spec must not overstate it.** Which
-side fetches a shard is decided by a compare-and-swap at `getter.go:128`. If the
+side fetches a shard is decided by a compare-and-swap, reached at
+`getter.go:128` and performed at `:350`. If the
 reader's own `Get` claims the shard first it runs under the request context and
 does carry the set. The prefetch usually wins because it starts at construction,
 but not always, and the measurement already shows the partial effect: a hint
@@ -66,62 +80,120 @@ level NONE never builds a decoder at all, because with no parity references
 (`joiner.go:92-94`). That is why every condition in the #290 measurement except
 two ran at level NONE.
 
+## Phase 1's own rule stops phase 2, and this is an argued exception
+
+`spec.md:543-550` makes "no gain in time to first byte or throughput in
+conditions 3 and 5 compared with condition 2, beyond the spread" a negative
+result, and says "the first is enough to stop building phase 2 onwards".
+`docs/experiments/INDEX.md:65` records that outcome and concludes, in terms,
+that the spec's rule stops phase 2. `spec.md:412` lists carrying the set into
+erasure-coded content as a phase 2 item. So this spec needs an argument, not
+silence.
+
+**The argument is that this item is diagnostic rather than a build-out.** The
+rule exists to stop spending effort on making providers faster after they were
+measured not to be. This change does not claim a speed gain; its whole
+acceptance turns on a counter that says whether a mechanism read from the code
+is real, and its expected outcome is written down in advance as a reason not to
+ship the unbounded form. It is also a candidate explanation **for** the phase 1
+negative: if the set is lost for most of a default-level download, the speed
+result was measured on a mechanism that was only partly running.
+
+That is a genuine reading and not a licence. **If the measurement produces a
+speed claim rather than a mechanism finding, the rule applies to it** and the
+work stops there rather than continuing into the rest of phase 2.
+
 ## What is NOT established, and must not be re-asserted
 
 **That erasure-coded sole-source content fails because of this.**
-`results.md:184-191` records a prediction naming this exact mechanism and says
+`results.md:186-191` records a prediction naming this exact mechanism and says
 it was not met:
 
 > Both copies failed, and their figures are indistinguishable, so these runs
 > neither confirm nor rule out that mechanism for the erasure coded copy.
 
 A related redundancy-level explanation for truncation was also withdrawn, in
-`local-ingest-results.md:122-137`, because two variables moved at once.
+`local-ingest-results.md:126-139`, because two variables moved at once.
 
 So this spec claims a **mechanism read from code**, which is verifiable, and
 makes no claim about availability, which is not.
 
 ## Hypothesis
 
-Re-attaching the set to the prefetch's fetches raises the share of an
-erasure-coded download served by a provider from the measured 176 to 201 chunks
-toward the share a level-NONE download already reaches.
+### The obvious observable is the wrong one
 
-**Whether that is good is a separate question, and the honest answer from the
-existing data is that it may not be.** Two measured facts point against it:
+The obvious prediction is that the provider's share of an erasure-coded download
+rises. **It is wrong, and a first draft of this spec made it.** Two things
+refute it, both from the document it cited:
 
-- **The hinted default-level download was already the slowest arm.** Condition
-  3m in `results.md` is a 6.09 s median (5.84 to 6.75) against 5.60 s (5.34 to
-  5.84) for the same content with **no** hint, and 5.12 s for hinted level-NONE
-  content. Directing more of it at one peer is unlikely to reverse that on its
-  own.
+- **The MEDIUM share is already the higher of the two.** Condition 3, level NONE
+  with a hint, is **163 chunks (160 to 177)**. Condition 3m, the default level
+  with a hint, is **177 (176 to 201)** (`results.md:87,92`). The draft proposed
+  raising MEDIUM "toward" a number below it.
+- **The share is capped by credit, not by how many fetches carry the set.**
+  `results.md:109-121` derives the cap directly: a credit window of 18,000,000
+  units at about 310,000 a chunk is about 58 chunks, plus refresh, and
+  `:165-166` says the erasure-coded arm is "capped like the others". Carrying
+  the set into more fetches cannot lift a ceiling that accounting sets.
+
+So an acceptance rule reading "share does not rise, therefore the mechanism is
+refuted" would have rejected a correct fix for a reason its own source excludes.
+
+### The observable that is not credit-capped
+
+`prepareCredit` runs **before** either counter moves, and then exactly one of
+them does: `PreferredOverdrafts` on a credit refusal, `PreferredAttempts`
+otherwise (`pkg/retrieval/preferred.go:228-239`). Their **sum is the number of
+chunks for which a preferred candidate was selected at all**, which is precisely
+"did the set reach this fetch". Credit decides which side of that sum a chunk
+lands on; it does not decide the total.
+
+**The hypothesis is therefore: re-attaching the set raises
+`preferred_attempts + preferred_overdrafts` at MEDIUM, toward the count a
+level-NONE download of the same bytes reaches.** That is the mechanism stated in
+a quantity the credit window does not bind.
+
+### Whether it helps is a separate question, and it may not
+
+- **The hinted default-level download was already the slowest arm**, 6.09 s
+  median against 5.60 s for the same content with no hint (`results.md:92,91`).
+  Those two spreads touch at a single millisecond, 5.840 against 5.841, so with
+  three runs this orders the arms and does not separate them. It is a reason for
+  caution, not a finding.
 - **Nothing bounds the concurrency, and the accounting work says concurrency is
-  what breaks credit.** The joiner's errgroup has no limit
-  (`joiner.go:215`), a decoder dispatches one goroutine per outstanding shard
-  with no limit (`getter.go:245-249`), and there is one live decoder per
-  intermediate chunk the reader touches. At MEDIUM that is up to **119
-  concurrent fetches per decoder**. Today they spread across whichever peers
-  `closestPeer` returns. After this change they would point at **one** peer.
-  `gate-terms-measured.md:76-84` already found peers sitting at a reserved
-  balance near 18,000,000 from "concurrency overruns", and
-  `truncation-cause.md` establishes that once refusals on one chunk pass
-  `maxOverdraftReadmits`, which is 8 (`pkg/retrieval/retrieval.go:159`), the
-  only holder is dropped and the read unit dies.
+  what breaks credit.** The joiner's errgroup has no limit (`joiner.go:215`), a
+  decoder dispatches one goroutine per outstanding shard with no limit
+  (`getter.go:245-249`), and there is one live decoder per intermediate chunk
+  the reader touches, so the ceiling is that many times **119** at MEDIUM.
+  `gate-terms-measured.md:76-84` found peers at a reserved balance near
+  18,000,000 from "concurrency overruns", and `truncation-cause.md` establishes
+  that refusals on one chunk passing `maxOverdraftReadmits`, which is 8
+  (`pkg/retrieval/retrieval.go:159`), drop the only holder and kill the read
+  unit. The set holds at most `maxProviderHints`, which is 8
+  (`pkg/api/providers.go:31`), with `maxPreferredAttempts` of 2 per chunk
+  (`preferred.go:34`), so the concentration is onto a few peers rather than
+  literally one.
 
-**So the pre-registered prediction is two-sided**: provider share rises, and
-`preferred_overdrafts` rises with it, possibly far enough to make truncation
-more likely rather than less. A result showing that is a real finding and closes
-#299 as "the set can be carried and should not be, unbounded".
+**So the pre-registered prediction is two-sided**: the candidate count rises,
+and `preferred_overdrafts` rises with it, possibly far enough to make truncation
+more likely. A result showing that closes #299 as "the set can be carried and
+should not be, unbounded", and produces the bound as the next issue.
 
-**One effect points the other way.** The preferred set's fingerprint is part of
-the singleflight key (`retrieval.go:186-192`), so today a prefetch fetch (no
-set) and a reader fetch (set) for the same address take **different** keys and
-both run. That is the measured amplification: default-level downloads made
-**4,750 to 5,073** chunk requests against about 4,129 for the same size at level
-NONE, and the hinted ones made the most (`results.md:168-171`). Giving the
-prefetch the same set collapses those to one flight, which should reduce request
-count. The measurement must separate this from the provider-share effect,
-because they move different counters in different directions.
+### One effect points the other way
+
+The set's fingerprint is part of the singleflight key
+(`retrieval.go:186-192`), so today a prefetch fetch without a set and a reader
+fetch with one take **different** keys and both run. Giving the prefetch the
+same set collapses them.
+
+**The size of that effect is much smaller than a first draft claimed.** It put
+it at the whole gap between 4,750 to 5,073 requests and about 4,129 at level
+NONE. Most of that gap is not attributable: the **unhinted** default-level arm
+alone made 4,750 to 4,830 requests, and with no hint the set has no peers, so
+`fingerprint` returns the empty string and both keys already match. The
+attributable part is the hinted arm's excess over the unhinted one, a few
+hundred requests at most. `results.md:170` claims only that "the hinted ones
+made the most", which is the correct and weaker statement.
 
 ## Design
 
@@ -158,12 +230,24 @@ prefetch fetch is the background context. So the set is restored at the last
 point before retrieval, for exactly the fetches that lost it, and the change is
 two lines in this fork's own file.
 
-**Why `HasPreferredPeers` and not `PreferredPeers(ctx) == nil`.** The line above
-it deliberately **clears** the set, so that the provider lookup's own reads do
-not go to the download's providers. That clearing stores a nil set under the
-key, and a nil-valued check cannot tell it apart from a context that never had
-one, so the naive check would undo it. The new helper tests whether the key is
-present at all:
+**`HasPreferredPeers` is defensive, and the reason a first draft gave for it was
+wrong.** That draft argued the naive `PreferredPeers(ctx) == nil` check would
+undo the deliberate suppression on the line above, which stores a nil set so the
+provider lookup's own reads do not go to the download's providers. It would not:
+that suppressed context is built inline, handed straight to `Discover`, and
+never assigned back, and `Discover` reads through a different getter entirely,
+the plain storer one wired at `pkg/node/providers.go:58`. It never re-enters
+this wrapper, so the guard is never evaluated on it.
+
+In every reachable case the two checks therefore agree, and a test named for the
+suppression would pass with either. The helper is kept because it states the
+intent exactly, distinguishing "no set was ever attached" from "preference was
+deliberately switched off", and because the suppressed context reaching a
+wrapper is a change one refactor away. It is **not** load-bearing today, and the
+spec says so rather than claiming a defect it does not prevent. The Go semantics
+it rests on are real, confirmed by running them rather than reading them: a
+typed nil stored under a key satisfies the type assertion, so the value is nil
+while the key is present.
 
 ```go
 // HasPreferredPeers reports whether ctx carries a preferred set, including one
@@ -174,22 +258,47 @@ func HasPreferredPeers(ctx context.Context) bool {
 }
 ```
 
-**The lifetime question this avoids.** The alternative designs all store a
-context on the decoder, and a decoder outlives the request that created it: it
-is cached per intermediate chunk (`joiner.go:96-123`) and reused by later
-downloads that share that chunk. Storing a request context there would be a
-lifetime bug, needing `context.WithoutCancel` to avoid cancelling one download's
-prefetch when a different download ends. Re-attaching at the wrapper sidesteps
-it, because the wrapper is created per request and the set it closes over is
-already designed to outlive a request, kept for `providerSetTTL` of ten minutes
-(`providers.go:129-164`).
+**The decoder cache is per download, and #299's own text says otherwise.** The
+issue asks which request's set should win, "since the decoder is shared by all
+requests for the same intermediate chunk". It is not. `NewDecoderCache` has one
+non-test caller, `pkg/file/joiner/joiner.go:184`, inside the joiner
+constructor, and a joiner is built per download (`pkg/api/bzz.go:780,782`). The
+cache is a field of that joiner, so decoders are never reused across requests
+and there is no cross-request precedence to define. Rule 11 asks for corrections
+to be carried with the finding, so it is recorded here rather than left in the
+issue.
 
-**A decoder shared between downloads is still shared.** A decoder built by a
-request with no hint is reused by a later request that has one, and that later
-request gets nothing from the already-running prefetch. This design does not fix
-that and should not: the first-request-wins behaviour matches the existing
-shared-set rule. It does mean the effect size depends on cache state, which the
-measurement has to hold fixed.
+A first draft of this spec repeated the issue's premise and built three things
+on it: a lifetime argument, a section on shared decoders, and a rule for
+discarding runs whose decoder cache had been warmed by a previous arm. All three
+are removed. The wrapper design is still the right one, for the smaller and true
+reason that it leaves `pkg/file/` untouched.
+
+**The set's lifetime, stated correctly.** For a request carrying an explicit
+hint the set is built fresh and applies to that request only, which the code
+comment at `pkg/api/providers.go:90-96` says. The ten minute `providerSetTTL`
+(`providers.go:38`) applies to the **discovered** set shared across downloads of
+one content key, which is a different case from the one measured here. A first
+draft used the TTL to argue the set safely outlives a request; since the whole
+measurement is hint-driven, that argument did not apply to it.
+
+### A second defect on the same path, filed separately
+
+The same prefetch context breaks provider discovery outright. The lookup is
+triggered from whichever chunk fetch is counted 64th
+(`pkg/api/providers.go:114-119`), and `Discover` derives its background
+goroutine from that fetch's context (`pkg/providers/providers.go:308-311`). On
+erasure-coded content that fetch is almost always a prefetch fetch, whose
+per-shard context is cancelled as soon as that one shard returns
+(`getter.go:130-131`), while a lookup takes 1.54 to 1.67 s. So discovery is
+cancelled roughly two orders of magnitude too early, and only at level NONE,
+where the reader's context is in play, does it work.
+
+Filed as [#369](https://github.com/crtahlin/wasp/issues/369) rather than fixed
+here, because the two want settling together and neither should be fixed twice.
+It also means **a discovery arm at the default level would measure a broken
+lookup rather than the preferred set**, which is why the measurement below uses
+an explicit hint throughout.
 
 ### Bounding, and why it is not in this change
 
@@ -220,18 +329,30 @@ a config option in its own issue, with the current value as its default.
   currently spread. This is the main risk and the main thing measured.
 - **Making truncation more likely**, by driving refusals on one chunk past the
   readmit bound of 8.
-- **A provider that does not hold the parity chunks.** Both routes that make a
+- **A provider that does not hold the parity chunks**, which is a fallback-path
+  concern only: under the shipped `DATA` strategy parity indices are never
+  fetched, and they are added only under `RACE`, reached after `DATA` fails
+  (`pkg/file/redundancy/getter/getter.go:221,231-233`). Both routes that make a
   provider do hold them: pinning traverses and stores every reported address
   including parity (`pkg/traversal/traversal.go:46-52`, `joiner.go:419-439`),
   and local ingest generates them locally at the upload level
-  (`pkg/api/localingest.go:72-75`). A provider missing one is handled by the
-  existing miss path, which drops a peer after `demoteAfterMisses`
-  (`preferred.go:39`), so the failure mode is a slower download and not a
-  broken one.
-- **No benefit for encrypted content.** Announce and lookup both refuse a
-  64-byte reference (`pkg/api/providers.go:236-239`), so discovery can never
-  supply a set for it and only an explicit hint can. The decoding path itself is
-  unaffected.
+  (`pkg/api/localingest.go:72-75`). A first draft offered the miss path as the
+  mitigation, which it is not: `demoteAfterMisses` is 16 and the misses must be
+  consecutive, since a hit clears the counter (`preferred.go:39,110`), and
+  `truncation-cause.md:92-97` says flatly that it never fires. The real
+  mitigation is that a preferred miss falls through to ordinary selection, so on
+  network-held content the chunk is served anyway and the cost is a wasted round
+  trip. On sole-source content it would not be, which is one more reason this
+  measurement does not use sole-source content.
+- **The change does nothing at all for encrypted content, and not for the reason
+  a first draft gave.** That draft said discovery cannot supply a set for a
+  64-byte reference so only an explicit hint can. An explicit hint does not help
+  either: `withProviders` nulls the content key for a 64-byte reference
+  (`pkg/api/providers.go:86-88`), and `providerGetter` returns the **bare**
+  getter when the key is nil (`:111-113`), so the wrapper is never installed and
+  the re-attach cannot run. The same early return applies to `GET /chunks` and
+  `GET /feeds`, which pass no key. Extending the wrapper to a hint with no key
+  would reach encrypted content, and is deliberately out of scope here.
 
 ## Protocol impact
 
@@ -252,8 +373,23 @@ in the measurement are for.
 Requester and provider on the bench, three runs per condition, interleaved,
 balances reset between runs, with the spread reported per condition.
 
-Content: one file at **MEDIUM**, the shipped upload default, and the same bytes
-at **level NONE** as the reference for what full preference already achieves.
+**Content, stated because the first draft did not.** One file of 16 MiB at
+**MEDIUM**, the shipped upload default, pinned and announced on the provider,
+and **held by the network as well**, matching the conditions the 176 to 201 and
+4,750 to 5,073 figures came from. It is deliberately **not** sole-source: the
+truncation mechanism in `truncation-cause.md` turns on its step 4, "the content
+is sole-source, so no ordinary peer can serve it", and on network-held content a
+refusal that is not readmitted falls through to ordinary peers and succeeds.
+Measuring on sole-source content would mix a truncation risk into a mechanism
+question.
+
+The same bytes at **level NONE** are a **null control, not a treatment arm**: at
+that level no decoder is built at all, because with no parity references
+`len(addrs) == shardCnt` and `GetOrCreate` returns the plain getter
+(`joiner.go:92-94`). Stock and patched are therefore identical by construction
+there, and a difference between them would mean the harness is wrong. It also
+supplies the level-NONE candidate count the hypothesis compares against.
+
 `Swarm-Cache` held fixed across every arm, because with caching off the
 recovered chunks are not retained and a later read refetches them through the
 fallback decoder, which would move the request count on its own.
@@ -262,62 +398,85 @@ Arms: stock against patched, at both levels, for **12 runs**.
 
 Recorded per run:
 
-- **chunks served by the provider**, the primary observable, against the
-  measured 176 to 201 baseline at MEDIUM and the level-NONE figure from the same
-  session;
-- **total chunk requests**, against the 4,750 to 5,073 baseline, to see the
-  singleflight effect separately;
-- `preferred_overdrafts`, `preferred_readmits`, and **the difference**, which
-  `truncation-cause.md` establishes as the quantity that decides whether a read
-  unit survives;
+- **`preferred_attempts + preferred_overdrafts`, the primary observable.** Their
+  sum is the number of chunks for which a preferred candidate was selected,
+  which is what "the set reached this fetch" means, and unlike the served share
+  it is not capped by the credit window
+  (`pkg/retrieval/preferred.go:228-239`);
+- `preferred_overdrafts` and `preferred_readmits` separately, and **the
+  difference between overdrafts and readmits**, which `truncation-cause.md`
+  establishes as the quantity that decides whether a read unit survives;
+- **chunks served by the provider**, reported for continuity with the 176 to 201
+  baseline but **not** decisive, because `results.md:109-121` shows it is bound
+  by the credit window;
+- **total chunk requests**, for the singleflight effect, read as the patched
+  arm against the stock arm of the same session rather than against the
+  historical figure;
 - `preferred_misses`, which rose by only 1 or 2 per download in every run so
-  far, so a large rise means a provider is missing parity chunks;
+  far;
 - delivered bytes, `curl` exit code and body SHA-256;
-- total time, reported but not credited to this change on its own;
+- **total download time**, which is decisive here and not merely reported: the
+  concentration risk is the reason this change might be unshippable;
 - the provider's `/blocklist` naming the requester.
+
+**Every comparison is patched against stock within one session.** The #290
+figures are quoted for orientation only: they were taken on a 16 MiB file with
+30 ms added latency against a particular peer count, and reusing them as a
+control would compare across node states, which this repository has already had
+to withdraw a result for once.
+
+**What a negative result looks like.** The candidate count does not move between
+stock and patched at MEDIUM, beyond the spread. That says the set is not
+reaching the prefetch even with the re-attach, so the mechanism read from the
+code is not what is happening, and the spec is wrong rather than the change.
 
 ## Acceptance
 
-Everything below is at MEDIUM, the arm under test. The level-NONE arm sets the
-reference for what full preference already achieves and decides nothing on its
-own.
+Everything below is at MEDIUM. The level-NONE arm is a null control and decides
+nothing; if stock and patched differ there, the run is invalid rather than
+informative.
 
 **Two conditions come first and override the rest.** If the provider blocklists
-the requester in any run, or any body hash fails, the change is **rejected**
-whatever else it did. The first is the hazard the concurrency concern predicts;
-the second means the download is wrong, and a faster wrong answer is not a
-result.
+the requester in any run, or the **patched** arm produces a body hash mismatch,
+the change is **rejected** whatever else it did. A stock-arm hash failure
+invalidates the run instead, since it says the content or the bench is wrong
+rather than the change.
 
-Then, on the primary observable, **chunks served by the provider**, read against
-the stock arm of the same session:
+Then, on the primary observable, the candidate count
+`preferred_attempts + preferred_overdrafts`, patched against stock in the same
+session, with "apart" meaning the three-run ranges do not overlap:
 
-| Provider share | Overdrafts not readmitted | Delivered bytes | Outcome |
+| Candidate count | Overdrafts not readmitted | Download time | Outcome |
 |---|---|---|---|
-| rises, spreads apart | does not rise | not lower | **accept and ship** |
-| rises, spreads apart | rises | not lower | **accept the mechanism, do not ship unbounded**: the bound becomes the next issue |
-| rises, spreads apart | either | **lower** | **reject**: the change costs delivery |
-| rises, spreads overlap | either | either | **undetermined**: rerun with more runs before reading it |
-| does not rise | either | either | **reject**: refutes the mechanism read from the code, so something other than the background context drops the set |
+| rises, apart | does not rise | not worse, apart | **accept and ship** |
+| rises, apart | does not rise | worse, apart | **accept the mechanism, do not ship**: the cost is the concentration, and the bound is the next issue |
+| rises, apart | rises | either | **accept the mechanism, do not ship unbounded**: same follow-up, with the readmit exhaustion as its evidence |
+| rises, ranges overlap | either | either | **undetermined**: rerun with more runs before reading it |
+| does not rise | either | either | **reject**: the set is still not reaching the prefetch, so the mechanism read from the code is not what happens |
 
-Delivered bytes are a **floor, not an equality**. An earlier draft of this spec
-required them to be "unchanged", which would have rejected the change for
-improving them. The prediction is that they do not move, because the preferred
-path and ordinary selection both end at the same chunks; a rise is a welcome
-surprise and not a failure.
+Two quantities are recorded and deliberately decide nothing on their own. The
+**provider's served share** is credit-capped, so it may not move even when the
+mechanism works. **Total chunk requests** falling is corroboration that the
+prefetch and the reader now share a singleflight key, which is a second
+signature of the same cause; it is expected, and its absence alongside a rising
+candidate count is worth reporting but is not a reject.
 
-**What invalidates a run** rather than deciding it: a decoder cache warmed by a
-previous arm, since a decoder built without a hint is reused with one; a
-different `Swarm-Cache` setting between arms; a provider grant other than zero;
-a peer count that changes between arms; or `preferred_misses` rising by much
-more than the 1 or 2 per download seen so far, which says the provider is
-missing parity chunks and the arm is measuring that instead.
+Delivered bytes are a **floor**: the content is network-held, so both arms
+should complete, and any shortfall in either is a reject for that arm.
+
+**What invalidates a run** rather than deciding it: a different `Swarm-Cache`
+setting between arms; a provider grant other than zero; a peer count that
+changes between arms; `preferred_misses` rising far above the 1 or 2 per
+download seen so far, which says the provider is missing chunks and the arm is
+measuring that; a stock-arm hash failure; or any difference between stock and
+patched in the level-NONE control.
 
 ## Rollout and rollback
 
 Nothing new to turn on. The path is reached only with `providers-enable` on and
 a hint present, so a node running the shipped defaults never enters it. Rolling
-back is reverting two lines in this fork's own file; nothing persists and no
-peer state depends on it.
+back is reverting the two files named below; nothing persists and no peer
+state depends on it.
 
 ## Upstream portability
 
@@ -327,11 +486,27 @@ change lives entirely in fork-authored code, `pkg/api/providers.go` and
 
 The underlying observation is about upstream code: the decoder's prefetch runs
 from a context with no values, so **any** caller-supplied context value is lost
-to it, not only this fork's. That is a design property rather than a defect,
-since the prefetch deliberately outlives the request that started it, and rule
-11 says to tag defects and not preferences. **No `affects-upstream` label**, and
-this paragraph records what was considered so the question is not reopened
-without new evidence.
+to it, not only this fork's.
+
+**Upstream loses something of its own to it, and a first draft asserted a design
+intent instead of checking.** `pkg/storer/netstore.go:87` starts a span from the
+caller's context and `pkg/retrieval/retrieval.go:371` follows it, so from a
+background context both become root spans with no parent. Every data-shard
+retrieval of an erasure-coded download is therefore detached from that
+download's trace in unmodified Bee.
+
+It is still **no `affects-upstream` label**, for two reasons that are about
+evidence rather than judgement. The claim is read from code and not reproduced,
+and rule 11 says to leave such a case untagged and record what would justify the
+tag: here, an actual trace of an erasure-coded download showing the orphaned
+spans. And detaching a prefetch from its caller's cancellation is a deliberate
+choice, whatever it costs in tracing, so the question is whether losing the
+other values with it was intended, which a trace would not settle on its own.
+
+Two smaller corrections to that draft's reasoning: the prefetch context is
+cancelled by `defer cancel()` when `runStrategy` returns (`getter.go:243`), so
+what it outlives is the request's cancellation rather than the request; and the
+change touches two files, not one.
 
 ## Files and test plan
 
