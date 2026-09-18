@@ -49,13 +49,17 @@ all. Here is one such chunk in full, each line an attempt against a different
 peer:
 
 ```
-failed to get chunk -> 09c7917e1f790914
-failed to get chunk -> 600495fde6069d02
-failed to get chunk -> 16391cd116ed2391
-   ... thirty-four in total, none of them the provider ...
-failed to get chunk -> 53ba0a913780894a
+failed to get chunk -> peer A
+failed to get chunk -> peer B
+failed to get chunk -> peer C
+   ... thirty-four attempts in total, each to a different peer,
+       none of them the provider ...
 retrieval failed [storage: not found]
 ```
+
+The peers are written as letters on purpose. They are overlay addresses of
+real nodes on the network, which rule 10 keeps out of this repository, and the
+excerpt says as much without them.
 
 **The attempt count is quantised at 34.0 in every run.** `maxOriginErrors` is 32
 (`pkg/retrieval/retrieval.go:155`), and `errorsLeft` is decremented once per
