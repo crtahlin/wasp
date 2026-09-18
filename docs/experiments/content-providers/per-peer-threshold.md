@@ -4,11 +4,27 @@ Issue: [#327](https://github.com/crtahlin/wasp/issues/327). Analysis:
 [per-peer-credit.md](per-peer-credit.md), merged as the argument this spec
 implements.
 
-Code references are to `main` at `7bd5da14`, base `upstream/v2.8.2`.
-`pkg/accounting`, `pkg/pricing` and `pkg/settlement/pseudosettle` are
-byte-identical to that base, verified with `git diff upstream/v2.8.2 main --`
-against those three paths, which is empty. So every line cited in them is also
-upstream's.
+Code references are to `7bd5da14`, base `upstream/v2.8.2`.
+
+> **Correction.** This document said `pkg/accounting`, `pkg/pricing` and
+> `pkg/settlement/pseudosettle` were byte-identical to that base, "verified with
+> `git diff upstream/v2.8.2 main --` against those three paths, which is empty".
+> **That verification was run against a stale local `main` and two of the three
+> claims are false.** Against `origin/main` today the same paths carry 1,600
+> inserted lines and 11 deleted: `pkg/accounting` 1,196 and 11, `pkg/pricing`
+> 404, and only `pkg/settlement/pseudosettle` genuinely unchanged. Much of that
+> arrived after this document was written, but `provider.go` and the `pricing`
+> changes are this document's own feature, so the claim was wrong when made.
+>
+> The cited line numbers in `PrepareCredit` were checked separately and its body
+> does carry no fork change, so the substance of what is quoted below stands.
+> What does not stand is the blanket "every line cited in them is also
+> upstream's". Check any individual citation against `upstream/v2.8.2` before
+> relying on it.
+>
+> This is the failure [#355](https://github.com/crtahlin/wasp/issues/355) is
+> about: a diff against a stale ref returns nothing, and nothing reads as
+> confirmation.
 
 **Depends on [#324](https://github.com/crtahlin/wasp/issues/324)**, merged as
 [`558c93a5`](https://github.com/crtahlin/wasp/commit/558c93a5), which adds the

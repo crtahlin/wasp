@@ -207,14 +207,17 @@ comm -12 <(git diff --name-only "$BASE" "$LATEST" | sort) \
 ```
 
 **Compare against `origin/main`, never `main`.** `main` is a local branch ref
-that only advances when the checkout holding it pulls. Work here happens in
-worktrees under `.claude/worktrees/`, and nothing requires the main checkout to
-pull, so `main` is routinely many commits behind.
+that only advances when the checkout holding it pulls. Any checkout that has not
+pulled is behind, and a worktree is behind by default, since the branch is
+checked out elsewhere and nothing in this workflow requires that checkout to
+pull.
 
-That matters more than it sounds, because the failure is silent and inverted: a
-diff against a stale `main` comes back **empty**, and an empty diff reads as
-confirmation. It has already put a false claim into a merged-candidate spec,
-which stated in bold that `pkg/accounting` was unmodified when it carried 782
+That matters more than it sounds, because the failure is silent and points the
+wrong way: a diff against a stale `main` comes back **short by exactly the
+changes you are looking for**, and where every such change is newer than the
+stale ref it comes back empty. An empty diff reads as confirmation. That has
+already put a false claim into a merged-candidate spec, which stated in bold
+that `pkg/accounting` was unmodified when at that commit it carried 782 inserted
 lines of fork change. See [#355](https://github.com/crtahlin/wasp/issues/355).
 
 If you are unsure, `git rev-parse main origin/main` takes a second and settles
@@ -238,16 +241,18 @@ issue numbers collide with upstream Bee pull-request numbers in the shared
 history, so a bare `git log --grep '(#N)'` can return an upstream commit. Use:
 
 ```bash
+git fetch origin
 git log --first-parent "upstream/$(cat .upstream-base)"..origin/main --grep "(#N)"
 ```
-
-`origin/main` for the reason given under rule 13: a stale local `main` would
-silently narrow the range and could miss the very commit being looked for.
 
 and, when the fix landed on its own branch without an issue reference in the
 merge subject, resolve it from the branch tip instead. Do not link to the Bee
 repository (rule 1); the label is a marker for a later human decision, nothing
 more.
+
+`origin/main` there for the reason given under rule 13: a stale local `main`
+would silently narrow the range and could miss the very commit being looked
+for.
 
 ## Writing
 

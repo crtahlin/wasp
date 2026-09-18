@@ -28,7 +28,7 @@ of thousands of commits on every sync and break every clone. Merge is also what
 keeps the **merge base advancing**, which is the whole reason syncs stay cheap.
 
 This is worth being blunt about, because the previous fork got it wrong: if you
-squash an upstream sync, `git merge-base main upstream/master` never moves, and
+squash an upstream sync, `git merge-base origin/main upstream/master` never moves, and
 the *next* sync three-way-merges from the original fork point again. That is how
 a fork ends up re-resolving the same conflicts forever. **Never squash a sync.**
 
@@ -172,7 +172,7 @@ keep rebasing them.
 
 ```bash
 git log --merges -1 --format='%H %P'          # must show TWO parents
-git merge-base main upstream/vX.Y.Z            # must equal the upstream tag commit
+git merge-base origin/main upstream/vX.Y.Z     # must equal the upstream tag commit
 ```
 
 If the first shows one parent, the sync was squashed and must be redone.
