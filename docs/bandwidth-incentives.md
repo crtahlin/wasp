@@ -26,16 +26,32 @@ func (pricer *FixedPricer) PeerPrice(peer, chunk swarm.Address) uint64 {
 ```
 
 With `MaxPO = 31` (`pkg/swarm/swarm.go:27`) and `basePrice = 10,000`
-(`pkg/node/node.go:239`), the price is `(32 - proximity) * 10,000`. A peer with
-no shared prefix pays 320,000; a peer in the chunk's own neighbourhood pays far
-less. **The closer a peer is to the content, the cheaper it is to ask.** That is
-the incentive to fetch from the right part of the network rather than from
-anyone.
+(`pkg/node/node.go:239`), the price is `(32 - proximity) * 10,000`. Proximity
+here counts shared leading bits, so a larger number means closer. A peer sharing
+no prefix with the chunk **charges** 320,000; one in the chunk's own
+neighbourhood charges far less.
 
-**Measured on this fork's bench:** three independent readings of the mean price
-paid per chunk gave 306,735, 306,454 and 309,141, so about 307,000 in practice.
-That implies a mean proximity near 1, which is what uniformly distributed chunk
-addresses give.
+**Payment is hop by hop, and the spread between the two hops is the incentive.**
+A requester is charged on the proximity of **the peer it asks**
+(`pkg/retrieval/retrieval.go:499`, `PeerPrice(peer, chunk)`), while a node
+serving a request charges on **its own** proximity (`:620`, `Price(chunk)`,
+which is `PeerPrice(ownOverlay, chunk)`). A forwarder therefore pays less than
+it collects, and keeps 10,000 units for every proximity order it gains on the
+chunk. That margin, not the absolute price, is what pays for relaying.
+
+A requester never owes the node that finally stores the chunk. It owes the peer
+it asked, which owes the peer it asked, and so on.
+
+**Pushsync is priced the same way** (`pkg/pushsync/pushsync.go:263`, `:683`).
+Everything below is described for retrieval, and applies to both.
+
+**Measured on this fork's bench**
+([measurement.md](experiments/content-providers/measurement.md)): three readings
+of the mean price per credit decision gave 306,735, 306,454 and 309,141, so
+about 307,000. That implies a mean proximity near 1, which is what uniformly
+distributed chunk addresses give. The counter behind it is node-wide and counts
+credit decisions rather than deliveries from one peer, so it is a price
+estimate, not a per-peer charge.
 
 ## The two thresholds, and which is which
 
@@ -59,7 +75,7 @@ Defaults and bounds, all in `pkg/node/node.go:235-246` and
 |---|---|---|
 | `refreshRate` | 4,500,000 per second | the free allowance rate, below |
 | `payment-threshold` | 13,500,000 | default credit extended to each peer, three seconds of refresh |
-| `minPaymentThreshold` | 9,000,000 | `2 * refreshRate`, the least a full node will accept from a peer |
+| `minPaymentThreshold` | 9,000,000 | `2 * refreshRate`, the least a full node will accept from a peer and the least it will configure for itself (`node.go:806-808`) |
 | `maxPaymentThreshold` | 108,000,000 | `24 * refreshRate`, the most a node accepts **as its own configuration** |
 | `payment-tolerance-percent` | 25 | disconnect at 125% of what we extended |
 | `payment-early-percent` | 50 | settle when debt reaches 50% of what the peer extended |
@@ -72,27 +88,45 @@ it, and the growth path below walks straight past it.
 
 ## The ledger
 
-Per peer, in `accountingPeer` (`pkg/accounting/accounting.go:130-160`):
+**The sign convention first, because it is the most confusing thing here.** A
+**credit** action is us spending with a peer, for a request we made. A **debit**
+action is us charging a peer for one they made. A balance that is negative means
+we owe them.
 
-- **balance**: what is owed. Negative means we owe them.
-- **reservedBalance**: price of our requests in flight, already committed
-  against our limit but not yet debited.
-- **shadowReservedBalance**: the same for requests they have made of us, which
-  they may already count as debt even though we have not credited it yet.
-- **ghostBalance**: debt from requests we served to a peer that never paid and
-  which we could not refuse. A second gate with no refresh tolerance.
-- **surplusBalance**: overpayment received, applied to future debt.
+Per peer, in `accountingPeer` (`pkg/accounting/accounting.go:131-151`):
 
-The quantity actually gated is not the balance but `increasedExpectedDebt`: the
-balance, plus everything reserved, plus surplus, plus the price of the request
-being considered. A node can therefore be refused while its settled balance
-still looks comfortable.
+- **balance**: what is owed, negative when we owe them.
+- **reservedBalance**: price of **our** requests in flight, committed against
+  our limit but not yet credited.
+- **shadowReservedBalance**: the same for requests **they** have made of us,
+  which they may already count against their own limit before we debit them.
+- **ghostBalance**: charges we prepared for a peer's request and never applied,
+  because the delivery failed or was abandoned (`:1383`, in
+  `debitAction.Cleanup`). Not unpaid service: nothing was delivered. It is a
+  second disconnect gate with no refresh tolerance, and it only ever rises until
+  `Connect` clears it (`:1450`).
+- **surplusBalance**: overpayment received, which offsets future debt but is
+  **added** to expected debt in the gate below, because it is value we have
+  already been given.
+
+The quantity actually gated is not the balance but `increasedExpectedDebt`
+(`:256-279`):
+
+```text
+max(-balance, 0) + reservedBalance + price + surplusBalance
+```
+
+Two things follow that the balance alone does not show. The debt term is
+**clamped at zero**, so a peer being in debt to us buys no spending headroom at
+all. And only `reservedBalance` is counted; `shadowReservedBalance` is
+**subtracted** to form the separate figure the early-settlement test uses.
 
 ## Two ways debt is cleared
 
 **Refresh, also called pseudosettle, is free and time based.** A peer allows
-`refreshRate` units of debt to be forgiven per second of elapsed time, capped at
-the debt actually outstanding (`pkg/settlement/pseudosettle/pseudosettle.go:144-165`).
+`refreshRate` units of debt to be forgiven per second of elapsed time
+(`pkg/settlement/pseudosettle/pseudosettle.go:168`), capped at the debt actually
+outstanding (`:175-179`).
 It costs the payer nothing. It is the mechanism that lets small, steady traffic
 run indefinitely without any payment at all.
 
@@ -100,44 +134,71 @@ run indefinitely without any payment at all.
 a chequebook contract, which the recipient can cash on chain. This is what
 settles debt that refresh cannot keep up with.
 
-**Measured on this fork's bench**, these are not close to equal: over single
-downloads, pseudosettle moved 4,630,000 to 23,250,000 units while cheques moved
-13,150,000 to 40,230,000. The bench is cheque-dominated, not refresh-bound, and
-an analysis that assumes the free allowance is the whole story will be wrong
-about what limits throughput.
+**Cheques settle only debt this node originated.** `settle` pays
+`-originatedBalance` (`accounting.go:493`), and a credit action returns without
+touching that figure when the request was not originated here (`:387-393`). So
+debt from **forwarding** other nodes' requests is cleared by refresh alone, and
+that traffic genuinely is refresh-bound even where a node's own requests are not.
+A cheque is also only issued above `minimumPayment`, `refreshRate / 5` or
+900,000 (`:245`).
+
+**No claim is made here about which of the two dominates in practice.** An
+earlier version of this document compared node-wide settlement counters against
+the per-peer allowance and concluded the bench was cheque-dominated. That
+comparison is invalid, and this project had already recorded why: a node-wide
+counter cannot be compared with a per-peer allowance
+([measurement.md](experiments/content-providers/measurement.md)). The figures
+are removed rather than restated.
 
 ## The three gates
 
-In order of severity, all in `prepareCredit`
-(`pkg/accounting/accounting.go:290-336`) except the last.
+In order of severity, all in `PrepareCredit`
+(`pkg/accounting/accounting.go:281-336`) except the last. Note the capital: a
+lowercase `prepareCredit` is a different function, in
+`pkg/retrieval/retrieval.go:497`.
 
-**1. Early settlement.** When expected debt reaches `earlyPayment`, which is
+**1. Early settlement.** When expected debt **less what the peer may already
+have counted** reaches `earlyPayment`, and the balance is actually negative, the
+node settles before it has to (`:312`). `earlyPayment` is
 `100 - payment-early-percent` of what the peer extended, so 50% by default
-(`:1011`), the node settles before it has to. This is deliberate: paying early
-avoids blocking a later request that arrives while the balance sits near the
-limit.
+(`:1011`). Paying early avoids blocking a later request that arrives while the
+balance sits near the limit.
 
 **2. Overdraft refusal.** The hard gate:
 
-```go
-// pkg/accounting/accounting.go:325-335
-timeElapsedInSeconds := min((now-refreshTimestampMilliseconds)/1000, 1)
-refreshDue := timeElapsedInSeconds * refreshRate
-overdraftLimit := paymentThreshold + refreshDue
-if increasedExpectedDebt > overdraftLimit {
-	return nil, ErrOverdraft
-}
+Simplified from `pkg/accounting/accounting.go:325-335`, which uses `big.Int`:
+
+```text
+timeElapsedInSeconds = min((now - refreshTimestampMilliseconds) / 1000, 1)
+refreshDue           = timeElapsedInSeconds * refreshRate
+overdraftLimit       = paymentThreshold + refreshDue
+refuse when increasedExpectedDebt > overdraftLimit
 ```
 
-Two things follow that surprise people. The elapsed term is **capped at one
-second**, so waiting longer than a second buys no more headroom; the most this
-adds is one refresh rate. And the limit is the threshold **the peer announced**,
-so a node cannot raise its own spending limit by editing its own configuration.
+Three things follow that surprise people.
+
+**The elapsed term is integer division, then capped at one.** It is 0 below one
+second and 1 at or above it, so `refreshDue` takes exactly two values, 0 or one
+refresh rate. Nothing accrues at 200 ms or 600 ms. Four designs in this project
+were withdrawn for assuming it ramps.
+
+**The clock is not the request's.** `refreshTimestampMilliseconds` is written
+only when a refreshment completes (`:1106`), so the term is usually already past
+one second and pinned at its cap. A completed refreshment resets it, which drops
+`refreshDue` to 0 and **tightens** the limit for the following second; the debt
+reduction is what helps, not this term.
+
+**The limit is the threshold the peer announced**, so a node cannot raise its own
+spending limit by editing its own configuration.
 
 **3. Disconnection.** A peer whose debt to us passes `disconnectLimit`, 125% of
-what we extended, is disconnected and blocklisted for
-`(latentDebt + paymentThreshold) / refreshRate` seconds. Refusing service is the
-normal case; disconnection is for a peer that got past the refusal.
+what we extended, plus the same refresh term (`:1355`), is disconnected and
+blocklisted for
+`(max(latentDebt, refreshRate) + paymentThreshold) * multiplier / refreshRate`
+seconds (`:1390-1409`). The `paymentThreshold` in that formula is the node's own
+configured value, not either per-peer field. `latentDebt` includes
+`ghostBalance` (`:912`). Refusing service is the normal case; disconnection is
+for a peer that got past the refusal.
 
 ## Thresholds grow with history
 
@@ -152,12 +213,20 @@ step by that amount, until they pass a limit after which they double
 
 Three consequences worth knowing:
 
-- **There is no cap.** The growth path adds a refresh rate with no upper bound,
-  and `NotifyPaymentThreshold` stores whatever a peer announces without checking
-  it (`:1004-1013`). **Measured:** a bench pair that had traded for days was
-  announcing 94,500,000, and then 112,500,000, from a configured 13,500,000.
-- **`Connect` resets it** to the configured value (`:1453`). A reconnect throws
-  away the accumulated allowance, and it has to be re-earned.
+- **There is no upper cap.** The growth path adds a refresh rate without bound,
+  and `NotifyPaymentThreshold` stores whatever a peer announces
+  (`:1004-1013`). There is a **lower** bound: an announcement below
+  `minPaymentThreshold` is rejected and the peer disconnected
+  (`pkg/pricing/pricing.go:102-105`). **Observed on the bench**, with
+  `cp290/t12e.sh` and `cp290/t13.sh`: a pair that had traded for days announced
+  94,500,000, and then 112,500,000, from a configured 13,500,000.
+- **`Connect` resets the announced value** to the configured one (`:1453`), and
+  also zeroes the balance and the surplus balance (`:1465`, `:1470`), so unpaid
+  debt does not survive a reconnect either. The allowance is **not** fully
+  re-earned from scratch: `thresholdGrowAt` is rewound but the cumulative
+  settled total is not, so a returning peer re-fires the upgrade on its next
+  settlement. That asymmetry is
+  [#333](https://github.com/crtahlin/wasp/issues/333).
 - **So a long-lived relationship behaves quite differently from a fresh one**,
   and a measurement that does not say which it was is hard to interpret.
 
@@ -179,8 +248,10 @@ Three consequences worth knowing:
 | Change | What it does | Record |
 |---|---|---|
 | `providers-payment-threshold` and `providers-credit-budget` | A provider announces a larger threshold to a peer downloading content it announced, granted once per connection, never lowered, bounded by a node-wide budget. Measured: it takes a fresh peer to the configured value at once, and does not by itself make a large sole-source download complete. | [#327](https://github.com/crtahlin/wasp/issues/327), [results](experiments/content-providers/per-peer-threshold-results.md) |
-| Preferred peers keep their place after a credit refusal | A named provider refused credit for a chunk is kept for up to eight further attempts rather than dropped at once, which upstream does. | [#324](https://github.com/crtahlin/wasp/issues/324) |
-| Metrics | `bee_retrieval_preferred_overdrafts`, `_readmits`, `_misses`, and the provider grant counters. These are the only practical way to see credit refusal, which is otherwise silent in the logs. | [#324](https://github.com/crtahlin/wasp/issues/324), [#327](https://github.com/crtahlin/wasp/issues/327) |
+| Preferred peers keep their place after a credit refusal | A named provider refused credit for a chunk is kept for up to eight further attempts rather than dropped at once. **Upstream has no preferred path at all**; on its ordinary path it skips a refused peer for 600 ms and retries, so dropping at once was this fork's own earlier behaviour, not upstream's. | [#324](https://github.com/crtahlin/wasp/issues/324) |
+| Per-path credit metrics | `bee_retrieval_preferred_overdrafts`, `_readmits`, `_misses`, and the provider grant counters. Upstream already counts refusals node-wide as `bee_accounting_accounting_blocks_count`; these add which path they happened on, which is otherwise invisible because credit refusal is silent in the logs. | [#324](https://github.com/crtahlin/wasp/issues/324), [#327](https://github.com/crtahlin/wasp/issues/327) |
+| Threshold announcements serialised per peer | Concurrent announcements to one peer are coalesced, so a grant and a growth step cannot race. | [#327](https://github.com/crtahlin/wasp/issues/327) |
+| Chequebook liquidity cached for 30 s | Reading it once per cheque is what limits how fast debt clears with a peer. | [#301](https://github.com/crtahlin/wasp/issues/301), [#302](https://github.com/crtahlin/wasp/issues/302) |
 
 A consequence of all this, measured rather than reasoned: a sole-source download
 truncates when one chunk exhausts its eight readmissions, loses the only peer
