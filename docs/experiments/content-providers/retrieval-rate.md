@@ -79,7 +79,7 @@ was readmitted, 438 of 438, which says the existing #324 path already recovers
 from hundreds of refusals inside one download without any wait at all.
 
 So credit pressure is present and is **not** shown to be what ends these
-downloads. Something fails a read unit; what it is has not been isolated.
+downloads. Something fails a read unit. What it is is now isolated, in [truncation-cause.md](truncation-cause.md); the rest of this document is left as it was written, before that.
 
 ### Why the baseline is four times slower than the same model predicts
 
@@ -148,6 +148,17 @@ pseudosettle and cheques, and the announced threshold at both ends of each run.
 ## What to do next, in order
 
 ### 1. Isolate why a read unit fails
+
+**Mostly answered, in [truncation-cause.md](truncation-cause.md).** The
+provider is refused credit for a chunk, kept for up to `maxOverdraftReadmits`
+further attempts and then dropped from that chunk, after which the chunk is
+asked of about thirty-four peers that cannot hold it and fails, taking its read
+unit with it. The counters that show the drop already existed.
+
+**This step is not finished.** It asked for the balance, the announced threshold
+at both ends, and the settlement rate split into pseudosettle and cheques, and
+the harness that answered the mechanism recorded none of them per run. The
+sections below still stand as written.
 
 Nothing further should be specified until this is answered, and it is cheap to
 answer. The observable is already there: `retrieval.go` logs
