@@ -85,7 +85,8 @@ Every experiment is one merge commit on `main`, so the history answers the
 question directly:
 
 ```bash
-git log --first-parent main          # every change this fork makes to Bee
+git fetch origin                     # main is a local ref and is often behind
+git log --first-parent origin/main   # every change this fork makes to Bee
 git diff <merge>^1 <merge>           # exactly what one of them changed
 ```
 

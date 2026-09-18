@@ -28,9 +28,10 @@ of thousands of commits on every sync and break every clone. Merge is also what
 keeps the **merge base advancing**, which is the whole reason syncs stay cheap.
 
 This is worth being blunt about, because the previous fork got it wrong: if you
-squash an upstream sync, `git merge-base main upstream/master` never moves, and
-the *next* sync three-way-merges from the original fork point again. That is how
-a fork ends up re-resolving the same conflicts forever. **Never squash a sync.**
+squash an upstream sync, `git merge-base origin/main upstream/master` never
+moves, and the *next* sync three-way-merges from the original fork point again.
+That is how a fork ends up re-resolving the same conflicts forever. **Never
+squash a sync.**
 
 ## The automated path
 
@@ -51,7 +52,9 @@ a fork ends up re-resolving the same conflicts forever. **Never squash a sync.**
 
 In order:
 
-1. **The protocol-freeze diff.** `git diff main...HEAD -- .github/protocol-freeze.lock`.
+1. **The protocol-freeze diff.** After `git fetch origin`, run
+   `git diff origin/main...HEAD -- .github/protocol-freeze.lock`.
+   Never a bare `main`; see rule 13 in `AGENTS.md`.
    If upstream moved a protocol minor, read
    `docs/agent-playbooks/protocol-compatibility.md` on what that means for
    dialability before merging.
@@ -78,7 +81,7 @@ In order:
    sync pull request and record it in the body.
 
    ```bash
-   git diff --name-status main...HEAD -- .github/workflows/ | grep '^A'
+   git diff --name-status origin/main...HEAD -- .github/workflows/ | grep '^A'
    ```
 4. **`docs/DIFFERENCES.md`.** After the sync, the new base is the latest Bee
    release, which is what that file compares against. Re-check every entry
@@ -144,13 +147,18 @@ git push --force-with-lease
 
 Two different lifecycles, conflating them is the usual mistake.
 
-**Unmerged `exp/*` branches** get rebased onto `main`, keeping them as clean
-patch series so `scripts/export-patch.sh` keeps working:
+**Unmerged `exp/*` branches** get rebased onto `origin/main`, keeping them as
+clean patch series so `scripts/export-patch.sh` keeps working:
 
 ```bash
 git switch exp/<n>-<slug>
-git rebase main
+git fetch origin
+git rebase origin/main
 ```
+
+`origin/main`, not `main`: a local `main` in a worktree is routinely behind, and
+rebasing onto a stale one silently rebuilds the branch on an old base. See
+rule 13 in `AGENTS.md`.
 
 If the conflict is in code the experiment *replaces* wholesale (a rewritten
 hasher, a replaced scheduler), take ours and re-verify against upstream's new
@@ -166,7 +174,7 @@ keep rebasing them.
 
 ```bash
 git log --merges -1 --format='%H %P'          # must show TWO parents
-git merge-base main upstream/vX.Y.Z            # must equal the upstream tag commit
+git merge-base origin/main upstream/vX.Y.Z     # must equal the upstream tag commit
 ```
 
 If the first shows one parent, the sync was squashed and must be redone.

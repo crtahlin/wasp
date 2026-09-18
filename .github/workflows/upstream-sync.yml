@@ -217,8 +217,13 @@ jobs:
             echo "The lock diff **is** the protocol review for this pull request:"
             echo
             echo '```'
-            echo "git diff main...$BRANCH -- .github/protocol-freeze.lock"
+            echo "git fetch origin"
+            echo "git diff origin/main...origin/$BRANCH -- .github/protocol-freeze.lock"
             echo '```'
+            echo
+            echo "\`origin/main\`, not \`main\`: a local \`main\` is routinely behind, and"
+            echo "the three-dot form takes its merge base, so a stale one widens the"
+            echo "diff. See rule 13 in \`AGENTS.md\`."
             echo
             echo "If upstream moved a protocol minor, peers still on the previous release"
             echo "will no longer be able to dial us for that protocol until they upgrade."

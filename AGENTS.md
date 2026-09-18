@@ -191,19 +191,37 @@ The check:
 
 ```bash
 git fetch upstream       # never --tags; see upstream-sync.md
+git fetch origin         # origin/main, never main; see below
 BASE="upstream/$(cat .upstream-base)"
 LATEST=$(git tag -l 'upstream/v*' | grep -v -- '-rc' | sort -V | tail -1)
 LAST=<wasp commit named at the top of docs/DIFFERENCES.md>
 
 # Fork merges since the last refresh. Each is a candidate entry.
-git log --first-parent --format='%h %s' "$LAST"..main
+git log --first-parent --format='%h %s' "$LAST"..origin/main
 
 # Files that both the fork and the latest Bee release changed since the
 # base. Bee can only have adopted a fork change in one of these files, so
 # read each one; a match is not proof of adoption.
 comm -12 <(git diff --name-only "$BASE" "$LATEST" | sort) \
-         <(git diff --name-only "$BASE" main | sort)
+         <(git diff --name-only "$BASE" origin/main | sort)
 ```
+
+**Compare against `origin/main`, never `main`.** `main` is a local branch ref
+that only advances when the checkout holding it pulls. Any checkout that has not
+pulled is behind, and a worktree is behind by default, since the branch is
+checked out elsewhere and nothing in this workflow requires that checkout to
+pull.
+
+That matters more than it sounds, because the failure is silent and points the
+wrong way: a diff against a stale `main` comes back **short by exactly the
+changes you are looking for**, and where every such change is newer than the
+stale ref it comes back empty. An empty diff reads as confirmation. That has
+already put a false claim into a merged-candidate spec, which stated in bold
+that `pkg/accounting` was unmodified when at that commit it carried 782 inserted
+lines of fork change. See [#355](https://github.com/crtahlin/wasp/issues/355).
+
+If you are unsure, `git rev-parse main origin/main` takes a second and settles
+it.
 
 When `$LATEST` equals `$BASE`, the second command prints nothing, and nothing
 can have been adopted. A refresh that finds no change still updates the two
@@ -223,13 +241,18 @@ issue numbers collide with upstream Bee pull-request numbers in the shared
 history, so a bare `git log --grep '(#N)'` can return an upstream commit. Use:
 
 ```bash
-git log --first-parent "upstream/$(cat .upstream-base)"..main --grep "(#N)"
+git fetch origin
+git log --first-parent "upstream/$(cat .upstream-base)"..origin/main --grep "(#N)"
 ```
 
 and, when the fix landed on its own branch without an issue reference in the
 merge subject, resolve it from the branch tip instead. Do not link to the Bee
 repository (rule 1); the label is a marker for a later human decision, nothing
 more.
+
+`origin/main` is used there for the reason given under rule 13: a stale local
+`main` would silently narrow the range and could miss the very commit being
+looked for.
 
 ## Writing
 

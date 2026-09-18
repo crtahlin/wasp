@@ -4,11 +4,31 @@ Issue: [#327](https://github.com/crtahlin/wasp/issues/327). Analysis:
 [per-peer-credit.md](per-peer-credit.md), merged as the argument this spec
 implements.
 
-Code references are to `main` at `7bd5da14`, base `upstream/v2.8.2`.
-`pkg/accounting`, `pkg/pricing` and `pkg/settlement/pseudosettle` are
-byte-identical to that base, verified with `git diff upstream/v2.8.2 main --`
-against those three paths, which is empty. So every line cited in them is also
-upstream's.
+Code references are to `7bd5da14`, base `upstream/v2.8.2`.
+
+> **Note on the verification below, from
+> [#355](https://github.com/crtahlin/wasp/issues/355).** This document said
+> `pkg/accounting`, `pkg/pricing` and `pkg/settlement/pseudosettle` were
+> byte-identical to the base, "verified with `git diff upstream/v2.8.2 main --`
+> against those three paths, which is empty".
+>
+> **That was true at `7bd5da14`**, the commit this document pins, and it is still
+> true there: the diff at that commit is empty. The defect is that the command
+> names `main`, a **moving** ref, rather than the pinned commit. Re-run today it
+> gives a different answer, because those paths now carry 1,600 inserted lines
+> and 11 deleted against the base: `pkg/accounting` 1,196 and 11, `pkg/pricing`
+> 404, and `pkg/settlement/pseudosettle` still unchanged. Most of that is #327's
+> own implementation and #353, all of which landed after this document was
+> written.
+>
+> So **read every line number below against `7bd5da14`, not against current
+> `main`.** `PrepareCredit` in particular has both moved and gained fork code
+> since, so its citations here do not point where they did. The verification
+> command, restated so it stays true:
+>
+> ```bash
+> git diff upstream/v2.8.2 7bd5da14 -- pkg/accounting pkg/pricing pkg/settlement/pseudosettle
+> ```
 
 **Depends on [#324](https://github.com/crtahlin/wasp/issues/324)**, merged as
 [`558c93a5`](https://github.com/crtahlin/wasp/commit/558c93a5), which adds the

@@ -10,9 +10,15 @@ This document takes that cost seriously and proposes extending the credit
 per peer instead of node-wide. It is analysis and a proposal, not a spec. It
 needs its own issue and a merged spec before any code (rule 2).
 
-Code references are to `main` at `6eaaa651`, base `upstream/v2.8.2`.
-`pkg/accounting` and `pkg/pricing` are byte-identical to that base, so every
-line cited is also upstream's.
+Code references are to `6eaaa651`, base `upstream/v2.8.2`. `pkg/accounting` and
+`pkg/pricing` are byte-identical to that base **at that commit**, so every line
+cited is also upstream's. They are not byte-identical on current `main`, and
+`PrepareCredit` has since both moved and gained fork code, so read the line
+numbers below against `6eaaa651`:
+
+```bash
+git diff upstream/v2.8.2 6eaaa651 -- pkg/accounting pkg/pricing
+```
 
 ## What is already measured
 
@@ -129,8 +135,11 @@ validates only a minimum of 9,000,000, computed as 2 x refreshRate at
 pricing at `:1201`; the same value appears as the `minPaymentThreshold` constant
 at `:240`, which guards the node's own config (`pricing.go:100-102`), and
 `NotifyPaymentThreshold` stores whatever arrives (`accounting.go:992-1001`).
-Both files are byte-identical to `upstream/v2.8.2`, so this is upstream behavior
-and not something our fork arranged. A wasp provider would therefore serve more
+`pricing.go` and `accounting.go` are byte-identical to `upstream/v2.8.2` at
+`6eaaa651`, so this is upstream behavior and not something our fork arranged.
+(`node.go` is not: it carries 324 inserted lines at that commit. The lines
+cited from it above are upstream's, but the file as a whole is fork-modified.
+An earlier version of this sentence said "both files" after naming three.) A wasp provider would therefore serve more
 to downloaders running unmodified Bee. Those downloaders do not send the
 local-only header, so they would need a different trigger, or would be left out;
 the spec has to choose, and leaving them out is the safer default.
