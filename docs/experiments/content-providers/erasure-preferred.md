@@ -456,7 +456,7 @@ Arms: stock against patched, at both levels, for **12 runs**.
 Recorded per run:
 
 - **`preferred_candidates_selected`, the counter this change adds, and the
-  primary observable.** It rises once per retrieval whose candidate list is not
+  primary observable.** It rises once per **flight** whose candidate list is not
   empty, which is "the set reached this fetch" with no dependence on credit, on
   readmits, or on an ordinary peer arriving first;
 - `preferred_attempts` and `preferred_overdrafts` separately, recorded because
@@ -615,11 +615,16 @@ change touches two files, not one.
 - `pkg/retrieval/preferred.go`: `HasPreferredPeers`.
 - `pkg/api/providers.go`: the re-attach in `providerGetter`.
 - `pkg/retrieval/retrieval.go` and `pkg/retrieval/metrics.go`: the
-  `PreferredCandidatesSelected` counter, incremented once per retrieval whose
+  `PreferredCandidatesSelected` counter, incremented once per **flight** whose
   candidate list is not empty. Without it there is nothing to measure, for the
   reasons under the Hypothesis, so it is part of the change rather than of the
   harness.
 - `pkg/retrieval/preferred_test.go`, `package retrieval_test`:
+  - `TestPreferredCandidatesSelectedCountsOncePerFlight`, including a flight
+    with an empty candidate list, which must not move it, and two deduplicated
+    callers of one chunk, which must move it once. It belongs here and not in
+    `package api_test`, because the counter lives in `pkg/retrieval` and rises
+    inside `RetrieveChunk`.
   - `TestHasPreferredPeersDistinguishesAbsentFromNil`, which pins the Go
     semantics the helper rests on. It is not a discriminating test against the
     naive check, because no reachable path today tells the two apart, and the
@@ -629,8 +634,6 @@ change touches two files, not one.
   - `TestProviderGetterRestoresSetOnBackgroundContext`, a fetch through the
     wrapper with `context.Background()` arrives at the underlying getter
     carrying the set;
-  - `TestPreferredCandidatesSelectedCountsOncePerFlight`, including a
-    retrieval with an empty candidate list, which must not move it.
   - `TestProviderGetterKeepsDeliberateNil`, the suppression at the discover
     call is not undone;
   - `TestProviderGetterLeavesExistingSetAlone`, a context that already carries a
