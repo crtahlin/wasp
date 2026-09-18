@@ -99,9 +99,17 @@ ship the unbounded form. It is also a candidate explanation **for** the phase 1
 negative: if the set is lost for most of a default-level download, the speed
 result was measured on a mechanism that was only partly running.
 
-That is a genuine reading and not a licence. **If the measurement produces a
-speed claim rather than a mechanism finding, the rule applies to it** and the
-work stops there rather than continuing into the rest of phase 2.
+That is a genuine reading and not a permission slip, and the binding has to be
+something the measurement can actually trigger. **It is this: accepting this
+change does not reopen the rest of phase 2.** The other phase 2 items stay
+stopped under the phase 1 rule, and each would need its own argument. If the
+result here is read as evidence that providers are faster after all, that is a
+speed claim, it falls under the phase 1 rule, and it needs the phase 1
+conditions rerun rather than this arm quoted at them.
+
+A draft bound itself with "if the measurement produces a speed claim the rule
+applies", which could never fire, because nothing in the acceptance table can
+produce a speed claim: download time appears there only as a harm check.
 
 ## What is NOT established, and must not be re-asserted
 
@@ -139,19 +147,46 @@ refute it, both from the document it cited:
 So an acceptance rule reading "share does not rise, therefore the mechanism is
 refuted" would have rejected a correct fix for a reason its own source excludes.
 
-### The observable that is not credit-capped
+### The observable, and why the obvious repair of it is also wrong
 
-`prepareCredit` runs **before** either counter moves, and then exactly one of
-them does: `PreferredOverdrafts` on a credit refusal, `PreferredAttempts`
-otherwise (`pkg/retrieval/preferred.go:228-239`). Their **sum is the number of
-chunks for which a preferred candidate was selected at all**, which is precisely
-"did the set reach this fetch". Credit decides which side of that sum a chunk
-lands on; it does not decide the total.
+A second draft proposed `preferred_attempts + preferred_overdrafts`, on the
+reading that `prepareCredit` runs before either counter moves and then exactly
+one of them does, so the sum counts chunks. **That is false three ways, and the
+third is the one that matters.**
+
+- A chunk can consume two candidates, since `preferredCandidates` returns up to
+  `maxPreferredAttempts`, which is 2 (`pkg/retrieval/preferred.go:198-200`), and
+  they are tried one after the other (`retrieval.go:209-211,274-276`).
+- A non-overdraft failure from `prepareCredit` increments **neither** counter,
+  because the increment sits inside an `errors.Is(err, ErrOverdraft)` check
+  (`preferred.go:229-235`), and the candidate is then dropped
+  (`retrieval.go:296-301`).
+- **`preferred_overdrafts` counts the same chunk repeatedly.** The #324 readmit
+  branch keeps the peer and **does not consume the candidate**
+  (`retrieval.go:280-295`, against the success branch at `:304`), so a later
+  retry runs `prepareCredit` on the same peer again and increments again, up to
+  `maxOverdraftReadmits + 1`, which is 9 times for one chunk. So credit does
+  decide the total, and inflates it **exactly in the regime this spec predicts**,
+  where refusals rise. The sum would have been satisfied by repeated refusals on
+  a few chunks rather than by the set reaching more fetches.
+
+**The observable is therefore
+`preferred_attempts + (preferred_overdrafts - preferred_readmits)`.** The
+subtraction removes the readmit looping: `preferred_readmits` counts exactly the
+refusals where the candidate was kept (`retrieval.go:294`), so the difference is
+the refusals that ended in it being dropped. The sum is then the number of
+**preferred candidate decisions concluded on the credit path**, at most two per
+chunk and not inflated by retries against one peer.
+
+It is a proxy and the spec says which way it errs: it **undercounts**, because a
+candidate dropped for a non-credit reason concludes without moving any counter.
+That biases against the change, which is the safe direction for an observable
+whose rise is what acceptance turns on.
 
 **The hypothesis is therefore: re-attaching the set raises
-`preferred_attempts + preferred_overdrafts` at MEDIUM, toward the count a
-level-NONE download of the same bytes reaches.** That is the mechanism stated in
-a quantity the credit window does not bind.
+`preferred_attempts + (preferred_overdrafts - preferred_readmits)` at MEDIUM,
+toward the figure a level-NONE download of the same bytes reaches.** That is the
+mechanism stated in a quantity the credit window does not set a ceiling on.
 
 ### Whether it helps is a separate question, and it may not
 
@@ -228,7 +263,7 @@ return storage.GetterFunc(func(ctx context.Context, addr swarm.Address) (swarm.C
 The `ctx` parameter there is **whatever the caller passed**, which for a
 prefetch fetch is the background context. So the set is restored at the last
 point before retrieval, for exactly the fetches that lost it, and the change is
-two lines in this fork's own file.
+two lines, in two files of this fork's own.
 
 **`HasPreferredPeers` is defensive, and the reason a first draft gave for it was
 wrong.** That draft argued the naive `PreferredPeers(ctx) == nil` check would
@@ -412,12 +447,18 @@ Recorded per run:
 - **total chunk requests**, for the singleflight effect, read as the patched
   arm against the stock arm of the same session rather than against the
   historical figure;
-- `preferred_misses`, which rose by only 1 or 2 per download in every run so
-  far;
+- `preferred_misses`. The "1 or 2 per download" figure belongs to the size
+  sweep in `truncation-cause.md:95-97`; across the #290 conditions it reached
+  5 (2 to 6) and 20 (19 to 20) (`results.md:88,90`), so the invalidation
+  threshold below is set against the stock arm of the same session rather than
+  against a remembered number;
 - delivered bytes, `curl` exit code and body SHA-256;
 - **total download time**, which is decisive here and not merely reported: the
   concentration risk is the reason this change might be unshippable;
-- the provider's `/blocklist` naming the requester.
+- the provider's `/blocklist` naming the requester;
+- and the three conditions the invalidation list needs but cannot check after
+  the fact: the `Swarm-Cache` setting used, the provider grant asserted zero,
+  and the peer count on both nodes.
 
 **Every comparison is patched against stock within one session.** The #290
 figures are quoted for orientation only: they were taken on a 16 MiB file with
@@ -449,10 +490,23 @@ session, with "apart" meaning the three-run ranges do not overlap:
 | Candidate count | Overdrafts not readmitted | Download time | Outcome |
 |---|---|---|---|
 | rises, apart | does not rise | not worse, apart | **accept and ship** |
+| rises, apart | does not rise | overlapping | **accept and ship**: time is a harm check, and an overlap is the absence of harm |
 | rises, apart | does not rise | worse, apart | **accept the mechanism, do not ship**: the cost is the concentration, and the bound is the next issue |
 | rises, apart | rises | either | **accept the mechanism, do not ship unbounded**: same follow-up, with the readmit exhaustion as its evidence |
-| rises, ranges overlap | either | either | **undetermined**: rerun with more runs before reading it |
-| does not rise | either | either | **reject**: the set is still not reaching the prefetch, so the mechanism read from the code is not what happens |
+| ranges overlap | either | either | **undetermined**: rerun with more runs before reading it |
+| falls, apart | either | either | **reject**: the set is still not reaching the prefetch, so the mechanism read from the code is not what happens |
+
+Download time is a **harm check, not a signal**: only a worse time with ranges
+apart decides anything, and an overlap is read as no harm rather than as no
+information. A draft of this table used "not worse, apart" against "worse,
+apart", which left every overlapping time matching no row at all, and
+overlapping times are what this spec expects with three runs.
+
+The candidate-count column is symmetric for the same reason a draft of it was
+not: an overlapping rise and an overlapping fall are the same evidential
+quality, so both are undetermined, and only a fall with ranges apart rejects.
+That draft made an overlapping fall a firm reject while an overlapping rise was
+undetermined, which three runs cannot support.
 
 Two quantities are recorded and deliberately decide nothing on their own. The
 **provider's served share** is credit-capped, so it may not move even when the
@@ -466,9 +520,9 @@ should complete, and any shortfall in either is a reject for that arm.
 
 **What invalidates a run** rather than deciding it: a different `Swarm-Cache`
 setting between arms; a provider grant other than zero; a peer count that
-changes between arms; `preferred_misses` rising far above the 1 or 2 per
-download seen so far, which says the provider is missing chunks and the arm is
-measuring that; a stock-arm hash failure; or any difference between stock and
+changes between arms; `preferred_misses` rising far above the stock arm of the
+same session, which says the provider is missing chunks and the arm is measuring
+that; a stock-arm hash failure; or any difference between stock and
 patched in the level-NONE control.
 
 ## Rollout and rollback
@@ -516,7 +570,7 @@ change touches two files, not one.
   - `TestHasPreferredPeersDistinguishesAbsentFromNil`, the whole reason the
     helper exists.
 - `pkg/api/providers_test.go`, `package api_test`, following the existing idiom
-  at `:75-79` which already asserts on the context a getter receives:
+  at `:75-79`, which asserts on the context a call receives:
   - `TestProviderGetterRestoresSetOnBackgroundContext`, a fetch through the
     wrapper with `context.Background()` arrives at the underlying getter
     carrying the set;
