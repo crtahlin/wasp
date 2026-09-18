@@ -319,13 +319,15 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 	// wasp #353: recorded for the refusal log line below. This says only that
 	// the branch was entered and settle was CALLED, and returned nil.
 	//
-	// settle itself often does nothing: it gates on the amount reaching one
-	// refresh rate, on more than 999 ms since the last refreshment, on no
-	// refreshment or payment already being in flight, on failedSettlementInterval
-	// since the last failure, and on two minimumPayment checks. What it does do
-	// synchronously is mutate shadowReservedBalance; the stored balance is
-	// written later, by a goroutine. So true here does not mean a settlement
-	// started, still less that one completed.
+	// settle itself often does nothing. The refreshment is gated on the amount
+	// reaching one refresh rate, on more than 999 ms since the last one, and on
+	// none already being in flight. The monetary payment is gated on a pay
+	// function existing at all, on none already being in flight, on
+	// failedSettlementInterval since the last failure, and on two minimumPayment
+	// checks. What settle does synchronously is bookkeeping: refreshOngoing,
+	// paymentOngoing, shadowReservedBalance and refreshReservedBalance. The
+	// stored balance is written later, by a goroutine. So true here does not
+	// mean a settlement started, still less that one completed.
 	settleCalled := false
 
 	if increasedExpectedDebtReduced.Cmp(threshold) >= 0 && currentBalance.Cmp(big.NewInt(0)) < 0 {

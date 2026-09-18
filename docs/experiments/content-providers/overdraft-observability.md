@@ -325,9 +325,10 @@ longer exists". **`settle()` is asynchronous.** It dispatches
 `go a.refreshFunction(...)` (`:476`) and `go a.payFunction(...)` (`:521`) and
 returns `nil` at `:527`, writing no balance. The store write happens later, in
 `NotifyRefreshmentSent` (`:1169`) or on the payment-sent path. So the re-read at
-`:319` normally returns the **same** value, and the only thing `settle()`
-changes synchronously is `shadowReservedBalance` (`:515`), which is in neither
-`settled_balance` nor `increasedExpectedDebt`.
+`:319` returns the **same** value, for the reason given below, and what
+`settle()` changes synchronously is bookkeeping (`refreshOngoing`,
+`paymentOngoing`, `shadowReservedBalance`, `refreshReservedBalance`), none of
+which is in `settled_balance` or `increasedExpectedDebt`.
 
 The reason that survives is weaker still, and is worth stating as such:
 **`settled_balance` should come from the same call as `expected_debt`**, which
@@ -568,7 +569,11 @@ libp2p peer identifiers before writing any file.
 
 - `pkg/accounting/accounting.go`: the log line, `settleCalled`, the captured
   balance, and the `loggerV2` field built in `NewAccounting`.
-- `pkg/accounting/accounting_test.go`: the five tests and a capture logger.
+- `pkg/accounting/overdraft_logging_test.go`: a new file rather than an
+  addition to `accounting_test.go`, carrying a capture logger and seven tests.
+  The five below, plus one covering a refusal on a peer already in debt so the
+  settle branch is entered and the balance term is not zero, and one asserting
+  every field of the line is present.
 - `docs/DIFFERENCES.md`: a row, because the change adds a log line and a
   `GET /loggers` row that Bee does not have. Not because it is the first fork
   change to `pkg/accounting`, which it is not.
