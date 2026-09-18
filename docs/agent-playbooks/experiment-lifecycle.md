@@ -123,6 +123,17 @@ git log --format=%B origin/main..HEAD |
 
 A hit that is not deliberate is a reword, not a debate.
 
+**Check before the first push, not before the merge.** Amending the commit and
+force-pushing does not undo it: GitHub records the reference when the commit
+arrives, and applies it when the pull request merges, even though the amended
+commit is what ends up on `main`. That is not a guess. The commit adding this
+very warning quoted the offending phrase, was amended and force-pushed within
+minutes, merged cleanly with a sanitised message, and closed the issue anyway
+from the commit that no longer exists in the history.
+
+If it has already happened, reopening the issue is the whole fix; nothing needs
+reverting.
+
 ## 6. Merge, then record
 
 ```bash
