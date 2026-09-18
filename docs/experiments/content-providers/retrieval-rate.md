@@ -219,11 +219,72 @@ client-side scheduling: no wire format, protocol identifier, handshake or
 message change, and `make protocol-freeze` unaffected. The forwarding note above
 is about how long this node holds a stream open, not about what it sends.
 
+## Facts about the credit gate, and four designs that ignored them
+
+Four designs have been withdrawn on this issue. Each picked a remedy before the
+gate was measured, and each was refuted by reading it. The facts are recorded
+here so a fifth does not have to rediscover them.
+
+The gate is `increasedExpectedDebt > paymentThreshold + refreshDue`
+(`pkg/accounting/accounting.go:331`). Term by term:
+
+- **`refreshDue` is a step function with two values, not a ramp.**
+  `timeElapsedInSeconds := min((now - refreshTimestampMilliseconds)/1000, 1)`
+  is **integer division** (`:325`). It is 0 below one second and 1 at or above
+  it, so `refreshDue` is either 0 or one `refreshRate`, 4,500,000. Nothing
+  accrues at 200 ms or 600 ms.
+- **The clock it measures is not the request's.**
+  `refreshTimestampMilliseconds` is written in one place only,
+  `NotifyRefreshmentSent` (`:1106`), when a refreshment completes. No retrieval
+  path resets it, so the elapsed term is normally already past one second and
+  `refreshDue` sits pinned at its cap.
+- **A completed refreshment tightens the limit for a second.** Setting that
+  timestamp to now drops `refreshDue` from 4,500,000 to 0. The debt reduction
+  is what helps; this term moves against it at that moment.
+- **`paymentThreshold` is what the peer announced**, and changes only when the
+  peer announces again.
+- **So on a chunk's timescale the only terms that can move are
+  `increasedExpectedDebt`'s own parts**: the settled debt, and
+  `reservedBalance`, which rises and falls with every concurrent request
+  against that peer (`:256-278`).
+
+**The open question, and the next measurement.** Which of those actually moves
+during a failing chunk's life? It decides the remedy and rules out its opposite:
+
+- if **`reservedBalance`** is the mover, then spacing retries is exactly wrong
+  and more attempts are better than fewer;
+- if a **completed refreshment** is what unblocks a chunk, the remedy concerns
+  triggering settlement rather than pacing retries, and note that `settle()` is
+  called from inside `PrepareCredit` (`:311-318`), so fewer attempts also means
+  fewer chances to start one.
+
+Instrumenting the settled debt, `reservedBalance`, `shadowReservedBalance` and
+`refreshTimestampMilliseconds` at each refusal for a single chunk answers it.
+**No design should be written before that.**
+
+### The four withdrawn designs
+
+1. **The credit ceiling ends the download.** Refuted: the run with the fewest
+   refusals truncated earliest, and downloads fail at a balance of zero.
+2. **Wait for credit where the loop gives up.** Refuted: by then the provider is
+   not in the candidate list, so there is nothing to retry.
+3. **Do not consume the candidate for a reason that expires.** Refuted: the
+   preferred path never reads the skip list, so the provider returns in about
+   30 ms rather than 600 ms; and `errorsLeft` does not decrement on that path,
+   so removing `maxOverdraftReadmits` removes the only thing that terminates it.
+4. **Space the retries using the skip list.** Refuted by the first two facts
+   above: the gate cannot move between 0 ms and 600 ms. Also not implementable
+   as written, since both candidate-slicing sites assume the head was the peer
+   attempted, and `PruneExpiresAfter` deletes the very entry it would read.
+
+
 ## Upstream portability
 
 Everything examined here is **unmodified upstream code**: the `errorsLeft` loop,
-`maxOriginErrors`, `maxOverdraftReadmits`, the wait branch, `skippeers`, and the
-unlimited errgroup in `joiner.ReadAt` are all as they are in `upstream/v2.8.2`.
+`maxOriginErrors`, the wait branch, `skippeers`, and the unlimited errgroup in
+`joiner.ReadAt` are all as they are in `upstream/v2.8.2`. `maxOverdraftReadmits`
+is **not**: it is fork code from #324, and an earlier version of this line said
+otherwise.
 
 No `affects-upstream` marker is claimed, and under rule 11 that is the correct
 outcome for now: the truncation is reproduced but its cause is not isolated, and
