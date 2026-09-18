@@ -100,6 +100,29 @@ gh pr create --repo crtahlin/wasp --base main \
 The title is linted as a conventional commit. The template's checklist includes
 the protocol-compatibility question, answer it honestly rather than ticking it.
 
+**Do not write `closes #N`, `fixes #N` or `resolves #N` in the body unless this
+pull request really finishes that issue.** GitHub treats those words as a
+closing keyword wherever they appear and shuts the issue on merge, whatever the
+sentence around them says. That is not theoretical: a spec pull request
+described the result its experiment expected to report as "it clos[e]s #NNN as a
+measured negative", and that issue closed the moment the spec merged, with no
+code written and no measurement run. The issue number is replaced above so that
+this warning can be quoted without springing the trap it describes.
+
+The trap is specific to this process, because here an issue stays open across
+three merges: its spec, its code, and its results. Only the last of those should
+carry the keyword. In prose about a future outcome write **settles**, **answers**
+or **would close**. Check before merging:
+
+```bash
+gh pr view <n> --repo crtahlin/wasp --json body --jq .body |
+  grep -inE 'clos(e|es|ed) #|fix(es|ed) #|resolv(e|es|ed) #'
+git log --format=%B origin/main..HEAD |
+  grep -inE 'clos(e|es|ed) #|fix(es|ed) #|resolv(e|es|ed) #'
+```
+
+A hit that is not deliberate is a reword, not a debate.
+
 ## 6. Merge, then record
 
 ```bash
