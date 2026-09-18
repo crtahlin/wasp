@@ -6,10 +6,15 @@ in [retrieval-rate.md](retrieval-rate.md),
 [truncation-cause.md](truncation-cause.md) and
 [overdraft-terms.md](overdraft-terms.md).
 
-**This is revision 4.** Three reviews refused it, finding thirteen, fourteen
-and then fourteen more. Two of the failures are worth stating at the top rather
+**This is revision 5.** Four reviews refused it, finding thirteen, fourteen,
+fourteen and then six. Two of the failures are worth stating at the top rather
 than in a footnote, because both are the failure this document exists to
 prevent.
+
+(The header said "revision 4, three reviews" when the document merged: the body
+was updated for the fourth review and this line was not. It is the same stale
+counter that the companion results document eventually solved by deleting its
+revision commentary altogether.)
 
 **Revision 3 reinstated three claims that had already been withdrawn** in
 [overdraft-terms.md](overdraft-terms.md) on `main`, with the same citations:
