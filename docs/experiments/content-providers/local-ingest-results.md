@@ -335,10 +335,50 @@ rather than in the harness: two distinct log lines for the two refusal branches,
 and a chunk counter separate from the usage figure. Worth building into the next
 harness rather than reaching for afterwards.
 
+## Two nodes produce the same reference
+
+Arm 1 of [#341](https://github.com/crtahlin/wasp/issues/341), the last of the
+four, measured 2026-09-18. Harness `t17.sh`, outside this repository; rows in
+`t17-two-node-reference.txt`.
+
+**What #326 actually showed** was that one node's two write paths agree: both
+the ingest and the stamped upload ran on the provider. The claim the feature
+rests on is stronger, that the reference is a function of the bytes, so two
+independent nodes must produce the same one for the same input. That had never
+been run.
+
+**Method.** Each 4,194,304-byte file is generated once locally, copied to both
+nodes, and its SHA-256 read back from each node and compared with the local one
+**before** anything is ingested. A run where the SHAs differ proves nothing and
+the harness refuses it. Both ingests send `Swarm-Redundancy-Level: 0`
+explicitly, because the level changes the reference for the same bytes.
+
+The requester does not ship with local ingest on, so it was enabled for the run
+and restored afterwards, verified by the endpoint answering 403 again.
+
+**Result: equal in all three runs**, at 1,033 chunks on both nodes each time.
+
+| Run | Reference, both nodes | Chunks |
+|---|---|---|
+| 1 | `9be81f2d1c639d80014a563aa74981de14dff4c03b9e2b77ca821bd2c763480e` | 1,033 |
+| 2 | `7050edb276cd73ec797216852b2764148eff27c5c4bd692842eda72e2136f325` | 1,033 |
+| 3 | `126a12639081a106a88c09c935e90d92cbb6404b813a1e0a655401b7159d224a` | 1,033 |
+
+The prediction was registered before the run: the references are byte-for-byte
+equal, because content addressing is a function of the bytes and the redundancy
+level. A difference would have meant something node-specific was reaching the
+reference, which would have been a more important finding than the one sought.
+
+**What this does not show.** Three files of one size at one redundancy level,
+on two nodes of the same build. It does not test a wasp node against a stock Bee
+node, nor a size that crosses a different trie shape, nor encrypted content,
+where a fresh random key per chunk gives different references for identical
+bytes by design and address equality cannot be tested at all.
+
 ## What this does not show
 
 - **Nothing about MEDIUM redundancy**, and nothing about why it truncated.
-- **Nothing about a second node** producing the same reference, per section 1.
+- ~~Nothing about a second node producing the same reference~~. Closed above: two nodes produce the same reference for the same bytes, three runs.
 - **Nothing about mid-stream refusal** on a real node in the arms above, now
   covered separately.
 - **Nothing about abandoned ingests** in the arms above, now covered
