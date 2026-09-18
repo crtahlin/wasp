@@ -1,222 +1,216 @@
-# Faster provider downloads: stop truncating when credit runs short
+# Faster provider downloads: what is measured, and what is not yet known
 
 Issue: [#343](https://github.com/crtahlin/wasp/issues/343). The companion issue
 on spreading a download across several providers is
-[#344](https://github.com/crtahlin/wasp/issues/344) and is deliberately not
-specified here; see Scope.
+[#344](https://github.com/crtahlin/wasp/issues/344).
 
 Code references are to `main` at `d43f5389`, base `upstream/v2.8.2`.
+
+**This document proposes no code change.** An earlier draft did, and a review
+found that its central mechanism could not work and that its own data
+contradicted the cause it assumed. Both are recorded below rather than removed,
+because the second one is the reason this is now a plan to isolate a cause
+rather than a plan to fix one.
 
 ## Terms
 
 - **In-flight slot**: one chunk request outstanding at a time. Throughput is
-  the number of these divided by the round trip, times the chunk size.
+  the number of these times the chunk size divided by the round trip.
 - **Read unit**: the span `joiner.ReadAt` is asked for in one call. Its leaf
-  fetches run together; the calls themselves run one after another.
-- **Sole-source content**: content no other node holds, so a requester can get
-  it only from the named provider. Local ingest
+  fetches run together, and it is all or nothing: one leaf that fails fails the
+  whole unit and `ReadAt` returns no data at all
+  (`pkg/file/joiner/joiner.go:215-223`).
+- **Overdraft**: a peer refusing a request because the requester has reached
+  the credit that peer extends it. Distinct from a peer not holding the chunk.
+- **Readmit**: keeping an overdrafted preferred peer for a later attempt at the
+  same chunk instead of dropping it, added by
+  [#324](https://github.com/crtahlin/wasp/issues/324).
+- **Sole-source content**: content no other node holds. Local ingest
   ([#326](https://github.com/crtahlin/wasp/issues/326)) produces it by
   construction.
 
-## Problem
+## What is measured
 
-**Provider downloads run at a quarter of the rate the link allows, and the
-faster setting truncates them.**
-
-Measured 2026-09-18 on sole-source content, three runs per buffer, interleaved
-in one session. Round trip 30.14 ms, mdev 0.016 ms, so **one in-flight slot is
-worth about 135,900 B/s**. The provider reads the same file from its own disk in
-0.026 s, so disk is not the constraint.
+Sole-source content, 4,194,304 bytes at redundancy level NONE, 1,033 chunks.
+Three runs per buffer. Round trip between the two nodes is 30.14 ms, mdev
+0.016 ms, measured by `ping` in the same session; the provider reads the same
+file from its own disk in 0.026 s, measured separately. Neither figure is in the
+run's own data file, which is a gap in the harness rather than a claim about the
+run.
 
 | Buffer | Completed | Rate when complete | Overdrafts per run |
 |---|---|---|---|
-| 0 | **3 of 3** | 263,352 to 263,464 B/s | 0, 0, 0 |
-| 262,144 | 1 of 3 | **1,086,300 B/s** | 609, 240, 438 |
+| 0 | **3 of 3** | 263,352 / 263,424 / 263,464 B/s | 0, 0, 0 |
+| 262,144 | 1 of 3 | 1,086,300 B/s (n=1) | 609, 240, 438 |
 | 524,288 | 0 of 3 | | 840, 387, 471 |
 | 2,097,152 | 0 of 3, zero bytes every time | | 2133, 1912, 1901 |
 
-Two things follow, and they are the whole of the problem:
+Three things are solid:
 
-- **The headroom is real.** The single run that completed at the node's own
-  chosen buffer moved 4,194,304 bytes in 3.86 s, SHA-256 verified, **4.1 times
-  the baseline**. The rate published for #326 was measured with the prefetch
-  off and is a floor.
-- **Concurrency buys credit refusals at the same rate it buys speed.** Zero
-  overdrafts at buffer 0; hundreds at 256 KiB; thousands at 2 MiB, where the
-  download returns nothing at all.
+- **A larger buffer can be much faster.** One run at 262,144 delivered the whole
+  file in 3.86 s, SHA-256 verified, against a baseline of about 15.92 s. That is
+  **n=1** and rule 7 says once is not measured, so it is a demonstration that
+  the rate is achievable, not an estimate of it.
+- **A larger buffer truncates.** Nine of twelve runs above buffer 0 returned a
+  short body, and at 2,097,152 every run returned nothing.
+- **Truncation is read-unit aligned.** The short bodies are exact multiples of
+  the buffer: 3,145,728 and 2,621,440 are 12 and 10 units of 262,144; 524,288
+  and 1,048,576 are 1 and 2 units of 524,288. That is direct support for the all
+  or nothing property of `ReadAt` above, and it is the strongest evidence in the
+  set.
 
-### Why running short of credit ends the download
+## What is not established
 
-`joiner.ReadAt` fans its leaf fetches out over an `errgroup` with no limit and
-then waits on all of them (`pkg/file/joiner/joiner.go:215-223`). **One chunk
-that gives up fails the whole read unit**, and the download stops there. A read
-unit is 8 leaves at buffer 0 and 64 at 256 KiB, so a bigger fan-out is more
-likely to contain at least one failure.
+### The cause of the truncation
 
-A chunk gives up when `errorsLeft` reaches zero. It starts at `maxOriginErrors`,
-which is **32** (`retrieval.go:155`, `:242`).
+An earlier draft of this document said the downloads truncate because credit
+runs short, and proposed waiting for credit instead of giving up. **Its own data
+does not support that.** Within the 262,144 arm:
 
-**There is already a branch that waits for credit instead of giving up, and it
-cannot be reached.** `retrieval.go:322-337` waits `overDraftRefresh`, 600 ms,
-and retries, but only inside `if errors.Is(err, topology.ErrNotFound)`, which
-means `closestPeer` has no peer left that is not skipped. With 120 connected
-peers and an error budget of 32, the budget is gone long before the peer list
-is. So for sole-source content the sequence is:
+| Credit refusals in the run | Bytes delivered |
+|---|---|
+| 609 | 3,145,728 |
+| **240** | **2,621,440**, the earliest truncation |
+| 438 | **4,194,304**, the only complete run |
 
-1. the provider refuses on credit, and is kept for a later attempt (#324);
-2. ordinary selection is tried at once, which is right when other peers hold
-   the chunk and useless when none do;
-3. 32 peers that do not have the chunk answer in turn;
-4. `errorsLeft` hits zero and the chunk fails, **while the one peer that holds
-   it was 600 ms away from being able to serve it**;
-5. the read unit fails, and with it the download.
+The run with the **fewest** refusals did worst and the middle one completed, so
+refusal count does not order the outcomes. In that completing run every refusal
+was readmitted, 438 of 438, which says the existing #324 path already recovers
+from hundreds of refusals inside one download without any wait at all.
 
-The requester is not short of credit for long. It is short of patience, in
-exactly the case where patience is the only thing that would work.
+So credit pressure is present and is **not** shown to be what ends these
+downloads. Something fails a read unit; what it is has not been isolated.
 
-## Hypothesis
+### Why the baseline is four times slower than the same model predicts
 
-A chunk that has no peer left except one which is merely out of credit should
-wait for that credit rather than fail.
+At buffer 0 a read unit is 8 leaves, which the in-flight model puts at about
+1.09 MB/s. The measured baseline is 263,424 B/s, near two slots rather than
+eight, **with zero overdrafts in all three runs**. Whatever holds buffer 0 to a
+quarter of its own predicted rate is not credit, is not named here, and would
+not be addressed by anything the earlier draft proposed. It may be the larger
+lever of the two.
 
-**Predicted:** with that change, the node's own chosen buffer completes
-sole-source downloads as reliably as buffer 0 does, at several times the rate,
-and the rate on content the network also holds does not regress.
+Note also that `langos.NewBufferedLangos` (`pkg/api/bzz.go:825`) fetches the
+next buffer while the current one is being read, so read units are not strictly
+sequential and in-flight leaves may be up to twice the per-unit figure. An
+earlier draft of this document stated the opposite.
 
-## Design
+### Whether the existing credit wait ever fires
 
-### 1. Give up only when nobody can serve the chunk, not when patience runs out
+`retrieval.go:322-337` waits `overDraftRefresh`, 600 ms, and retries, but only
+when `closestPeer` reports no peer left. An earlier draft asserted this is
+unreachable because the error budget, `maxOriginErrors = 32`, runs out first.
+**That assertion was not verified and is wrong in general**: `errorsLeft` is
+decremented in one place only (`retrieval.go:408`), on a result carrying an
+error, while an ordinary peer refused credit (`:361`) is skipped and retried
+without spending any budget. Peers can therefore leave the selection pool for
+free, and the branch is reachable whenever enough of them are refused.
 
-The condition for failing a chunk becomes: `errorsLeft` is exhausted **and** no
-peer is pending a credit refresh for this chunk. When one is, wait
-`overDraftRefresh` once and retry it, exactly as the unreachable branch already
-does.
+It may well have been firing during these runs. `accounting_blocks_count` rose
+by more than `preferred_overdrafts` in every arm, and the difference is refusals
+by ordinary peers: 72 at buffer 524,288 and 309 at 2,097,152 in run 1 alone.
+Nothing in the data says whether the branch fired, because nothing counted it.
 
-The information needed is already tracked. `skip.PruneExpiresAfter(chunkAddr,
-overDraftRefresh)` returns how many peers are skipped only because they
-overdrew, and the existing branch already uses it as its test. This change moves
-that same test to the place the loop actually reaches.
+## What to do next, in order
 
-**This does not reintroduce what #324 removed.** That fix stopped the requester
-waiting for an overdrafted peer *instead of* trying ordinary selection, which
-cost about 3x on content the network also holds because the wait was paid on
-every chunk. Here the wait happens only *after* ordinary selection has been
-tried and has failed, so on widely-held content it is never reached. The two are
-compatible, and the ordering is the entire point:
+### 1. Isolate why a read unit fails
 
-| Case | Today | With this change |
-|---|---|---|
-| Other peers hold the chunk | tried at once, no wait | unchanged |
-| Only the provider holds it | 32 peers tried, then fail | 32 peers tried, then wait and retry the provider |
+Nothing further should be specified until this is answered, and it is cheap to
+answer. The observable is already there: `retrieval.go` logs
+`sleeping to refresh overdraft balance` on the wait branch, and
+`joiner.ReadAt` returns the error that killed the unit.
 
-### 2. Bound the waiting
+- Run the 262,144 arm with the node's debug logging on and record, per failed
+  read unit, the error `ReadAt` returned and what the retrieval loop did with
+  the chunk that failed: exhausted its error budget, ran out of candidates,
+  or something else.
+- Count how often the existing wait branch fires. If it fires often, the earlier
+  draft's premise was inverted and any design that adds more waiting is starting
+  from the wrong place.
+- Record the requester's balance with the provider at the start of every run.
+  The project added that rule after a withdrawal in
+  [overdraft-retry-results.md](overdraft-retry-results.md) and the harness here
+  does not yet follow it.
 
-An unbounded wait turns a failed download into one that never returns. Each
-chunk gets at most `maxOverdraftWaits` waits of `overDraftRefresh`, a compiled
-constant to start under rule 8. The request's own context still applies above
-it, so a caller that has given up is not kept waiting.
+### 2. Explain the buffer-0 gap
 
-**What the operator sees when the bound is hit** is what they see today: a short
-body. The bound turns an immediate truncation into a slower one, and the metric
-below says which happened.
+Separately and with the same instrumentation: at buffer 0 there is no credit
+pressure at all, so whatever limits it to about two slots is a clean target with
+no confound. Candidates worth separating: the per-unit intermediate chunk being
+refetched, `singleflight` collapsing concurrent callers (`retrieval.go:203`),
+and the service-wide one-minute `errSkip` list (`:122`).
 
-### 3. What must not change
+### 3. Only then consider a change
 
-- **The wire.** No protocol identifier, message or handshake changes. This is
-  entirely in when the requester chooses to ask again.
-- **Ordinary downloads.** Content the network holds must not get slower. The
-  measurement below treats that as a reject condition rather than a footnote,
-  because the first attempt at #324 regressed it by 3x and that is how the
-  regression was found.
-- **The credit itself.** Nothing here grants, borrows or announces more credit.
-  Raising what a provider grants is [#327](https://github.com/crtahlin/wasp/issues/327),
-  and the two are independent: this change makes a given amount of credit usable
-  at higher concurrency, #327 changes the amount.
+Any candidate has to answer what the earlier draft did not:
 
-### 4. A metric, because the failure it replaces is silent
-
-A counter of chunks that waited for credit and then succeeded, and a counter of
-chunks that exhausted `maxOverdraftWaits`. Without the second, a download that
-truncates after waiting looks exactly like one that truncated at once, and this
-document's own acceptance could not be checked in the field.
-
-## Scope
-
-**Not in this spec**: spreading one download across several providers,
-[#344](https://github.com/crtahlin/wasp/issues/344). It is a genuine second
-lever, and the honest ordering is this one first. If a credit refusal stops
-ending the download, the value of using several providers changes shape, from
-rescuing a failing download to buying throughput, and the two want measuring
-separately rather than at once.
-
-**Not in this spec**: making the lookahead buffer a setting. Under rule 8 a dial
-that truncates downloads is worse than no dial. It becomes a candidate once this
-change makes the larger buffer safe, and it needs its own issue and its own
-measurement.
+- **`maxOverdraftReadmits = 8`** (`retrieval.go:159`) drops a preferred peer
+  from a chunk's candidate list after eight refusals of that chunk. A design
+  that waits and retries the provider has to say how the provider gets back into
+  the candidate list, and the earlier draft did not mention this constant.
+- **`skip.PruneExpiresAfter` cannot be used as a test.** It deletes the entries
+  it counts (`pkg/skippeers/skippeers.go:100-122`), so it cannot be asked the
+  same question twice; the per-request list is created with no pruning interval
+  (`retrieval.go:204`) so entries outlive their expiry; and it is not
+  overdraft-specific, since any `prepareCredit` error adds one (`:361`).
+- **Waiting has been measured once in this project and it cost about 2x.** In
+  [overdraft-retry-results.md](overdraft-retry-results.md) the one run where a
+  refused peer was waited back finished at 140,849 B/s against a 264,000 B/s
+  unrefused run.
+- **The refresh ceiling is structural.** `accounting.go` caps the refresh term
+  at `min(elapsed, 1)` times the refresh rate and refuses a refreshment inside
+  999 ms, so waiting longer than a second buys no more credit. Any design that
+  waits must state the sustained rate that ceiling permits.
+- **Forwarding must be excluded.** A forwarded request gets `errorsLeft = 1` and
+  no preferred candidates (`retrieval.go:237-243`), and the handler holds the
+  requesting peer's stream open while it runs. Added waiting there would spend
+  another node's connection, which rule 8 requires be stated as a cost to them.
 
 ## Protocol impact
 
-**None.** No wire format, protocol identifier, handshake or message changes.
-`make protocol-freeze` must pass with the fingerprint unchanged.
+**None so far, because nothing is proposed.** Any change considered here is
+client-side scheduling: no wire format, protocol identifier, handshake or
+message change, and `make protocol-freeze` unaffected. The forwarding note above
+is about how long this node holds a stream open, not about what it sends.
 
-## Measurement
+## Upstream portability
 
-The bench now has sole-source content on demand through local ingest, so none of
-this waits on a postage batch expiring.
+Everything examined here is **unmodified upstream code**: the `errorsLeft` loop,
+`maxOriginErrors`, `maxOverdraftReadmits`, the wait branch, `skippeers`, and the
+unlimited errgroup in `joiner.ReadAt` are all as they are in `upstream/v2.8.2`.
 
-- **The arm this is for.** Sole-source content at the node's own chosen buffer,
-  before and after, three runs each, same session, interleaved. Accept on
-  completion rate and rate together: completing slowly is the point, and a
-  faster run that truncates is not a pass.
-- **The regression arm, equally weighted.** Content the network also holds,
-  before and after, three runs each. A median more than 10% slower after the
-  change is a reject, whatever the sole-source arm did.
-- **Buffer sweep.** 0, 262,144, 524,288 and 2,097,152 as measured above, so the
-  before and after tables are directly comparable.
-- **Per run**: bytes returned against bytes wanted, SHA-256, curl exit code,
-  `preferred_attempts`, `preferred_hits`, `preferred_overdrafts`,
-  `preferred_readmits`, the two new counters, and
-  `accounting_accounting_blocks_count`.
-- **Node state matched across every comparison**, which on this bench means the
-  same session and interleaved arms rather than one build after the other. Two
-  results in this project have had to be withdrawn for getting that wrong, most
-  recently the redundancy-level attribution in
-  [local-ingest-results.md](local-ingest-results.md).
+No `affects-upstream` marker is claimed, and under rule 11 that is the correct
+outcome for now: the truncation is reproduced but its cause is not isolated, and
+a set of findings is worth only as much as its weakest member. If step 1 shows a
+defect rather than a tuning question, the marker becomes appropriate and the
+issue should say what was checked against the upstream tree.
 
-## Acceptance
+## Configuration
 
-**Accept** if sole-source downloads at the node's own chosen buffer complete in
-three runs of three, at a median rate at least twice the buffer-0 baseline,
-**and** content the network also holds is not more than 10% slower at the
-median.
+**None proposed.** The lookahead buffer is already settable per request through
+`Swarm-Lookahead-Buffer-Size`, and making its default a node setting is exactly
+what rule 8 forbids until the measurement justifies it: at present the larger
+value truncates, so shipping it as a dial would hand operators a way to break
+their own downloads.
 
-**Reject** if widely-held content regresses beyond that, since the whole
-difficulty here is that the two cases want opposite behaviour; or if
-sole-source downloads still truncate, which would mean the wait is not reaching
-the case it was written for; or if a download that would previously have
-truncated now fails to return at all.
+## Measurement plan for step 1
 
-## Test plan
+- The 262,144 arm, three runs, with debug logging on, recording per failed read
+  unit the returned error and the fate of the chunk that failed.
+- Buffer 0 in the same session as a zero-credit-pressure control.
+- **Randomised buffer order.** The existing data runs the buffers in a fixed
+  order, so order is confounded with condition: every 262,144 run followed a
+  buffer-0 run, and the only completing one was in the last cycle.
+- Per run: balance with the provider at start, bytes against bytes wanted,
+  SHA-256, curl exit, `preferred_attempts`, `preferred_hits`,
+  `preferred_overdrafts`, `preferred_readmits`, `accounting_blocks_count`, and
+  a count of the existing wait branch firing.
+- Node state matched across any comparison, in one session, with the reason
+  recorded: two results in this project have been withdrawn for getting that
+  wrong.
 
-In `package retrieval_test`:
-
-- a chunk held only by a peer that is overdrafted at first and has credit after
-  one refresh is retrieved, rather than failing;
-- that chunk fails after `maxOverdraftWaits` waits when the peer never regains
-  credit, rather than waiting for ever;
-- a chunk held by an ordinary peer is retrieved without any wait, asserted on
-  elapsed time, which is the #324 regression in test form;
-- a cancelled context ends the wait at once;
-- the two new counters move exactly when their conditions are met.
-
-Each test to be mutation-checked: a test for a timing behaviour that passes with
-the behaviour removed is the failure mode this project has already had twice.
-
-## Rollout and rollback
-
-Behaviour change with no setting, on by default, because the case it fixes is
-one where the download fails today. Rollback is a revert. Nothing is written to
-disk and nothing is announced, so there is no migration and no state to undo.
+No acceptance criterion is stated, because step 1 is a diagnosis and not a
+change. A criterion will belong to whatever it turns out to justify.
 
 ---
 
