@@ -149,6 +149,13 @@ pseudosettle and cheques, and the announced threshold at both ends of each run.
 
 ### 1. Isolate why a read unit fails
 
+**Done, in [truncation-cause.md](truncation-cause.md).** The requester gives up
+on a chunk after about thirty-four attempts against peers that do not hold it,
+having stopped asking the one that does; the credit wait branch fired zero times
+in three runs. What remains of this step is narrower: instrument the point at
+which a preferred peer is dropped from a chunk, to say which of three mechanisms
+drops it.
+
 Nothing further should be specified until this is answered, and it is cheap to
 answer. The observable is already there: `retrieval.go` logs
 `sleeping to refresh overdraft balance` on the wait branch, and
