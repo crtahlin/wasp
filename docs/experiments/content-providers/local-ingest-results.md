@@ -42,8 +42,8 @@ harmless.** The spec said to upload the stamped copy **on another node**; both
 ran on the provider. So the stamped upload wrote chunks the node already held,
 and the comparison shows that one node's two write paths agree rather than that
 two nodes agree. The Acceptance sentence does not require a second node, so the
-condition is met as written, but the stronger claim was not tested. Repeating it
-across two nodes is cheap and should be done.
+condition is met as written, but the stronger claim was not tested. It has since
+been run across two nodes, further down.
 
 One run each. This is a deterministic hash comparison, and rule 7 is about
 quantities with variance.
@@ -199,7 +199,8 @@ the reference from `POST /bytes` of the same bytes at the same redundancy level,
 **and** a fresh ingest is unreachable without a hint, **and** it is retrievable
 with one over three runs with a matching SHA-256.
 
-All three hold, with the same-node caveat on the first recorded in section 1.
+All three hold. The same-node caveat on the first, recorded in section 1, has
+since been lifted by the two-node arm further down.
 
 Of the reject conditions, two are positively excluded: the addresses did not
 differ, and no no-hint control returned 200. **The third, that an abandoned
@@ -215,7 +216,8 @@ had listed them. Harnesses `cp290/t9c.sh` and `t9f.sh`. Same provider,
 `local-ingest-limit: 8192`.
 
 These three needed no change to the node's configuration. The fourth gap, a
-second node producing the same reference, still stands.
+second node producing the same reference, is closed further down, and needed the
+feature turned on at the requester as well.
 
 ### Mid-stream refusal fires on a node
 
@@ -335,10 +337,87 @@ rather than in the harness: two distinct log lines for the two refusal branches,
 and a chunk counter separate from the usage figure. Worth building into the next
 harness rather than reaching for afterwards.
 
+## Two nodes produce the same reference
+
+Arm 1 of [#341](https://github.com/crtahlin/wasp/issues/341), the last of the
+four, measured 2026-09-18. Harness `t17.sh`, outside this repository; rows in
+`t17-two-node-reference.txt` and the run's own output in `t17-console.log`.
+
+**What #326 actually showed** was that one node's two write paths agree: both
+the ingest and the stamped upload ran on the provider. The claim the feature
+rests on is stronger, that the reference is a function of the bytes, so two
+independent nodes must produce the same one for the same input. That had never
+been run.
+
+**Method.** Each 4,194,304-byte file is generated once locally and copied to
+both nodes. Each node computes the SHA-256 of what it received **before it
+ingests**, and the harness compares both against the local one when it writes
+the row: a run whose three SHAs do not all match is written out as `REFUSED`
+rather than as a result, so differing bytes cannot produce a pass. Both ingests
+send `Swarm-Redundancy-Level: 0` explicitly, because the level changes the
+reference for the same bytes.
+
+**Result: equal in all three runs**, at 1,033 chunks on both nodes each time,
+which is the count this size predicts: 1,024 data chunks, 8 at the level above
+them, 1 root.
+
+| Run | Reference, both nodes | Chunks |
+|---|---|---|
+| 1 | `9be81f2d1c639d80014a563aa74981de14dff4c03b9e2b77ca821bd2c763480e` | 1,033 |
+| 2 | `7050edb276cd73ec797216852b2764148eff27c5c4bd692842eda72e2136f325` | 1,033 |
+| 3 | `126a12639081a106a88c09c935e90d92cbb6404b813a1e0a655401b7159d224a` | 1,033 |
+
+The prediction was registered before the run: the references are byte-for-byte
+equal, because content addressing is a function of the bytes and the redundancy
+level. A difference would have meant something node-specific was reaching the
+reference, which would have been a more important finding than the one sought.
+Three different random files gave three different references, so no row here can
+be a cached answer replayed from an earlier one.
+
+**The two nodes do not run the same binary, and the harness recorded neither
+version.** A first draft of this section said "two nodes of the same build",
+which was wrong in a way that understated the result. The two are deployed by
+different scripts, from different sources, to different paths, under different
+service units and different configuration files: the provider carries a
+prebuilt binary from the #326 branch, the requester a binary built from this
+repository for #353. No deployment step has ever installed one binary on both.
+What cannot be said is **which** two builds were running when this arm ran,
+because `t17.sh` reads only `reference` and `chunks` out of each response and
+never asks either node for its version. So the equality holds across two builds
+that are known to differ and whose exact identities are not on the record, and a
+future run of this arm should record both.
+
+**The elapsed time is recorded and not accounted for.** The console log puts the
+whole sequence between 18:17:45Z and 18:17:48Z: three seconds for three rounds
+of generating 4 MiB, copying it to two hosts over ssh, and ingesting it on each.
+The harness writes no per-step timing, so that total cannot be broken down here.
+It does not bear on the comparison, which rests on the SHA guard and on the
+three references differing from each other, but a reader should not have to
+notice it alone.
+
+**The restore of the requester's setting was not recorded either.** Local ingest
+is off in the shipped default, so it was turned on at the requester for this run
+and turned off again afterwards. The script that does it writes no log, so there
+is no recorded status code, and the reading given at the time, that the endpoint
+answered 403, has nothing behind it. That code is also the one its own legend
+does not cover: by then the node already held the probe bytes, so a node still
+enabled answers 200 rather than 201, and 200 is what a failed restore would look
+like. The provider keeps the setting on, because it is the content host for this
+whole experiment. The endpoint has no authentication layer on either node, so
+the flag is the only control on both.
+
+**The limits of this arm.** Three files of one size at one redundancy level, on
+two of this fork's own nodes. It does not test a wasp node against a stock Bee
+node, nor a size that crosses a different trie shape, nor encrypted content,
+where a fresh random key per chunk gives different references for identical
+bytes by design and address equality cannot be tested at all.
+
 ## What this does not show
 
 - **Nothing about MEDIUM redundancy**, and nothing about why it truncated.
-- **Nothing about a second node** producing the same reference, per section 1.
+- ~~**Nothing about a second node producing the same reference**~~. Closed
+  above: two independent nodes produce the same reference for the same bytes,
+  three runs, at one file size and redundancy level 0.
 - **Nothing about mid-stream refusal** on a real node in the arms above, now
   covered separately.
 - **Nothing about abandoned ingests** in the arms above, now covered
@@ -352,7 +431,7 @@ harness rather than reaching for afterwards.
   and is still counted.
 - **One file size for every arm but the limit**, which used 67,108,864 bytes.
 
-## Three harness faults worth recording
+## Four harness faults worth recording
 
 All three produced plausible output rather than an obvious failure, which is the
 kind that gets believed.
@@ -365,6 +444,11 @@ kind that gets believed.
   matched nothing and stopped a run after the ingest had already happened.
 - `t9b.sh` records no usage metric, which is why the figure in section 5 had to
   be taken by hand and cannot be checked against the raw rows.
+- The two-node harness first required HTTP 201 from its ingest probe and refused
+  to run, because an earlier probe had already ingested those same few bytes and
+  a node answers 200 for content it already holds. Both codes mean the feature
+  is on. The gate now accepts either, and says so in a comment, because the
+  refusal looked exactly like the feature being off.
 
 ---
 
