@@ -413,6 +413,14 @@ func (s *Service) mountAPI() {
 		"PUT": http.HandlerFunc(s.stewardshipPutHandler),
 	})
 
+	// Registered through handle like every other route, so it inherits
+	// checkRouteAvailability. The API server starts serving well before
+	// s.storer is assigned, and that wrapper is the only thing standing
+	// between an ordinary local request and a nil storer. See issue #326.
+	handle("/wasp/ingest", jsonhttp.MethodHandler{
+		"POST": http.HandlerFunc(s.localIngestHandler),
+	})
+
 	handle("/wasp/providers", jsonhttp.MethodHandler{
 		"GET": http.HandlerFunc(s.providersListHandler),
 	})

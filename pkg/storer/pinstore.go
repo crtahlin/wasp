@@ -77,7 +77,23 @@ func (db *DB) DeletePin(ctx context.Context, root swarm.Address) (err error) {
 	unlock := db.Lock(uploadsLock)
 	defer unlock()
 
-	return pinstore.DeletePin(ctx, db.storage, root)
+	if err := pinstore.DeletePin(ctx, db.storage, root); err != nil {
+		return err
+	}
+
+	// A locally ingested collection carries a record of its chunk count, and
+	// unpinning must take that off the usage total or the figure drifts
+	// upward for good (issue #326). It runs after the collection is gone
+	// because the other order is not repairable: the record would be missing
+	// while the root still answered HasPin.
+	//
+	// It cannot fail the request. The unpin has already succeeded by this
+	// point, so returning an error here would report failure for work that
+	// was done, and the retry it invites cannot succeed because the
+	// collection is gone. A record left behind is repaired at the next start.
+	db.dropLocalIngestRecord(ctx, root)
+
+	return nil
 }
 
 // Pins is the implementation of the PinStore.Pins method.

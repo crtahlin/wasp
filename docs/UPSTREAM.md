@@ -80,6 +80,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done, neutral (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#316](https://github.com/crtahlin/wasp/issues/316) | accounting: refreshDue is computed without the one second cap in settle, which can suppress cheques entirely | open | - | - |
 | [#333](https://github.com/crtahlin/wasp/issues/333) | accounting: Connect rewinds the threshold-growth checkpoint but not the counter it is compared against | open | - | - |
+| [#337](https://github.com/crtahlin/wasp/issues/337) | file: hashtrie.Sum formats the dispersed-replica failure with %s against err.Error() rather than %w, so errors.Is cannot see the cause | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at

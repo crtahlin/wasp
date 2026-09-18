@@ -38,6 +38,7 @@ type metrics struct {
 	RecoveryPrunedChunkCount      prometheus.Counter
 	ReserveHasWaitDuration        prometheus.Histogram
 	ReserveScanDuration           *prometheus.HistogramVec
+	LocalIngestChunks             prometheus.Gauge
 }
 
 // newMetrics is a convenient constructor for creating new metrics.
@@ -101,6 +102,16 @@ func newMetrics() metrics {
 				Subsystem: subsystem,
 				Name:      "storage_radius",
 				Help:      "Radius of responsibility reserve storage.",
+			},
+		),
+		LocalIngestChunks: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "local_ingest_chunks",
+				Help: "Distinct chunks held from local ingests (issue #326). " +
+					"An upper bound on disk rather than a measurement of it: a chunk " +
+					"this node already held cost no new disk and is still counted.",
 			},
 		),
 		CacheSize: prometheus.NewGauge(

@@ -20,16 +20,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ethersphere/bee/v2/pkg/log"
-	"github.com/ethersphere/bee/v2/pkg/stabilization"
-	"github.com/ethersphere/bee/v2/pkg/storer/internal/transaction"
-
 	"github.com/cockroachdb/pebble"
+	"github.com/ethersphere/bee/v2/pkg/log"
 	m "github.com/ethersphere/bee/v2/pkg/metrics"
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	"github.com/ethersphere/bee/v2/pkg/pusher"
 	"github.com/ethersphere/bee/v2/pkg/retrieval"
 	"github.com/ethersphere/bee/v2/pkg/sharky"
+	"github.com/ethersphere/bee/v2/pkg/stabilization"
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storage/leveldbstore"
 	"github.com/ethersphere/bee/v2/pkg/storage/migration"
@@ -38,6 +36,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/events"
 	pinstore "github.com/ethersphere/bee/v2/pkg/storer/internal/pinning"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
+	"github.com/ethersphere/bee/v2/pkg/storer/internal/transaction"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/upload"
 	localmigration "github.com/ethersphere/bee/v2/pkg/storer/migration"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -610,6 +609,12 @@ type Options struct {
 	RadiusSetter      topology.SetStorageRadiuser
 	StateStore        storage.StateStorer
 
+	// LocalIngestLimit is the most chunks this node will hold from local
+	// ingests (issue #326). Zero means no limit, and nothing then stops an
+	// ingest filling the disk; the node warns at startup when the feature is
+	// enabled with no limit.
+	LocalIngestLimit uint64
+
 	ReserveCapacity       int
 	ReserveWakeUpDuration time.Duration
 	// ReserveBatchSweepInterval is how often the reserve reconciles chunks
@@ -693,6 +698,11 @@ type DB struct {
 	subscriptionsWG     sync.WaitGroup
 	events              *events.Subscriber
 	directUploadLimiter chan struct{}
+
+	// localIngest is the node-wide accounting for content stored by
+	// POST /wasp/ingest, which pays no postage and so has no rent to bound
+	// it. See issue #326 and pkg/storer/localingest.go.
+	localIngest localIngestState
 
 	reserve          *reserve.Reserve
 	inFlight         sync.WaitGroup
@@ -929,6 +939,14 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Rebuild the local ingest usage total from the index (issue #326). This
+	// completes before the API is built and before the listener opens, so the
+	// route never serves against an unbuilt total. It reports its own
+	// failures and does not stop the node; see the function.
+	db.localIngest.limit = opts.LocalIngestLimit
+	db.localIngest.gauge = db.metrics.LocalIngestChunks
+	db.rebuildLocalIngestTotal(ctx)
 
 	db.inFlight.Add(1)
 	go db.cacheWorker(ctx)

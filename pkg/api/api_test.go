@@ -108,6 +108,7 @@ type testServerOptions struct {
 	AccessControl      accesscontrol.Controller
 	Steward            steward.Interface
 	Providers          api.Providers
+	LocalIngestEnabled bool
 	WsHeaders          http.Header
 	DirectUpload       bool
 	Probe              *api.Probe
@@ -192,29 +193,30 @@ func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.
 	backend := backendmock.New(o.BackendOpts...)
 
 	extraOpts := api.ExtraOptions{
-		TopologyDriver:  topologyDriver,
-		Accounting:      acc,
-		Pseudosettle:    recipient,
-		LightNodes:      ln,
-		Swap:            settlement,
-		Chequebook:      chequebook,
-		Pingpong:        o.Pingpong,
-		BlockTime:       o.BlockTime,
-		Storer:          o.Storer,
-		Resolver:        o.Resolver,
-		Pss:             o.Pss,
-		Gsoc:            o.Gsoc,
-		FeedFactory:     o.Feeds,
-		Post:            o.Post,
-		AccessControl:   o.AccessControl,
-		PostageContract: o.PostageContract,
-		Steward:         o.Steward,
-		Providers:       o.Providers,
-		SyncStatus:      o.SyncStatus,
-		Staking:         o.StakingContract,
-		LegacyStake:     o.LegacyStake,
-		NodeStatus:      o.NodeStatus,
-		PinIntegrity:    o.PinIntegrity,
+		TopologyDriver:     topologyDriver,
+		Accounting:         acc,
+		Pseudosettle:       recipient,
+		LightNodes:         ln,
+		Swap:               settlement,
+		Chequebook:         chequebook,
+		Pingpong:           o.Pingpong,
+		BlockTime:          o.BlockTime,
+		Storer:             o.Storer,
+		Resolver:           o.Resolver,
+		Pss:                o.Pss,
+		Gsoc:               o.Gsoc,
+		FeedFactory:        o.Feeds,
+		Post:               o.Post,
+		AccessControl:      o.AccessControl,
+		PostageContract:    o.PostageContract,
+		Steward:            o.Steward,
+		Providers:          o.Providers,
+		LocalIngestEnabled: o.LocalIngestEnabled,
+		SyncStatus:         o.SyncStatus,
+		Staking:            o.StakingContract,
+		LegacyStake:        o.LegacyStake,
+		NodeStatus:         o.NodeStatus,
+		PinIntegrity:       o.PinIntegrity,
 	}
 
 	// By default bee mode is set to full mode.
