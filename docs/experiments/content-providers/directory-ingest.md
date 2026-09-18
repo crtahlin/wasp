@@ -16,17 +16,19 @@ Code references are to commit `2268503b`, base `upstream/v2.8.2`.
   (`DefaultManifestType`, `pkg/manifest/manifest.go:17`). It is a trie whose
   nodes are themselves chunks.
 - **A node chunk** is one serialised mantaray trie node. A manifest costs one
-  chunk per node at minimum, and the node count follows the shape of the path
-  strings rather than the number of files.
+  chunk per node at minimum. The node count depends on the shape of the path
+  strings, and is **at least the number of files**, because each distinct path
+  terminates on its own node.
 - **A pipeline run** is one pass of the chunk-splitting pipeline over a stream
   of bytes, producing chunks and a single root reference. `storeDir` performs
   one per file and one per manifest node.
 - **A dispersed replica** is an extra chunk written for redundancy at the root
   of each pipeline run. It is a single-owner chunk at a dispersed address rather
   than a literal copy. The run makes one call
-  (`pkg/file/pipeline/hashtrie/hashtrie.go:260`) and the fan-out to
-  `replicaCounts[level]` of them happens in `pkg/replicas/putter.go:37-64`; at
-  level `MEDIUM` that is 2 (`pkg/file/redundancy/level.go:174`).
+  (`pkg/file/pipeline/hashtrie/hashtrie.go:265`, under the level check at
+  `:260`) and the fan-out to `replicaCounts[level]` of them happens in
+  `pkg/replicas/putter.go:37-64`; at level `MEDIUM` that is 2
+  (`pkg/file/redundancy/level.go:174`).
 - **Residue** is chunks left on disk by a request that did not complete, which
   nothing afterwards counts or removes. **A paired control window** is an
   equal-length period recorded immediately before the measured one, as #341 did,
@@ -65,8 +67,8 @@ level, and a second node that names the holder can fetch every path in it. If
 that holds, hosting a website without postage needs no new machinery beyond
 routing the existing directory builder at the existing local ingest session.
 
-The scoping to one node is load-bearing and is argued under arm 1: a manifest,
-unlike a blob reference, is not a pure function of the bytes.
+The scoping to one node carries real weight and is argued under arm 1: a
+manifest, unlike a blob reference, is not a pure function of the bytes.
 
 ## Design
 
@@ -358,6 +360,15 @@ Arms:
    no-hint request "before any hinted download of it had run"
    (`local-ingest-results.md:53-54`).
 
+   **The requester caches what it retrieves, so runs 2 and 3 measure its own
+   disk unless that is prevented.** `Download` puts every chunk it fetches from
+   the network into the local cache and serves it locally next time
+   (`pkg/storer/netstore.go:84-120`). Either clear the requester's cache between
+   runs, or send `Swarm-Cache: false` as the sibling measurements do, and say
+   which was done. Without one of those the arm can pass on runs 2 and 3 with
+   the provider path broken, which is the same shape of mistake as reading a
+   filled local cache as proof of a network path.
+
    **What it does and does not exercise.** It exercises inheritance: a request
    that already carries a preferred set, such as the manifest entry of a `/bzz`
    download, keeps it rather than deriving a new one per entry
@@ -371,31 +382,38 @@ Arms:
 5. **The count covers the manifest.** Record the chunk count the ingest reports,
    and compare it against the rise in `ChunkStore.TotalChunks` read from
    `/debugstore` (`pkg/storer/debug.go:43`), across the ingest, with a paired
-   control window to show the node was quiet. **Three runs**, for the reason
-   under rule 7 below. The upload level is already MEDIUM by default
+   control window. **Three runs, on three archives of fresh random bytes**, for
+   the reason under rule 7 above. The upload level is already MEDIUM by default
    (`localingest.go:69-75`), so the replicas are included without arranging
    anything. This is the arm that catches manifest chunks stored but not
    counted.
 
-   **The archive must be content the node has never held, and that is not a
+   **Every run needs content the node has never held, and that is not a
    detail.** `TotalChunks` counts distinct addresses in the whole database; a
-   Put of an address already present raises its reference count and creates no
-   entry (`pkg/storer/internal/chunkstore/chunkstore.go:92,116`). The reported
-   count is distinct addresses **within the session**, which knows nothing about
-   what the node already holds. So the two are equal only for content that is
-   new to the node. Arm 1 deliberately writes the same archive to the holder
-   twice, once ingested and once stamped, so **arm 5 must not reuse arm 1's
-   archive**: the rise would be near zero against a full reported count, and the
-   reject clause would fire on a node behaving correctly.
-   `local-ingest-results.md:295-297` records exactly this caveat for the blob
-   arm, and an earlier draft of this spec cited that document for its rule 7
-   position without carrying the caveat over.
+   Put of an address already present raises its reference count and writes no
+   new entry (`pkg/storer/internal/chunkstore/chunkstore.go:77-90,92`). The
+   reported count is distinct addresses **within the session**, which knows
+   nothing about what the node already holds. So the two are equal only for
+   content that is new to the node, and three runs of one archive would satisfy
+   the arm vacuously: after the first, the root is already a pin collection, so
+   the second answers as a duplicate and reports nothing against a rise of
+   nothing. `local-ingest-results.md:295-297` states the standard as **fresh
+   random bytes every run**, and an earlier draft of this spec carried over only
+   half of it, forbidding arm 1's archive but still asking for three runs of one
+   archive.
 
-   Record `SharedSlots` and `ReferenceCount` beside `TotalChunks` so that
-   deduplication is visible rather than inferred, and read the comparison
-   against the drift the paired control window shows rather than as exact
-   equality: `local-ingest-results.md:299-302` records drifts of 0, +5 and 0
-   against a control of 0, +1 and 0 on a syncing node.
+   Arm 1 deliberately writes its archive to the holder twice, once ingested and
+   once stamped, so arm 5 must not reuse it either.
+
+   **The control window must be flat, not merely measured.** Record
+   `SharedSlots` and `ReferenceCount` beside `TotalChunks` so that any
+   deduplication is visible rather than inferred, and discard a run whose
+   control window is not flat. That is the standard #341 reached, and it is what
+   makes exact equality the right test rather than an unfair one: with fresh
+   content and a quiet node the two numbers have no legitimate reason to differ.
+   An earlier draft of this spec instead allowed a tolerance drawn from
+   `local-ingest-results.md:299-302`, which that document itself records as
+   **superseded** by a later run where every window was flat.
 
    **An earlier draft of this spec had this arm unpin the root and check that
    reported usage fell by exactly the reported count. That arm cannot fail.**
@@ -414,19 +432,28 @@ Arms:
 
 Recorded per run: the reported chunk count; reported usage before and after;
 `ChunkStore.TotalChunks`, `SharedSlots` and `ReferenceCount` from `/debugstore`,
-with the paired control window's drift beside them; the HTTP status and the
-response body; and, for every arm that gets three runs, **the elapsed time, the
-bytes returned and the body SHA-256**, without which there is no spread to
-report. An earlier draft asked for a spread and listed no quantity that has one.
+with the paired control window beside them; and the HTTP status and the response
+body.
+
+For the arms that get three runs, the quantity the spread is taken over differs
+and each arm names its own: **elapsed time, bytes returned and body SHA-256**
+for arms 4 and 4b, and **the `TotalChunks` delta against the control window**
+for arms 5 and 6. An earlier draft asked for a spread and then named only
+quantities the ingest arms do not produce.
 
 ## Acceptance
 
-One condition per arm, in arm order, so that a rewritten arm cannot leave a
-criterion pointing at a measurement nobody makes any more. An earlier draft did
-exactly that: it replaced arm 5 and left the Accept list asking for the unpin
-observation the old arm 5 produced, and it added arm 4b without adding a
-condition for it, so a run in which the second node fetched **nothing** met
-every condition and tripped no reject clause.
+Conditions are given in arm order and every arm has one, so that a rewritten arm
+cannot leave a criterion pointing at a measurement nobody makes any more. An
+earlier draft did exactly that: it replaced arm 5 and left the Accept list
+asking for the unpin observation the old arm 5 produced, and it added arm 4b
+without adding a condition for it, so a run in which the second node fetched
+**nothing** met every condition and tripped no reject clause. Arms 2 and 3 share
+one condition because they are one observation taken at two depths.
+
+**Every arm that gets three runs must satisfy its condition in all three.** A
+single failing run is a reject, not an average, unless it is discarded under
+what invalidates a run.
 
 **Accept** if all of:
 
@@ -447,12 +474,13 @@ every condition and tripped no reject clause.
 
 - the roots differ **on one node**, which would mean the ingest path and the
   stamped path disagree and the claim this rests on is false;
-- the reported count falls **short** of the `TotalChunks` rise by more than the
-  control drift, which means chunks are held and not counted and the limit can
-  be bypassed. A count **above** the rise is not by itself a reject: on content
-  the node partly held, the shared chunks raise the reference count rather than
-  the total, so `SharedSlots` and `ReferenceCount` decide whether it is
-  deduplication or a real over-report;
+- the reported count differs from the `TotalChunks` rise in **either** direction
+  on a run that qualifies, meaning fresh content and a flat control window.
+  Short means chunks are held and not counted, so the limit can be bypassed;
+  over means the node reports holding more than it stored. A run where
+  `SharedSlots` or `ReferenceCount` moved is **not** rejected, because that is
+  deduplication rather than a miscount; it is discarded under what invalidates a
+  run, since its content was not new to the node after all;
 - any error path leaves a pinned collection behind, or leaves `TotalChunks`
   raised after the collection is gone;
 - **any Accept condition fails for a reason not listed under what invalidates a
@@ -474,10 +502,14 @@ every condition and tripped no reject clause.
   does change the reference;
 - an encrypted arm used for the equivalence comparison, which cannot hold by
   construction;
-- **a paired control window that shows the node was not quiet.** Arms 5 and 6
-  read a database-wide counter, so a run whose control window drifts is
-  discarded rather than read as a result. Without this, ordinary counter noise
-  would trip a reject clause;
+- **a paired control window that is not flat.** Arms 5 and 6 read a
+  database-wide counter, so a run whose control window drifts is discarded
+  rather than read as a result. Without this, ordinary counter noise would trip
+  a reject clause;
+- **a run of arm 5 whose `SharedSlots` or `ReferenceCount` moved**, which means
+  the node already held part of the archive, so the comparison the arm makes is
+  not the one it intends. Deduplication invalidates a run; it never rejects the
+  design;
 - arm 4 running **after** arm 4b, since the network fetch caches the content on
   forwarding peers and the 404 can no longer be expected;
 - the two sides of arm 1 running on **different hosts**, since the MIME table
@@ -569,7 +601,7 @@ this, and they are handled differently on purpose:
     counted against the limit, so a site already pinned from a stamped upload
     shadows an ingest of it.
 
-  The **HTTP** halves of those two belong in `api_test`, which is where the
+  The **HTTP** halves of the last two belong in `api_test`, which is where the
   status code and the response body exist:
   `TestLocalIngestDirLimitMidStreamAnswers507`, and
   `TestLocalIngestDirDuplicateAnswers200NotSoleSource`. An earlier draft of this
