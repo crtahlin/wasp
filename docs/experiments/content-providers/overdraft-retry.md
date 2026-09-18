@@ -209,11 +209,13 @@ two, which differ by whether the lookahead prefetch is on. The whole result
 turns on that distinction, so the rule is restated rather than reinterpreted:
 
 - **With the prefetch off**, the rule is met. (This originally read "one chunk
-  in flight at a time", which is wrong: `joiner.ReadAt` uses an unlimited
-  errgroup, so the prefetch setting reduces concurrency without removing it.
-  Measured, the peak reserved balance against the provider is about 2,530,000
-  with the prefetch off, five times lower than with it on but far above one
-  chunk. See [overdraft-terms.md](overdraft-terms.md).)
+  in flight at a time", which is wrong. At 0 the read unit is `http.ServeContent`'s
+  32 KiB `io.Copy` buffer, which is **8 chunks**, against 64 at the shipped
+  buffer, and `joiner.ReadAt` uses an unlimited errgroup so a read unit fans out
+  however large it is. On a separate bench session, so not comparable run for run
+  with the tables here, the peak reserved balance against the provider was
+  2,530,000 to 2,550,000 with the prefetch off and 12,780,000 to 12,880,000 with
+  it on. See [overdraft-terms.md](overdraft-terms.md).)
   Grouped by whether credit was refused at all, stock completed 0 of 2 refused
   runs and the fix completed 1 of 1. That is short of rule 7's three per
   condition and is a pointer, not a result.

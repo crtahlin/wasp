@@ -9,21 +9,30 @@ Spec: [overdraft-retry.md](overdraft-retry.md). Issue:
 > that is wrong. `joiner.ReadAt` uses an errgroup with no limit
 > (`pkg/file/joiner/joiner.go:215`, no `SetLimit` anywhere in the file), so a
 > single read unit fans out concurrently whatever the lookahead setting is.
-> Measured, the peak reserved balance with the prefetch off is about 2,530,000.
-> Dividing by the measured mean chunk price of about 306,735 suggests roughly
-> **eight** chunks in flight rather than one, though that conversion is only an
-> estimate: as `measurement.md` says where the price was taken, the metric
-> counts credit decisions node-wide including relayed retrievals, not
-> deliveries from one peer. The reserved balance itself is per peer and is
-> measured directly, so the refutation of "one chunk" does not depend on the
-> conversion. Where this document uses that phrase to argue a request
-> stays inside the free refresh allowance, the conclusion still holds, because
-> 2,530,000 is under the 4,500,000 the allowance supplies, but it holds by a
-> factor of under two rather than by the large margin "one chunk" implies.
+> The exact figure is **eight**: with the buffer at 0 the handler passes the
+> reader straight to `http.ServeContent` (`pkg/api/bzz.go:824-828`), whose
+> `io.Copy` uses a 32 KiB buffer, which is 8 chunks. At the shipped
+> `smallFileBufferSize` of 262,144 (`bzz.go:51`) it is 64.
+>
+> Measured on a different bench session, so not comparable run for run with the
+> tables below: the peak reserved balance against the provider is
+> 2,530,000 to 2,550,000 with the prefetch off and 12,780,000 to 12,880,000
+> with it on.
+>
+> **Where this document explains the condition being hard to provoke by saying
+> a request stays inside the free refresh allowance, that reasoning does not
+> hold as stated.** The gate is
+> `max(-balance,0) + reservedBalance + price + surplusBalance >
+> paymentThreshold + refreshDue`. The reserved balance sits on the **left**,
+> alongside the settled debt; it does not draw on a separate allowance, so
+> comparing it with `refreshRate` compares a stock against a rate and says
+> nothing. What survives is weaker and still enough for the passage: a smaller
+> read unit reserves less at once, so the gate is crossed less often.
 
 **Summary.** The fix works and it is not sufficient. With the prefetch off, so
-fewer chunks in flight (see the correction above, it is about eight rather than
-one), it turns a truncated sole-source download into a complete one. At the shipped lookahead buffer the download still truncates on
+a read unit of 8 chunks rather than 64 (see the correction above), it turns a
+truncated sole-source download into a complete one. At the shipped lookahead
+buffer the download still truncates on
 both builds; on a cold node the fix delivers one read unit in one cycle of three
 where stock delivers nothing in three of three, and it consistently asks the
 provider more often, 67 to 155 attempts against stock's invariant 59. Content
@@ -107,11 +116,14 @@ whose credit has to clear.
 
 **This pairing is 2 stock runs against 1, and rule 7 asks for three per
 condition.** It is reported as a pointer, not as the result. The reason the
-condition is so hard to provoke here is that the prefetch being off rarely
-outruns the free refresh allowance. That reasoning survives the correction at
-the top of this document but only just: the reserved balance in this arm peaks
-near 2,530,000 against an allowance of 4,500,000, not the much larger margin
-"one chunk in flight" would imply. Table 2 is the arm where it fires every time.
+condition is so hard to provoke here is that the prefetch being off reserves
+less credit at once, so the gate is crossed less often. **This originally read
+"one chunk in flight rarely outruns the free refresh allowance", and both halves
+of that were wrong**: the read unit with the prefetch off is 8 chunks rather
+than one, and the reserved balance does not draw on the refresh allowance at
+all, it sits on the same side of the gate as the settled debt. See the
+correction at the top of this document. Table 2 is the arm where it fires every
+time.
 
 ## Table 2, withdrawn: it compared conditions, not builds
 
