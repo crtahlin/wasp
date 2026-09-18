@@ -81,7 +81,8 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#316](https://github.com/crtahlin/wasp/issues/316) | accounting: refreshDue is computed without the one second cap in settle, which can suppress cheques entirely | open | - | - |
 | [#333](https://github.com/crtahlin/wasp/issues/333) | accounting: Connect rewinds the threshold-growth checkpoint but not the counter it is compared against | open | - | - |
 | [#337](https://github.com/crtahlin/wasp/issues/337) | file: hashtrie.Sum formats the dispersed-replica failure with %s against err.Error() rather than %w, so errors.Is cannot see the cause | open | - | - |
-| [#359](https://github.com/crtahlin/wasp/issues/359) | accounting: the refresh allowance is granted as a step, and 94.5 per cent of refusals fall in the discarded window | open | - | - |
+| [#359](https://github.com/crtahlin/wasp/issues/359) | accounting: the refresh allowance is granted as a step, and nearly all refusals fall in the discarded window | open | - | - |
+| [#366](https://github.com/crtahlin/wasp/issues/366) | api: a malformed Swarm-Index-Document header returns 500 instead of 400 | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
