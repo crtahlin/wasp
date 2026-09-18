@@ -70,4 +70,53 @@ Set `providers-enable: false` and restart.
   and charges for it, as stock Bee does.
 - **Pins stay.** Remove them with `DELETE /pins/{reference}`.
 
+## Finding out why a download stalled
+
+A download that returns HTTP 200 with a short body, and `curl` exit 18, has
+truncated. Two very different causes look identical from outside: the chunks
+are genuinely gone, or your node ran out of credit with the peer holding them
+and stopped asking. Both surface as `storage.ErrNotFound`.
+
+The accounting logger tells them apart, at its `all` level. **The level is off
+by default and costs nothing while it is off.**
+
+Do this on the node that is **downloading**, not the one serving. The credit
+decision is made by the requester.
+
+```
+PUT /loggers/bm9kZS9hY2NvdW50aW5n/all
+```
+
+`bm9kZS9hY2NvdW50aW5n` is base64 of `node/accounting`. Two things make the
+obvious spelling fail:
+
+- the path segment is base64, not a URL path, so `/loggers/accounting/all`
+  returns 400;
+- the logger is named `node/accounting`, not `accounting`.
+
+Run the download again and look for:
+
+```
+"msg"="credit refused, would overdraw"
+```
+
+Each line carries the peer, the price of the chunk, the debt the request would
+create, the limit it was measured against, and each term that fed them. If
+those lines are absent, credit was not the reason.
+
+Put the level back when you are finished:
+
+```
+PUT /loggers/bm9kZS9hY2NvdW50aW5n/info
+```
+
+**Leave it raised only while you are looking.** Under sustained load against a
+slow peer the node can emit one line per refused request. It costs nothing to
+other nodes, since the line never leaves this machine, but it will fill a
+journal.
+
+**If you are on a build older than this change**, the V(2) entry is created
+lazily, so raise the level only after the node has carried some retrieval
+traffic. Raising it on a node that has served nothing yet has no effect.
+
 Generated with help of AI.
