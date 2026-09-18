@@ -21,13 +21,17 @@ Code references are to commit `2268503b`, base `upstream/v2.8.2`.
 - **A pipeline run** is one pass of the chunk-splitting pipeline over a stream
   of bytes, producing chunks and a single root reference. `storeDir` performs
   one per file and one per manifest node.
-- **A dispersed replica** is an extra copy chunk written for redundancy, at the
-  root of each pipeline run. At level `MEDIUM` there are 2 of them per run
-  (`replicaCounts`, `pkg/file/redundancy/level.go:174`).
+- **A dispersed replica** is an extra chunk written for redundancy at the root
+  of each pipeline run. It is a single-owner chunk at a dispersed address rather
+  than a literal copy. The run makes one call
+  (`pkg/file/pipeline/hashtrie/hashtrie.go:260`) and the fan-out to
+  `replicaCounts[level]` of them happens in `pkg/replicas/putter.go:37-64`; at
+  level `MEDIUM` that is 2 (`pkg/file/redundancy/level.go:174`).
 - **Residue** is chunks left on disk by a request that did not complete, which
   nothing afterwards counts or removes. **A paired control window** is an
-  equal-length period either side of a measured one, recorded to show the node
-  was otherwise quiet, so a change during the measured window is attributable.
+  equal-length period recorded immediately before the measured one, as #341 did,
+  showing how far the counters drift with the node doing nothing, so a change
+  during the measured window is attributable rather than assumed.
 - **Local ingest** is `POST /wasp/ingest` from #326: it stores content in this
   node's own store with no postage and pushes nothing to the network.
 - **The limit** is `local-ingest-limit`, a node-wide ceiling on distinct chunks
@@ -55,11 +59,14 @@ rather than a new mechanism.
 
 ## Hypothesis
 
-A directory ingested with no postage produces **the same manifest root** as the
-same archive uploaded with a stamp at the same redundancy level, and the holding
-node serves every path in it. If that holds, hosting a website without postage
-needs no new machinery beyond routing the existing directory builder at the
-existing local ingest session.
+A directory ingested with no postage produces, **on one node**, the same
+manifest root as the same archive uploaded with a stamp at the same redundancy
+level, and a second node that names the holder can fetch every path in it. If
+that holds, hosting a website without postage needs no new machinery beyond
+routing the existing directory builder at the existing local ingest session.
+
+The scoping to one node is load-bearing and is argued under arm 1: a manifest,
+unlike a blob reference, is not a pure function of the bytes.
 
 ## Design
 
@@ -70,9 +77,21 @@ Everything else keeps today's behaviour exactly.
 
 `Content-Type` then selects the archive format, as it already does for `/bzz`:
 `application/x-tar` or `multipart/form-data` (`pkg/api/dirs.go:59-71`). An
-**empty** content type is refused 400 as `/bzz` refuses it
-(`pkg/api/bzz.go:157-161`); a present but unsupported one is refused at
+**empty** content type is refused 400, as `/bzz` refuses it at
+`pkg/api/bzz.go:157-161`; a present but unsupported one is refused at
 `dirs.go:67-70`. Both apply here.
+
+**Copy the status code from that path and not the writer.** `bzz.go:159`
+answers through the raw `w`, although an `ow` with `onErr: putter.Cleanup` was
+built twenty lines above it (`bzz.go:135-139`), so the upload session it created
+is abandoned rather than cleaned. That is unmodified upstream code, checked
+against `upstream/v2.8.2`, and it is the same class of defect as the dirty
+collection the #326 review found. It is recorded here rather than filed, because
+nothing has been written to that putter by the time the check runs and it is not
+established that an abandoned session with no writes leaves anything behind.
+Rule 11 says to leave a suspected defect untagged and say what evidence would
+justify the tag: here, showing that a session created and never cleaned leaves a
+record. The new route must not copy the pattern.
 
 **Why the header and not the content type alone.** `bzzUploadHandler` also
 dispatches on a multipart content type without any header
@@ -153,10 +172,13 @@ archive that figure is wrong in two directions it cannot be corrected for: it
 does not know about tar or multipart framing, and it does not know about
 manifest node chunks.
 
-(It also ignores dispersed replicas, but that is **not** directory-specific: the
-blob path's pre-flight is already short by the same 2 at the default level. The
-two reasons above carry the point on their own, and an earlier draft listed the
-replicas as a third as though archives were special.)
+(It also ignores everything the default redundancy level adds, replicas and
+erasure-coding parity both, but that is **not** directory-specific: the blob
+path's pre-flight is short by the same kind of amount already, and the shortfall
+grows with size rather than being a fixed 2. An earlier draft of this spec
+listed the replicas as a third directory-specific reason and put the shortfall
+at 2, which is right only for a single-chunk body. The two reasons above carry
+the point on their own.)
 
 **So the pre-flight is skipped for a directory request**, and the mid-stream
 `Reserve` path is the only enforcement, which is already the real one
@@ -204,16 +226,29 @@ capability the blob path has and this one does not.
 raising and lowering them costs. Rule 8 is satisfied by not adding a dial.
 
 What changes for an operator is that the **same limit now has to cover manifest
-chunks as well**, and the cost per file is higher than it looks. `storeDir` runs
-a full pipeline **per file** (`dirs.go:185`) as well as per manifest node, and
-`hashtrie` writes `replicaCounts[level]` dispersed replicas of the root chunk of
-**every** run whose level is not NONE (`pkg/file/pipeline/hashtrie/hashtrie.go:259-269`),
-single-chunk files included. So for N files and M manifest nodes the replicas
-number 2(N + M) at the default level, not 2M, and a directory of many small
-files costs roughly **three chunks per file**. Against the shipped
-`local-ingest-limit` of 65,536 that is the number an operator needs, so the
-endpoint's documentation gives it rather than saying "more chunks per byte". The
-507 response already reports both what is held and the limit
+chunks as well**, and the cost per file is much higher than it looks.
+
+`storeDir` runs a full pipeline **per file** (`dirs.go:185`) as well as one per
+manifest node, every run whose level is not NONE writes a dispersed replica set
+of its root chunk (`pkg/file/pipeline/hashtrie/hashtrie.go:260`, with the count
+applied in `pkg/replicas/putter.go:37-64` from `GetReplicaCount`), and mantaray
+creates a fresh trie node per added path (`pkg/manifest/mantaray/node.go:206`),
+each saved as its own run (`persist.go:63-90`). So the node count M is at least
+the file count N, and the total is `N + M + 2(N + M)`, which is `3(N + M)` at
+the default level and therefore **at least six chunks for every small file**.
+
+Measured against this tree, unencrypted at MEDIUM, small files in one directory:
+9 chunks for 1 file, 66 for 10, 636 for 100, so **6.36 per file at a hundred**.
+Against the shipped `local-ingest-limit` of 65,536 (`cmd/bee/cmd/cmd.go:420`)
+that is about **10,300 small files**, and the endpoint documentation gives that
+figure rather than saying "more chunks per byte".
+
+An earlier draft of this spec said roughly three chunks per file, which halves
+the true cost and would have told an operator they could host twice the site
+they can. It came from counting the replicas of manifest nodes and forgetting
+that every file is its own pipeline run too.
+
+The 507 response already reports both what is held and the limit
 (`localIngestFullResponse`, `localingest.go:36-44`).
 
 ## Protocol impact
@@ -234,8 +269,7 @@ arm, which compares two uploads on one node and is a separate claim.
 - **Under-counting the limit.** If `Reserve` is not taken for manifest chunks,
   the node holds more than it reports and the limit is bypassed permanently for
   that much. This is the same class of defect as the usage gauge written on one
-  of three paths, found in the #326 review, and it is what the unpin arm below
-  tests.
+  of three paths, found in the #326 review, and it is what arm 5 below tests.
 - **A leaked collection on an error path**, per the `ow` discipline above.
 - **An operator expecting a website to serve at the bare root** and getting 404
   because no index document was named.
@@ -256,15 +290,20 @@ arm, which compares two uploads on one node and is a separate claim.
 
 Bench, provider holding the content and requester with no hint.
 
-**Rule 7, and exactly which arms it exempts.** Arms 1, 2, 3 and 5 are
-deterministic hash or count comparisons, and rule 7 is about quantities with
-variance. `local-ingest-results.md:48-49` takes that position, but note it sits
-under the address-equivalence arm alone and does not license a blanket
-exemption. **Arms 4, 4b and 6 get three runs with the spread**: a 404 arrives on
-a timeout and depends on whether a forwarding peer has cached the content, a
-served download reports a rate, and a mid-stream refusal depends on how far the
-body got. An earlier draft of this spec claimed the exemption for every arm but
-the last, which would have covered the 404 arm wrongly.
+**Rule 7, and exactly which arms it exempts.** Only arms 1, 2 and 3 are
+deterministic hash comparisons, and rule 7 is about quantities with variance.
+`local-ingest-results.md:48-49` takes that position, but note it sits under the
+address-equivalence arm alone and does not license a blanket exemption.
+
+**Arms 4, 4b, 5 and 6 get three runs with the spread**: a 404 arrives on a
+timeout and depends on whether a forwarding peer has cached the content, a
+served download reports a rate, a mid-stream refusal depends on how far the body
+got, and **arm 5 reads a database-wide counter against a control window and so
+carries exactly the drift arm 6 does.** Two earlier drafts got this wrong in
+different ways: the first claimed the exemption for every arm but the last, and
+the second exempted arm 5 while requiring three runs of arm 6, although arm 5 is
+the more exposed of the two because it asks for a match rather than for
+flatness.
 
 Arms:
 
@@ -278,8 +317,9 @@ Arms:
 
    **This claim is host-scoped and the spec says so rather than discovering it
    later.** A manifest is not pure content hashing the way a blob reference is.
-   `storeDir` puts host-derived data into it: the entry content type comes from
-   `mime.TypeByExtension` (`pkg/api/dirs.go:259`), and Go reads that table from
+   `storeDir` puts host-derived data into it: for a **tar**, the entry content
+   type comes from `mime.TypeByExtension` (`pkg/api/dirs.go:260`), and Go reads
+   that table from
    files on the host, so two nodes running different distributions can type the
    same file differently. That type is stored in the entry metadata
    (`dirs.go:191-194`) and therefore in the node chunks and the root. Path
@@ -307,20 +347,55 @@ Arms:
 
    This is the arm that demonstrates what #340 actually asks for, and an earlier
    draft did not have it: arms 2 and 3 read from the holder itself, which is a
-   local store lookup and says nothing about hosting. It also exercises the one
-   genuinely new interaction with the providers work, which is favourable and
-   undemonstrated: a request that already carries a preferred set, such as the
-   manifest entry of a `/bzz` download, keeps it, so the lookup uses the
-   **manifest root** as the content key rather than re-deriving one per entry
-   (`pkg/api/providers.go:65-70,75-77`). Without this arm a reader cannot tell
-   whether announcing a manifest root makes the whole site fetchable or only
-   its root chunk.
+   local store lookup and says nothing about hosting. Without it a reader cannot
+   tell whether naming a holder makes the whole site fetchable or only its root
+   chunk.
+
+   **It must run after arm 4, not before.** Fetching over the network caches the
+   content on the forwarding peers that relay it, which the endpoint's own
+   documentation says (`localingest.go:30-33`), so a 4b run would destroy arm
+   4's 404. #326 stated the same ordering for the blob arm, asking for the
+   no-hint request "before any hinted download of it had run"
+   (`local-ingest-results.md:53-54`).
+
+   **What it does and does not exercise.** It exercises inheritance: a request
+   that already carries a preferred set, such as the manifest entry of a `/bzz`
+   download, keeps it rather than deriving a new one per entry
+   (`pkg/api/providers.go:65-70,75-77`). It does **not** exercise discovery
+   using the manifest root as the content key, because that lookup fires only
+   after `discoverAfterChunks`, which is 64 (`providers.go:32-35`, checked at
+   `:115`), and a website of small files never reaches 64 chunks in one
+   download. Demonstrating the content-key behaviour needs either a download of
+   at least 64 chunks or the announced path with no header, and this spec does
+   not claim it.
 5. **The count covers the manifest.** Record the chunk count the ingest reports,
-   and compare it against the rise in `ChunkStore.TotalChunks`
-   (`pkg/storer/debug.go:43`) across the ingest on an otherwise idle node, with
-   a paired control window either side to show the node is quiet. Run at a
-   non-zero redundancy level so the replicas are included. This is the arm that
-   catches manifest chunks stored but not counted.
+   and compare it against the rise in `ChunkStore.TotalChunks` read from
+   `/debugstore` (`pkg/storer/debug.go:43`), across the ingest, with a paired
+   control window to show the node was quiet. **Three runs**, for the reason
+   under rule 7 below. The upload level is already MEDIUM by default
+   (`localingest.go:69-75`), so the replicas are included without arranging
+   anything. This is the arm that catches manifest chunks stored but not
+   counted.
+
+   **The archive must be content the node has never held, and that is not a
+   detail.** `TotalChunks` counts distinct addresses in the whole database; a
+   Put of an address already present raises its reference count and creates no
+   entry (`pkg/storer/internal/chunkstore/chunkstore.go:92,116`). The reported
+   count is distinct addresses **within the session**, which knows nothing about
+   what the node already holds. So the two are equal only for content that is
+   new to the node. Arm 1 deliberately writes the same archive to the holder
+   twice, once ingested and once stamped, so **arm 5 must not reuse arm 1's
+   archive**: the rise would be near zero against a full reported count, and the
+   reject clause would fire on a node behaving correctly.
+   `local-ingest-results.md:295-297` records exactly this caveat for the blob
+   arm, and an earlier draft of this spec cited that document for its rule 7
+   position without carrying the caveat over.
+
+   Record `SharedSlots` and `ReferenceCount` beside `TotalChunks` so that
+   deduplication is visible rather than inferred, and read the comparison
+   against the drift the paired control window shows rather than as exact
+   equality: `local-ingest-results.md:299-302` records drifts of 0, +5 and 0
+   against a control of 0, +1 and 0 on a syncing node.
 
    **An earlier draft of this spec had this arm unpin the root and check that
    reported usage fell by exactly the reported count. That arm cannot fail.**
@@ -337,28 +412,47 @@ Arms:
    `ChunkStore.TotalChunks` against a paired control window, as #341 did for the
    blob path.
 
-Recorded per run: the reported chunk count, reported usage before and after,
-`ChunkStore.TotalChunks`, the HTTP status, and the response body.
+Recorded per run: the reported chunk count; reported usage before and after;
+`ChunkStore.TotalChunks`, `SharedSlots` and `ReferenceCount` from `/debugstore`,
+with the paired control window's drift beside them; the HTTP status and the
+response body; and, for every arm that gets three runs, **the elapsed time, the
+bytes returned and the body SHA-256**, without which there is no spread to
+report. An earlier draft asked for a spread and listed no quantity that has one.
 
 ## Acceptance
 
+One condition per arm, in arm order, so that a rewritten arm cannot leave a
+criterion pointing at a measurement nobody makes any more. An earlier draft did
+exactly that: it replaced arm 5 and left the Accept list asking for the unpin
+observation the old arm 5 produced, and it added arm 4b without adding a
+condition for it, so a run in which the second node fetched **nothing** met
+every condition and tripped no reject clause.
+
 **Accept** if all of:
 
-- the ingested manifest root equals the stamped root for the same archive at the
-  same level, on both archives;
-- the holder serves the bare root and every inner path with matching SHA-256;
-- a node with no hint gets 404 for the root and for an inner path;
-- unpinning drops reported usage by exactly the count the ingest reported, at a
-  non-zero redundancy level;
-- an over-limit directory answers 507 and leaves `ChunkStore.TotalChunks` flat.
+1. **(arm 1)** on one node, the ingested manifest root equals the stamped root
+   for the same archive at the same level, on both archives;
+2. **(arms 2 and 3)** the holder serves the bare root and every inner path with
+   matching SHA-256;
+3. **(arm 4)** a node with no hint gets 404 for the root and for an inner path,
+   in all three runs;
+4. **(arm 4b)** a second node naming the holder serves the bare root and every
+   inner path with matching SHA-256, in all three runs;
+5. **(arm 5)** the reported chunk count equals the `TotalChunks` rise, within
+   the drift the paired control window shows, on content the node had not held;
+6. **(arm 6)** an over-limit directory answers 507 and leaves `TotalChunks` flat
+   against its control window.
 
 **Reject**, meaning the change does not land as written, if any of:
 
 - the roots differ **on one node**, which would mean the ingest path and the
   stamped path disagree and the claim this rests on is false;
-- the reported count differs from the `TotalChunks` rise in **either**
-  direction: short means chunks are held and not counted, so the limit can be
-  bypassed; over means the node reports holding more than it does;
+- the reported count falls **short** of the `TotalChunks` rise by more than the
+  control drift, which means chunks are held and not counted and the limit can
+  be bypassed. A count **above** the rise is not by itself a reject: on content
+  the node partly held, the shared chunks raise the reference count rather than
+  the total, so `SharedSlots` and `ReferenceCount` decide whether it is
+  deduplication or a real over-report;
 - any error path leaves a pinned collection behind, or leaves `TotalChunks`
   raised after the collection is gone;
 - **any Accept condition fails for a reason not listed under what invalidates a
@@ -370,11 +464,22 @@ Recorded per run: the reported chunk count, reported usage before and after,
 
 **What invalidates a run** rather than deciding it:
 
-- comparing against a stamped upload at a different redundancy level, with a
-  different index document, or with ACT on one side, since each changes the root
-  for the same bytes;
+- comparing against a stamped upload with a different index document, or with
+  ACT on one side, since either changes the root for the same bytes; or at a
+  different redundancy level, which is required for a different reason. The
+  level does **not** change the root for content small enough that every file is
+  one chunk, measured identical at NONE and MEDIUM for 1, 10 and 100 small
+  files, so arm 1 would not detect a level mismatch on its own inputs. Holding
+  it fixed is cheap and keeps the arm honest for larger content, where the level
+  does change the reference;
 - an encrypted arm used for the equivalence comparison, which cannot hold by
   construction;
+- **a paired control window that shows the node was not quiet.** Arms 5 and 6
+  read a database-wide counter, so a run whose control window drifts is
+  discarded rather than read as a result. Without this, ordinary counter noise
+  would trip a reject clause;
+- arm 4 running **after** arm 4b, since the network fetch caches the content on
+  forwarding peers and the 404 can no longer be expected;
 - the two sides of arm 1 running on **different hosts**, since the MIME table
   and the path handling are host-derived. Different operating systems, or hosts
   with different MIME databases, invalidate that comparison rather than refuting
@@ -451,14 +556,25 @@ this, and they are handled differently on purpose:
   committed total (`mockstorer.go:270-281`) and its `Cleanup` removes no chunks
   (`:125-136`), so neither release nor residue can be asserted in `api_test` at
   all. The mock says so itself at `mockstorer.go:63-66`:
-  - `TestLocalIngestDirUnpinReleasesTheCount`;
-  - `TestLocalIngestDirLimitMidStreamLeavesNoResidue`, the 507 through `ow` with
-    the collection released and the chunk count back where it started;
-  - `TestLocalIngestDirDuplicate`, including the case that matters to an
-    operator: an existing pin collection at that root, whatever created it,
-    makes a re-ingest answer 200 with `soleSource: false` and the content is
-    **not** counted against the local ingest limit. So a site already pinned
-    from a stamped upload shadows an ingest of it.
+  These assert on storer state only, since `package storer_test` has no handler,
+  no status code and no `ow`:
+  - `TestLocalIngestDirUnpinReleasesTheCount`, the committed total falls by what
+    `Done` recorded;
+  - `TestLocalIngestDirLimitMidStreamLeavesNoResidue`, a session that crosses
+    the limit and is cleaned up releases its claim and leaves the chunk count
+    where it started;
+  - `TestLocalIngestDirDuplicateReturnsErrDuplicate`, including the case that
+    matters to an operator: an existing pin collection at that root, whatever
+    created it, yields `ErrLocalIngestDuplicate` and the content is **not**
+    counted against the limit, so a site already pinned from a stamped upload
+    shadows an ingest of it.
+
+  The **HTTP** halves of those two belong in `api_test`, which is where the
+  status code and the response body exist:
+  `TestLocalIngestDirLimitMidStreamAnswers507`, and
+  `TestLocalIngestDirDuplicateAnswers200NotSoleSource`. An earlier draft of this
+  spec put the status code and the `soleSource` field in `storer_test`, which
+  cannot see either.
 - `openapi/Swarm.yaml`: the new request shape. Fix the 507 field name while
   there: the schema says `chunks` (`openapi/Swarm.yaml:1414`) and the code emits
   `held` (`localingest.go:42`).
