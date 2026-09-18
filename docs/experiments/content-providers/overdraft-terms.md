@@ -8,10 +8,12 @@ and `t15i.sh`, outside this repository. Companion to
 **Exploratory.** This measurement answers a prior question and explicitly does
 not answer the main one. What it cannot do is stated before the numbers.
 
-**This is revision 2.** A review of revision 1 found seventeen defects,
-including a candidate mechanism that the code it cited forbids. That section is
-removed and its refutation is recorded in its place, because this is the sixth
-plausible and false claim on this issue and the pattern is the finding.
+**This is revision 3.** Revision 1 was reviewed and found to carry seventeen
+defects. Revision 2 fixed them and, in doing so, replaced one wrong claim about
+the refreshment mechanism with a different wrong claim in the opposite
+direction, which a second review caught. Both are kept and labelled in the
+section concerned, because a claim that has now been wrong in both directions is
+more informative than either version of it.
 
 ## Why this run exists
 
@@ -83,14 +85,25 @@ the interleaved set between about 10:21 and 10:31 UTC.
   requester stores as `paymentThreshold`, so a nonzero grant would move the term
   this run holds fixed. The harness refuses to record rows otherwise.
 - **The provider was restarted shortly before the sequential set** and not
-  again, so the interleaved set ran against a provider that had been up roughly
-  twenty minutes longer.
+  again, so run for run the interleaved set met a provider that had been up
+  about 13 minutes longer.
 - **The same content in all twelve runs**, one sole-source reference,
   4,194,304 bytes, hinted at the provider, `Swarm-Cache: false`.
 - **Balances were not reset between runs**, which are spaced 90 s apart. Debt
   and refresh allowance carry across runs, and the within-run balance range
   below depends on that.
-- `/accounting` sampled every 50 ms on the requester.
+- `/accounting` polled every 50 ms on the requester, with **the provider's entry
+  isolated by overlay** from the `peerData` map. Every figure below is that one
+  peer's, not a node-wide aggregate.
+- **Only four fields were recorded** from each response: `balance`,
+  `reservedBalance`, `shadowReservedBalance` and `thresholdReceived`.
+  `currentThresholdReceived` is in the same response and was **not** recorded,
+  which is why `refreshDue` at any instant is unknown below. That is a gap in
+  the harness, not in the endpoint.
+- `thresholdReceived` read 13,500,000 whenever it was checked, but it is
+  mutable: `NotifyPaymentThreshold` (`accounting.go:1010`) sets it whenever the
+  peer announces, and the growth path (`:663-669`) makes peers do that. It was
+  not asserted constant across the runs.
 
 ## Pre-registered predictions
 
@@ -129,7 +142,7 @@ Written before the run, so it can fail:
 
 All twelve truncated, `curl` exit 18, against a 4,194,304 byte file.
 
-**The balance floor came within 0.1 to 0.74 per cent of the announced
+**The balance floor came within 0.07 to 0.74 per cent of the announced
 13,500,000 in every run**, and reached it exactly in three of the twelve.
 Revision 1 said "reached the announced threshold in every one of the twelve",
 which the table above contradicts.
@@ -154,29 +167,48 @@ and a future run should prefer it. The interleaved set is the one to cite.
 Disabling the lookahead buffer does not hold `reservedBalance` near one chunk
 price. It sits about eight times higher.
 
-The read unit says why, exactly rather than approximately. With
-`Swarm-Lookahead-Buffer-Size: 0` the handler skips langos entirely and passes
-the reader straight to `http.ServeContent` (`pkg/api/bzz.go:824-828`), whose
-`io.Copy` uses a 32 KiB buffer, which is **exactly 8 chunks**. At the shipped
-buffer, `smallFileBufferSize = 8 * 32 * 1024 = 262,144` (`bzz.go:51`), it is
-**64 chunks**. And `joiner.ReadAt` declares `var eg errgroup.Group`
-(`pkg/file/joiner/joiner.go:215`) with no `SetLimit` anywhere in the file, so a
-read unit fans out concurrently however large it is.
+The read unit says why. [retrieval-rate.md](retrieval-rate.md) already records
+it at `:86`, "at buffer 0 a read unit is 8 leaves", so this is a citation rather
+than a new derivation. The path: with `Swarm-Lookahead-Buffer-Size: 0` the
+handler skips langos and passes the reader straight to `http.ServeContent`
+(`pkg/api/bzz.go:824-828`), and the copy buffer is 32 KiB, which is **8 chunks**
+of 4,096. At the shipped `smallFileBufferSize = 8 * 32 * 1024 = 262,144`
+(`bzz.go:51`) the unit is **64 chunks**. `joiner.ReadAt` declares
+`var eg errgroup.Group` (`pkg/file/joiner/joiner.go:215`) with no `SetLimit`
+anywhere in the file, so a read unit fans out concurrently however large it is.
+
+**The 32 KiB depends on a wrapper, which is worth stating because it could
+change.** `http.ServeContent` copies with `io.CopyN`, and net/http's own
+`(*response).ReadFrom` path would prepend a 512-byte content-sniff read and
+misalign every subsequent read. It does not apply here: every API response is
+wrapped by `responseWriter` (`pkg/api/metrics.go:136-142`), which embeds only
+`UpgradedResponseWriter` and so does not satisfy `io.ReaderFrom`. The copy
+therefore takes `io.Copy`'s plain 32 KiB path and stays chunk aligned.
+
+The measurement agrees independently: **every lookahead-0 body-byte figure is an
+exact multiple of 32,768** (262,144, 557,056, 720,896, 196,608). That is the
+strongest evidence for the read unit here and does not depend on reading the
+standard library at all.
 
 So turning the prefetch off reduces the read unit eightfold; it does not reduce
 it to one chunk.
 
 **A discrepancy this raises and does not settle.** The read units differ by a
-factor of 8, but the measured peaks differ by 5.08. A peak is a lower bound at
-50 ms sampling, and the larger unit has more opportunity to be caught mid-flight
-rather than less, so this is not explained by sampling alone. It is left open.
+factor of 8, the measured peaks by 5.08. The gap is **wider** than that, not
+narrower: `retrieval-rate.md:93-96` records that langos fetches the next buffer
+while the current one is read, so at the shipped buffer the leaves in flight can
+be up to twice the per-unit figure, putting the expected ratio as high as 16. A
+peak is also a lower bound at 50 ms sampling, and the default-lookahead runs are
+the shorter ones, so their peaks are the more likely to be understated. None of
+that is measured here and the gap is left open.
 
-For scale rather than for the argument: the measured mean chunk price is 306,735
-in run 1 of three, 306,454 and 309,141 in the others
-(`measurement.md:435-437`), about 307,443 across the three. Revision 1 cited
-`measurement.md:429-434`, which contains the caveat text and a table header but
-not the number, and presented one run as "the measured mean". The refutation
-above does not depend on the price at all.
+For scale only: the measured chunk price is 306,735 in run 1 of three, with
+306,454 and 309,141 in the others (`measurement.md:435-437`), about 307,443
+across the three. Note 2,530,000 divided by that is 8.23 rather than 8, which is
+expected since the per-chunk price varies with proximity, and is a reason the
+read unit rather than the price is the basis used above. Revision 1 cited
+`measurement.md:429-434`, which holds caveat text and a table header but not the
+number, and presented run 1 as "the measured mean".
 
 ## Prediction 2 holds
 
@@ -223,31 +255,61 @@ refusal, and sampling cannot supply that:
 The per-refusal breakdown has to be taken under the same lock as the
 comparison. That is what #353 is for.
 
-## A candidate mechanism, refuted
+## A candidate mechanism: possible, conditional, and not measured
 
-Revision 1 of this document proposed that a completed refreshment tightens the
-gate, because it sets `refreshTimestampMilliseconds` to now and so drops
-`refreshDue` to zero. **The code forbids it**, in three separate ways, and it is
-recorded here so the argument is not made again:
+This section has now been written three times and been wrong twice, in opposite
+directions. Both wrong versions are stated before the current one, because the
+oscillation is more informative than any of the three.
 
-- `NotifyRefreshmentSent` holds `accountingPeer.lock` for its whole body
-  (`accounting.go:1100-1101`), covering both the timestamp write (`:1106`) and
-  the balance credit (`:1167`). `PrepareCredit` takes the same lock, so no
-  refusal can observe one without the other.
-- A refreshment is only attempted when `paymentAmount >= a.refreshRate`
-  (`:470`) and more than 999 ms have passed (`:473`), so it never pays down less
-  than the gate loses.
-- One accepted for less than expected is rejected and blocklists the peer
-  (`:1150-1156`), returning **before** the balance is credited.
+**Revision 1 claimed** a completed refreshment tightens the gate: it sets
+`refreshTimestampMilliseconds` to now, so `refreshDue` drops from `refreshRate`
+to zero, while the debt falls by the credited `amount`. Writing headroom as
+limit minus debt, the change is `amount - refreshRate`.
 
-It also did not fit this data: a balance cycling from about -300,000 to the
-floor implies refreshments paying down far more than the 4,500,000 the gate
-loses, so the gate is at its **least** hostile just after a refreshment here.
+**Revision 2 claimed the code forbids that**, on the grounds that a refreshment
+is only attempted at or above one `refreshRate` (`:470`) and that one accepted
+below expectation is rejected before crediting (`:1150-1156`). **That refutation
+was unsound and is withdrawn.**
 
-That is five withdrawn designs and one withdrawn analysis on this issue, every
-one derived by reading code and reasoning about it. The lesson is not about any
-single fact: this gate has enough interacting terms that plausibility is worth
-nothing, and only a measurement at the point of refusal will do.
+What is actually true:
+
+- `:470` and `:473` bound the **attempted** amount and the **local** elapsed
+  time. What credits the balance at `:1167` is `amount`, the amount the peer
+  accepted.
+- Its only floor is
+  `expectedAllowance = min(allegedInterval * refreshRate, attemptedAmount - refreshReservedBalance)`
+  (`:1132`, `:1143-1146`). `allegedInterval` is
+  `paymentAck.Timestamp - lastTime.Timestamp` (`pseudosettle.go:324`), taken
+  from **the peer's** timestamps. Negative is rejected; **zero is not**, and at
+  zero the floor is zero, so an `amount` of zero passes `:1150` with no error
+  and no blocklist.
+- `refreshReservedBalance` (incremented at `:518` and `:1241`) lowers
+  `checkAllowance` by the same route.
+- And `:1106` writes the timestamp **unconditionally**, above every check. So on
+  the below-expectation path at `:1150-1156` the timestamp has already advanced
+  when the function returns without crediting. Revision 2 cited that path as
+  forbidding the mechanism; it is an instance of it. The peer is blocklisted
+  there (`:1154`), which limits the consequence rather than preventing it.
+
+So `amount` can be less than `refreshRate`, and when it is, headroom shrinks.
+**The mechanism is possible.**
+
+What does work against it, and revision 2 missed: on every **error** path
+pseudosettle passes `timestamp = 0` (`pseudosettle.go:276, 285, 303, 310, 319,
+327, 334, 340, 350`), so `:1106` sets the timestamp to zero,
+`min((now - 0)/1000, 1)` saturates at 1, and the gate sits at its **ceiling**.
+Failed refreshments loosen the gate rather than tightening it.
+
+**None of the conditions that decide this were measured here.** `allegedInterval`,
+`refreshReservedBalance` and the accepted `amount` are not exposed on
+`/accounting` and were not sampled. So this stays a possibility with stated
+preconditions, and no design follows from it.
+
+That is four withdrawn designs on this issue plus two withdrawn analyses of this
+one mechanism, in opposite directions, every one derived by reading code
+carefully. The lesson is not about any single fact: this gate has enough
+interacting terms that plausibility is worth nothing here, and only a
+measurement at the point of refusal will do.
 
 ## Limits of this measurement
 
