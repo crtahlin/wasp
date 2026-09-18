@@ -111,6 +111,40 @@ by more than `preferred_overdrafts` in every arm, and the difference is refusals
 by ordinary peers: 72 at buffer 524,288 and 309 at 2,097,152 in run 1 alone.
 Nothing in the data says whether the branch fired, because nothing counted it.
 
+### What the size sweep added, after this document was written
+
+[sole-source-sizes.md](sole-source-sizes.md) measured the same provider at four
+file sizes with the balance recorded, and it changes what should be instrumented
+here.
+
+**A candidate that is not credit exhaustion: settlement falling short of
+accrual.** Three 20 MB downloads and one 50 MB download ran at the same delivery
+rate to within 0.7%, so all four accrued debt at the same rate. Their net
+balance movement was -360,000, -660,000, **plus 5,160,000** and
+**-81,460,000**. Debt fell during one of them. Whatever separates a download that
+finishes from one that does not, it tracks the **difference** between accrual
+and settlement rather than either alone, and **no harness in this project has
+ever recorded the settlement rate**.
+
+**An existing dataset already refutes a pure headroom story.** `cp290/t7-cold.txt`
+has runs starting at a balance of **zero**, the maximum possible headroom, that
+delivered 262,144 bytes and then nothing at all, five times. Any explanation
+resting on running out of credit has to account for those rows, and the
+project's existing account of them is the all or nothing behaviour of
+`joiner.ReadAt` over one read unit.
+
+**Two corrections to how credit is read**, which apply to any measurement here:
+
+- The gate is `paymentThreshold + refreshDue` (`accounting.go:325-335`), which
+  the API reports as `CurrentThresholdReceived`, not `ThresholdReceived`.
+- It compares against a debt figure that includes the reserved balance, not the
+  settled balance that `/balances` returns.
+- The announced threshold **grows** by one refresh rate per settlement
+  checkpoint, so it must be read before and after a run rather than once.
+
+So step 1 below gains two observables: the settlement rate per run, split into
+pseudosettle and cheques, and the announced threshold at both ends of each run.
+
 ## What to do next, in order
 
 ### 1. Isolate why a read unit fails
@@ -127,10 +161,11 @@ answer. The observable is already there: `retrieval.go` logs
 - Count how often the existing wait branch fires. If it fires often, the earlier
   draft's premise was inverted and any design that adds more waiting is starting
   from the wrong place.
-- Record the requester's balance with the provider at the start of every run.
-  The project added that rule after a withdrawal in
-  [overdraft-retry-results.md](overdraft-retry-results.md) and the harness here
-  does not yet follow it.
+- Record the requester's balance with the provider at the start of every run,
+  the announced threshold at both ends, and the settlement rate split into
+  pseudosettle and cheques. The balance rule came from a withdrawal in
+  [overdraft-results](overdraft-retry-results.md); the other two come from
+  the size sweep above.
 
 ### 2. Explain the buffer-0 gap
 
