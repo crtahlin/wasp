@@ -1,163 +1,210 @@
-# Sole-source retrieval at four file sizes, and what ends a download
+# Sole-source retrieval at four file sizes
+
+No issue of its own. This is the sole-source size sweep that
+[#326](https://github.com/crtahlin/wasp/issues/326) made possible, and it feeds
+[#343](https://github.com/crtahlin/wasp/issues/343). The branch name carries a
+local task number that is not a GitHub issue; the repository's issue 24 is a
+different experiment.
 
 Measured 2026-09-18 on the two-node bench, `bench-1` as the provider and
-`bench-2` as the requester, provider running `0.1.3-f005605d`. Harness
-`cp290/t11.sh`, outside this repository.
+`bench-2` as the requester. Harness `cp290/t11.sh`, with the accounting figures
+read separately by `cp290/threshold.sh`, both outside this repository.
 
-**Two results, and the second was not what this set out to measure.**
+**Terms.** An **arm** is one condition measured repeatedly. **Headroom** is the
+distance between the requester's debt to a peer and the point at which that peer
+refuses further requests.
 
-- Sole-source content retrieves completely at 10 MB and 20 MB, and truncates at
-  50 MB and 100 MB, at a steady 263,000 to 265,000 B/s throughout.
-- **What ends a download is the requester's unsettled debt reaching the payment
-  threshold the provider has announced**, which on this bench has grown to
-  94,500,000. That is the mechanism [#343](https://github.com/crtahlin/wasp/issues/343)
-  was looking for, and it is not the one an earlier draft of that work guessed.
+## What is measured
 
-## What this replaces
+Four files, ingested with no postage so they are sole-source by construction,
+retrieved with the lookahead buffer at 0. Every no-hint control returned 404.
 
-This was blocked for a day. The four files were to be uploaded with postage and
-measured once the batch expired, which is how every sole-source measurement in
-this project had been done. Local ingest
-([#326](https://github.com/crtahlin/wasp/issues/326)) removes the wait: content
-ingested with no postage was never pushed to a neighbourhood, so it is
-sole-source by construction. The four files were made in **5.2 s of ingest
-altogether** rather than a day of waiting.
+| Size | Run | Balance at start | Delivered | Time | Rate | SHA | Overdrafts |
+|---|---|---|---|---|---|---|---|
+| 10 MB | 1 | 0 | 10,000,000 | 37.99 s | 263,236 B/s | ok | 2 |
+| 10 MB | 2 | -3,400,000 | 10,000,000 | 37.91 s | 263,780 B/s | ok | 0 |
+| 10 MB | 3 | -6,160,000 | 10,000,000 | 37.92 s | 263,706 B/s | ok | 0 |
+| 20 MB | 1 | -14,590,000 | 20,000,000 | 75.50 s | 264,897 B/s | ok | 0 |
+| 20 MB | 2 | -14,950,000 | 20,000,000 | 75.61 s | 264,501 B/s | ok | 0 |
+| 20 MB | 3 | -15,610,000 | 20,000,000 | 75.59 s | 264,599 B/s | ok | 0 |
+| 50 MB | 1 | -10,450,000 | 30,638,080 | 116.58 s | 262,805 B/s | no | 32 |
+| 50 MB | **3** | -91,910,000 | 1,343,488 | 8.02 s | 167,598 B/s | no | 45 |
+| 100 MB | 1 | -85,800,000 | 1,441,792 | 12.07 s | 119,486 B/s | no | 67 |
+| 100 MB | 2 | -90,560,000 | 1,114,112 | 8.96 s | 124,379 B/s | no | 49 |
+| 100 MB | 3 | -91,070,000 | 1,146,880 | 8.90 s | 128,841 B/s | no | 32 |
 
-The no-hint control still ran first on each file, because construction is an
-argument and a 404 is evidence. All four returned 404.
+Three things hold:
 
-## Retrieval, lookahead buffer 0
+- **Sole-source retrieval completes at 10 MB and 20 MB, six runs of six**, and
+  truncates at 50 MB and 100 MB, five of five.
+- **The rate of a completing run does not depend on size.** All six sit between
+  263,236 and 264,897 B/s. The truncating runs are slower at 119,486 to 262,805
+  B/s, so the earlier summary of this document, which said a steady 263,000 to
+  265,000 B/s throughout, was wrong and is corrected here.
+- **Overdrafts separate the two groups**: 0 or 2 in every completing run, 32 to
+  67 in every truncating one.
 
-| Size | Run | Balance at start | Delivered | Time | Rate | SHA |
-|---|---|---|---|---|---|---|
-| 10 MB | 1 | 0 | 10,000,000 | 37.99 s | 263,236 B/s | ok |
-| 10 MB | 2 | -3,400,000 | 10,000,000 | 37.91 s | 263,780 B/s | ok |
-| 10 MB | 3 | -6,160,000 | 10,000,000 | 37.92 s | 263,706 B/s | ok |
-| 20 MB | 1 | -14,590,000 | 20,000,000 | 75.50 s | 264,897 B/s | ok |
-| 20 MB | 2 | -14,950,000 | 20,000,000 | 75.61 s | 264,501 B/s | ok |
-| 20 MB | 3 | -15,610,000 | 20,000,000 | 75.59 s | 264,599 B/s | ok |
-| 50 MB | 1 | -10,450,000 | 30,638,080 | 116.58 s | 262,805 B/s | no |
-| 50 MB | 2 | -91,910,000 | 1,343,488 | 8.02 s | 167,598 B/s | no |
-| 100 MB | 1 | -85,800,000 | 1,441,792 | 12.07 s | 119,486 B/s | no |
-| 100 MB | 2 | -90,560,000 | 1,114,112 | 8.96 s | 124,379 B/s | no |
-| 100 MB | 3 | -91,070,000 | 1,146,880 | 8.90 s | 128,841 B/s | no |
+Ingest took 0.22 s, 0.36 s, 0.91 s and 3.74 s, at 2,463, 4,923, 12,305 and
+24,609 chunks. **Those durations are one run each**, and the quarantined first
+run of the same harness ingested the same sizes in 0.46 s, 0.97 s and 1.84 s, so
+the 100 MB figure differs by a factor of two between the two observations. The
+chunk counts agree exactly across both.
 
-Ingest cost 0.22 s, 0.36 s, 0.91 s and 3.74 s for the four sizes, at 2,463,
-4,923, 12,305 and 24,609 chunks.
+### The run that is missing
 
-**The rate does not degrade with size.** Every complete run sits between 263,236
-and 264,897 B/s, and the 50 MB run that truncated was running at 262,805 B/s
-when it stopped. Truncation is a cutoff, not a slowdown.
+The 50 MB arm has runs **1 and 3**. Run 2 is absent, and the rows are labelled
+as they were recorded rather than renumbered.
 
-**Eleven runs, not twelve.** The 50 MB third run is missing: the run before it
-had driven the balance to the ceiling, and the harness recorded only two. The
-gap is left as it is rather than filled from a later session, which would not be
-the same node state.
+**Why is not known.** An earlier draft of this document said the previous run had
+driven the balance to a ceiling and the harness stopped. That was invented: the
+harness runs `for r in 1 2 3` unconditionally and has no balance logic of any
+kind, and the 100 MB arm then ran all three of its runs from balances nearer the
+supposed ceiling. The likely cause is the silent failure of an `ssh` invocation,
+which the harness header already records as having eaten an entire size in the
+first run, but that is inference from the 39 s gap between the two timestamps
+and not evidence.
 
-## What ends a download
+## What is not established
 
-The balance column was added to this harness after a review pointed out that the
-project requires it and earlier harnesses here did not record it. It is the
-column that answers the question.
+**The balance is associated with the outcome. It has not been shown to cause
+it, and the simplest version of that claim is false.**
 
-The requester's accounting entry for the provider, read after the runs:
+An earlier draft of this document said downloads stop because the balance
+reaches the payment threshold the provider announces, gave that threshold as
+94,500,000, and called the first 50 MB run decisive. Four things are wrong with
+it.
 
-| Field | Value |
-|---|---|
-| `thresholdReceived` | 94,500,000 |
-| `currentThresholdReceived` | 99,000,000 |
-| `thresholdGiven` | 13,500,000 |
-| `balance` | -90,220,000 |
+### The gate is not the number used, nor the quantity plotted
 
-**Every truncation happens just under 94,500,000.** The balances at the end of
-the truncated runs are -91,910,000, -90,560,000, -91,070,000 and -90,220,000. At
-a measured chunk price near 307,000 units, -91,910,000 leaves room for about
-eight more chunks.
+`pkg/accounting/accounting.go:325-335` compares against
+`paymentThreshold + refreshDue`, which is exactly how `CurrentThresholdReceived`
+is computed (`:764-765`). The gate is therefore **99,000,000**, not the
+94,500,000 that `ThresholdReceived` reports. The comparison is also against
+`increasedExpectedDebt`, which adds the reserved balance, any surplus and the
+chunk price, not the settled balance that `/balances` returns and that this
+table plots.
 
-Neither node sets `payment-threshold`, so both started from the default
-13,500,000. The provider's announced threshold has since grown to 94,500,000,
-which is 21 times the refresh rate of 4,500,000, with the ceiling at 24 times.
-Thresholds grow with settlement history, so this is the ordinary consequence of
-these two nodes having traded for days.
+### The threshold is not a constant, and was read once, afterwards
 
-### The mechanism
+`notifyPaymentThresholdUpgrade` (`accounting.go:640-678`) raises the announced
+threshold by one refresh rate each time cumulative settlement passes a
+checkpoint of 450,000,000. 94,500,000 is the default 13,500,000 plus eighteen
+such steps. This session delivered about 126 MB, roughly 9.5 billion units at
+the measured chunk price, which is about twenty-one checkpoints' worth, and the
+bench notes record this same pair reading 13,500,000 three days earlier. So the
+threshold was very likely climbing across these eleven runs, and the single
+reading taken after all of them cannot be treated as the value they were
+measured against.
 
-Settlement drains unsettled debt continuously while a download accrues it. So:
+Note also that `maxPaymentThreshold`, 108,000,000, is the largest threshold a
+node accepts for **its own configuration** (`pkg/node/node.go:245`, `:810-811`).
+It does not cap growth, and an earlier draft implied it did.
 
-**A download completes if it finishes before the balance climbs to the announced
-threshold.**
+### An existing dataset falsifies the simple claim
 
-That accounts for every row:
+`cp290/t7-cold.txt` is the only other bench data carrying balances. It has runs
+starting at a balance of **zero**, the maximum possible headroom, that delivered
+262,144 bytes and then nothing at all, five times. "A download completes if it
+finishes before the balance climbs to the threshold" cannot survive those rows.
+The project already has a competing account of them, the all or nothing
+behaviour of `joiner.ReadAt` over one read unit, recorded with
+[#324](https://github.com/crtahlin/wasp/issues/324).
 
-- 10 MB and 20 MB finish with the balance still far below the ceiling.
-- **50 MB run 1 is the decisive one.** It started healthy at -10,450,000, at the
-  same level as the completing 20 MB runs, ran for 116 s, and stopped when its
-  balance reached -91,910,000. Nothing about the file was different; it simply
-  ran long enough to exhaust the headroom.
-- Runs that started near the ceiling delivered about 1.1 to 1.4 MB, which is
-  roughly what the refresh allowance sustains before the gate closes again.
+### The decisive run is not decisive
 
-### What this corrects
+Net balance movement, from this table's own numbers:
 
-An earlier draft of the [#343](https://github.com/crtahlin/wasp/issues/343) spec
-said credit exhaustion ends these downloads, then withdrew it because the count
-of credit refusals did not order the outcomes: in one arm the run with the
-fewest refusals truncated earliest.
+| Run | Delivered | Time | Net balance change |
+|---|---|---|---|
+| 20 MB run 1 | 20,000,000 | 75.50 s | -360,000 |
+| 20 MB run 2 | 20,000,000 | 75.61 s | -660,000 |
+| 20 MB run 3 | 20,000,000 | 75.59 s | **+5,160,000**, debt fell |
+| 50 MB run 1 | 30,638,080 | 116.58 s | **-81,460,000** |
 
-Both halves were right about something. **Credit is what ends the download, and
-the refusal count is not how to see it.** The predictor is the balance against
-the announced threshold. A run already near the ceiling refuses early and often
-and delivers little; a run with headroom can absorb hundreds of refusals and
-still finish, which is exactly what the completing run in that arm did.
+Delivery rates differ by under 0.7%, so debt was being **accrued** at the same
+rate in all four. Yet the net movement differs by two orders of magnitude, and
+in one 20 MB run it ran the other way. At the drift rate of the 20 MB runs,
+reaching -81,460,000 would take hours rather than 116 seconds.
 
-The withdrawal stands: the earlier draft proposed waiting for credit inside the
-retrieval loop, and nothing here says that would work. What this changes is
-where to look.
+So duration is not what separates that run. What separates it is that
+**settlement fell short of accrual**, by roughly 3.5% on these numbers, where in
+the 20 MB runs it kept up or exceeded it. The controlling quantity is the
+settlement shortfall, whose sign varies from run to run in this very table, and
+**this harness did not measure it at all**. The conclusion that size is not the
+variable and duration is does not follow, and it rested on one run.
 
-## What follows
+### Two smaller corrections
 
-- **[#327](https://github.com/crtahlin/wasp/issues/327) now has a measured
-  motivation.** Raising the threshold a provider announces to a peer downloading
-  its content raises precisely this ceiling. It is implemented and merged but
-  has never been configured on the bench, and this is the arm that would show
-  what it buys.
-- **The buffer question in #343 needs re-reading against this.** A larger buffer
-  consumes credit faster, so it reaches the ceiling sooner while also delivering
-  sooner. That is a plausible account of why larger buffers truncate more, and
-  it is **not established here**: these runs were all at buffer 0 and varied the
-  file size instead.
-- **Size is not the variable.** It looked like a size effect and it is a
-  duration effect. A 20 MB file that started at -85,000,000 should truncate, and
-  a 100 MB file starting at zero on a freshly connected pair may not. Neither
-  was run.
+The five truncated runs end at -91,910,000, **-85,800,000**, -90,560,000,
+-91,070,000 and -90,220,000. An earlier draft listed four of these and omitted
+the one furthest from the supposed ceiling. And those ending values are sampled
+after the request returns, with a metrics scrape in between, so they are not the
+balance at the moment of truncation: the 50 MB run 3 row shows debt **falling**
+by 6,110,000 across its own run.
+
+The short deliveries of the saturated runs were also attributed to the refresh
+allowance. The arithmetic does not support it: 1,343,488 bytes is about 328
+chunks, roughly 100 million units, against a refresh allowance near 36 million
+over that run. The bench notes already record that this pair is cheque-dominated
+rather than refresh-bound.
+
+## What this does show, and what to do next
+
+The size sweep itself stands: **sole-source retrieval works at 10 MB and 20 MB
+and fails at 50 MB and 100 MB on this bench, in this state**, and the completing
+rate is flat across sizes. That was the question this task asked and it is
+answered.
+
+The mechanism is not. The candidate worth pursuing is **whether settlement keeps
+up with accrual**, not the balance alone:
+
+- Record settlement directly, per run, both pseudosettle and cheques, alongside
+  the balance. No harness here does that yet, and it is the quantity the numbers
+  above point at.
+- Read the announced threshold **before and after every run**, since it grows.
+- Re-run the 50 MB arm three times, since the claim that broke rested on one.
+- Reconcile with `t7-cold`, where zero balance still failed, rather than around
+  it.
+
+**[#327](https://github.com/crtahlin/wasp/issues/327) remains the obvious next
+arm** and its motivation is unchanged by all of this: it raises the threshold a
+provider announces to a peer downloading its content, which raises whatever
+headroom is available, whether or not headroom is the whole story. It is merged
+and has never been configured on the bench.
 
 ## What this does not show
 
-- **Nothing about why buffer 0 is slow.** The rate is 263,000 B/s with zero
-  credit refusals in the completing runs. The ceiling explains where downloads
-  stop, not why the baseline rate is what it is.
-- **Nothing at a different threshold.** One value, 94,500,000, reached by
-  history rather than chosen. The relationship between threshold and deliverable
-  bytes is one point, not a curve.
-- **No second requester or provider**, so nothing about whether the ceiling is
-  per-pair in the way this assumes.
-- **Eleven runs in one session on one pair of nodes**, with the balance carried
-  forward from run to run rather than reset. That is realistic and it is not
-  controlled.
+- **Nothing about the mechanism**, per the section above.
+- **Nothing about the settlement rate**, which was not recorded.
+- **Nothing at a controlled threshold.** One value, reached by history, read once
+  after the fact, and probably moving throughout.
+- **Nothing about the baseline rate.** Why buffer 0 runs at 263,000 B/s with
+  almost no refusals and a balance far from any limit is untouched here.
+- **No second requester or provider**, and eleven runs on one pair in one
+  session with the balance carried forward rather than reset.
+- **One run per size for the ingest durations**, with a second observation
+  elsewhere disagreeing by 2x at 100 MB.
+- **The provider build is not in the rows.** The harness reads `/health` to its
+  operator log only, and never reads the requester's version. The project's own
+  rule, after an earlier mislabelling, is that every row carries the version.
 
-## One harness fault, and it produced a full set of plausible rows
+## A harness fault that produced a full set of plausible rows
 
-The first run of this measurement returned nine rows showing 404 at every size.
-They were not retrieval results: the requester's dial breaker had latched during
-a provider restart, so it was never connected to the provider, and every hinted
-download fell through to ordinary retrieval and returned the same 404 as the
-no-hint control. `preferred_attempts` did not move at all, which is the tell.
+The first run of this measurement returned nine rows showing 404 at every size
+it reached, across three sizes rather than four. They were not retrieval
+results: the requester's dial breaker had latched during a provider restart, so
+it was never connected to the provider, and every hinted download fell through
+to ordinary retrieval and returned the same 404 as the no-hint control.
+`preferred_attempts` did not move at all across any of the nine, which is the
+tell.
 
-The harness had tried to reconnect and carried on without checking. **The same
-failure produced three bad rows once before in this project.** The connection is
-now a gate that stops the run rather than an attempt that precedes it, and the
-quarantined rows are kept beside the data as
+The harness had attempted a reconnect and carried on without checking. The same
+failure produced three bad rows once before in this project. The connection is
+now a gate that stops the run, and the rows are kept beside the data as
 `t11-sizes-INVALID-not-connected.txt`.
+
+That run reached only three sizes because one was lost to the same silent `ssh`
+failure that most likely explains the missing 50 MB run above.
 
 ---
 
