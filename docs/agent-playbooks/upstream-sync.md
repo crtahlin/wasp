@@ -51,7 +51,8 @@ a fork ends up re-resolving the same conflicts forever. **Never squash a sync.**
 
 In order:
 
-1. **The protocol-freeze diff.** `git diff main...HEAD -- .github/protocol-freeze.lock`.
+1. **The protocol-freeze diff.** `git diff origin/main...HEAD -- .github/protocol-freeze.lock`,
+   after `git fetch origin`. Never a bare `main`; see rule 13 in `AGENTS.md`.
    If upstream moved a protocol minor, read
    `docs/agent-playbooks/protocol-compatibility.md` on what that means for
    dialability before merging.
@@ -78,7 +79,7 @@ In order:
    sync pull request and record it in the body.
 
    ```bash
-   git diff --name-status main...HEAD -- .github/workflows/ | grep '^A'
+   git diff --name-status origin/main...HEAD -- .github/workflows/ | grep '^A'
    ```
 4. **`docs/DIFFERENCES.md`.** After the sync, the new base is the latest Bee
    release, which is what that file compares against. Re-check every entry
@@ -149,8 +150,13 @@ patch series so `scripts/export-patch.sh` keeps working:
 
 ```bash
 git switch exp/<n>-<slug>
-git rebase main
+git fetch origin
+git rebase origin/main
 ```
+
+`origin/main`, not `main`: a local `main` in a worktree is routinely behind, and
+rebasing onto a stale one silently rebuilds the branch on an old base. See
+rule 13 in `AGENTS.md`.
 
 If the conflict is in code the experiment *replaces* wholesale (a rewritten
 hasher, a replaced scheduler), take ours and re-verify against upstream's new

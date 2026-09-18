@@ -29,7 +29,9 @@ How to read the tables:
 - **Record** links the issue, or the pull request where there is no issue.
 
 For how each change was measured, see the [experiment ledger](experiments/INDEX.md).
-For every change in full, run `git log --first-parent main`.
+For every change in full, run `git log --first-parent origin/main` after a
+`git fetch origin`. Not a bare `main`: in a worktree that ref is routinely
+behind and would silently show fewer changes. See rule 13 in `AGENTS.md`.
 
 ## What stays the same
 

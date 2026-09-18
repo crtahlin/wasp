@@ -68,8 +68,14 @@ hand-pushed branch cannot claim the exemption with a label alone.
 On a sync pull request the lock diff **is** the protocol review:
 
 ```bash
-git diff main...HEAD -- .github/protocol-freeze.lock
+git fetch origin
+git diff origin/main...HEAD -- .github/protocol-freeze.lock
 ```
+
+`origin/main`, not `main`: a local `main` in a worktree is routinely behind, and
+the three-dot form takes its merge base, so a stale one widens the diff and
+shows lock changes that are already merged. Fail-safe, but it wastes a review.
+See rule 13 in `AGENTS.md`.
 
 Read it. If upstream raised a protocol minor, our nodes will stop being dialable
 by peers still on the previous release until they upgrade, which is normal and

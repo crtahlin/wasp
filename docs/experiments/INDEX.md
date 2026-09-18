@@ -5,7 +5,8 @@ what came of it. This is the human-readable index; the authoritative record is
 the git history itself:
 
 ```bash
-git log --first-parent main          # every experiment, one line each
+git fetch origin                     # main is a local ref; see AGENTS.md rule 13
+git log --first-parent origin/main   # every experiment, one line each
 git diff <merge>^1 <merge>           # exactly what one experiment changed
 git log <merge>^1..<merge>^2         # how it was built
 scripts/export-patch.sh <slug>       # a clean patch series against current upstream
