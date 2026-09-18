@@ -40,8 +40,16 @@ wrong are marked where they appear rather than quietly removed.
 - **Lookahead buffer**: the read-ahead the API performs while streaming a
   download, set per request with `Swarm-Lookahead-Buffer-Size`. At its shipped
   default it prefetches, putting many chunks in flight at once; set to 0 it
-  reads one chunk at a time. **The whole result below turns on which of the two
-  is in play.**
+  puts fewer in flight, but **not one**. At 0 the handler passes the reader
+  straight to `http.ServeContent` (`pkg/api/bzz.go:824-828`), whose `io.Copy`
+  buffer is 32 KiB, so the read unit is **8 chunks**; at the shipped
+  `smallFileBufferSize` of 262,144 (`bzz.go:51`) it is **64**. And
+  `joiner.ReadAt` uses an errgroup with no limit, so a read unit fans out
+  however large it is. On a separate bench session, so not comparable run for
+  run with the figures below, the peak reserved balance was 2,530,000 to
+  2,550,000 with it off against 12,780,000 to 12,880,000 with it on. See
+  [overdraft-terms.md](overdraft-terms.md).
+  **The whole result below turns on which of the two is in play.**
 - **Sole-source content**: content that only the provider holds, because its
   postage batch expired and the network answers 404 for it. The provider still
   serves it because it is pinned, which needs no stamp.
