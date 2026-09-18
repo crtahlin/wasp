@@ -4,7 +4,7 @@ Issue: [#343](https://github.com/crtahlin/wasp/issues/343). The companion issue
 on spreading a download across several providers is
 [#344](https://github.com/crtahlin/wasp/issues/344).
 
-Code references are to `main` at `d43f5389`, base `upstream/v2.8.2`.
+Code references are to commit `d43f5389`, base `upstream/v2.8.2`.
 
 **This document proposes no code change.** An earlier draft did, and a review
 found that its central mechanism could not work and that its own data

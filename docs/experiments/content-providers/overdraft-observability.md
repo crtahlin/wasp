@@ -149,7 +149,7 @@ samples.
 
 ## What the base actually is
 
-Code references are to `origin/main` at `443b6246`, base `upstream/v2.8.2`.
+Code references are to commit `443b6246`, base `upstream/v2.8.2`.
 
 `pkg/accounting` is **not** unmodified. Against that base it carries 782
 inserted lines (and 9 deleted) from
