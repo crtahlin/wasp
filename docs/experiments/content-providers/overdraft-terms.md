@@ -66,6 +66,39 @@ can be sampled today.
   `surplusBalance` read 0 after the runs, so the two coincide and the surplus
   term is zero, but that was checked afterwards rather than sampled throughout.
 
+## Correction: the arm called "lookahead default" is not the default
+
+From [gate-terms-measured.md](gate-terms-measured.md). Both harnesses sent
+`Swarm-Lookahead-Buffer-Size: 524288`, which is `largeFileBufferSize`
+(`pkg/api/bzz.go:52`). A 4,194,304 byte file is below the 10,000,000 threshold
+in `lookaheadBufferSize` (`:59-64`) and therefore selects
+`smallFileBufferSize`, **262,144**. So the arm labelled "lookahead default"
+throughout this document, in both result tables and in the sentence beginning
+"The default lookahead raises the peak", is a **doubled** buffer and not the
+shipped one. No run in this document or in the #353 measurement exercises the
+default.
+
+The comparison itself stands, since it is between 0 and 524,288 in both. **The
+read-unit numbers derived from the wrong label do not.** 524,288 is
+**128 chunks**, not the 64 this document computes for 262,144 at the line
+beginning "At the shipped `smallFileBufferSize`". So:
+
+- the read units in the measured arms differ by a factor of **16**, not 8;
+- and with the langos double-buffering this document invokes, in-flight leaves
+  reach up to **32 times** buffer 0's, not 16.
+
+Both figures in the paragraph headed "A discrepancy this raises and does not
+settle" are therefore understated twofold, and the 64-chunk unit described there
+belongs to a buffer no run used. The direction of that paragraph survives and
+strengthens: the gap between read-unit ratio and measured peak ratio is wider
+than stated, not narrower.
+
+The wrong label reaches more of this document than the two result tables: also
+prediction 2, the heading "Prediction 2 holds", the sentence beginning "The
+default lookahead raises the peak", and the read-unit sentence further down.
+Treat every unqualified "default" below as meaning the 524,288 buffer the runs
+used, not the shipped 262,144.
+
 ## Conditions
 
 Taken **2026-09-18**, the sequential set between about 10:08 and 10:18 UTC and
@@ -190,8 +223,10 @@ exact multiple of 32,768** (262,144, 557,056, 720,896, 196,608). That is the
 strongest evidence for the read unit here and does not depend on reading the
 standard library at all.
 
-So turning the prefetch off reduces the read unit eightfold; it does not reduce
-it to one chunk.
+So turning the prefetch off reduces the read unit; it does not reduce it to one
+chunk. Against the shipped 64-chunk unit that is eightfold, and against the
+524,288 buffer the runs actually used it is sixteenfold. See the correction at
+the top of this document.
 
 **A discrepancy this raises and does not settle.** The read units differ by a
 factor of 8, the measured peaks by 5.08. The gap is **wider** than that, not
