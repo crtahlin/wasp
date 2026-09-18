@@ -249,6 +249,7 @@ a.loggerV2.Debug("credit refused, would overdraw",
 	"elapsed_seconds", timeElapsedInSeconds,
 	"settled_balance", currentBalance,
 	"surplus_balance", surplusBalance,
+	"surplus_error", surplusErr,
 	"reserved_balance", accountingPeer.reservedBalance,
 	"shadow_reserved_balance", accountingPeer.shadowReservedBalance,
 	"settle_triggered", settleTriggered,
@@ -258,7 +259,10 @@ a.loggerV2.Debug("credit refused, would overdraw",
 ### Everything in that block, and where it comes from
 
 Revision 2 printed this as though it dropped in. Its accounting of the names was
-incomplete, and revision 3's was miscounted. In full, **thirteen** values.
+incomplete, and revision 3's was miscounted. In full, **fourteen** values.
+(Thirteen at the time of writing; `surplus_error` was added during
+implementation, so that a logged zero surplus is never mistaken for a read
+that failed.)
 
 **Already in scope at `:332`** (eleven): `peer` (the function parameter,
 `:281`), `bigPrice` (`:295`), `increasedExpectedDebt`, `overdraftLimit`,

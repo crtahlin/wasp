@@ -291,11 +291,9 @@ func TestAccountingOverdraftTermsReconcileWithDebt(t *testing.T) {
 	// The balance term must actually be non-zero, or this test is the previous
 	// one again.
 	settled := logFieldInt(t, out, "settled_balance")
-	if settled.Sign() >= 0 {
-		t.Fatalf("settled_balance is %v, so this run does not exercise a non-zero debt term", settled)
-	}
-	if settled.Cmp(new(big.Int).SetUint64(owed)) != -1 && settled.CmpAbs(new(big.Int).SetUint64(owed)) != 0 {
-		t.Fatalf("settled_balance %v does not reflect the applied credit of %d", settled, owed)
+	wantSettled := new(big.Int).Neg(new(big.Int).SetUint64(owed))
+	if settled.Cmp(wantSettled) != 0 {
+		t.Fatalf("settled_balance is %v, want %v, so the logged balance does not reflect the applied credit", settled, wantSettled)
 	}
 
 	if v := logField(t, out, "settle_called"); v != "true" {
