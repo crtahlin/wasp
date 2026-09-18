@@ -3,7 +3,7 @@
 Issue: [#326](https://github.com/crtahlin/wasp/issues/326). A node puts content
 into its own store, pays no postage, and serves it to anyone who asks for it.
 
-Code references are to `main` at `7bd5da14`, base `upstream/v2.8.2`.
+Code references are to commit `7bd5da14`, base `upstream/v2.8.2`.
 
 **This is revision 5.** Four adversarial reviews. Revision 5 fixes a crash this
 document's own design would have caused, and three mechanisms that could not be

@@ -4,7 +4,7 @@ Issue: [#324](https://github.com/crtahlin/wasp/issues/324). This is the fix for
 the cause behind [#313](https://github.com/crtahlin/wasp/issues/313), where a
 download of content only a provider holds returns a truncated body and stops.
 
-Code references are to `main` at `6eaaa651`, base `upstream/v2.8.2`.
+Code references are to commit `6eaaa651`, base `upstream/v2.8.2`.
 
 ## Problem
 
