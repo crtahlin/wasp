@@ -5,8 +5,8 @@ Issue: [#326](https://github.com/crtahlin/wasp/issues/326). Spec:
 second parent `f005605d` is the build the bench ran.
 
 Measured 2026-09-18 on the two-node bench, `bench-1` as the provider and
-`bench-2` as the requester. Harnesses `cp290/t9.sh` and `cp290/t9b.sh`, outside
-this repository.
+`bench-2` as the requester. Harnesses `cp290/t9.sh`, `t9b.sh`, `t9c.sh` and
+`t9f.sh`, outside this repository.
 
 **Terms.** The **lookahead buffer** is the prefetch the download path reads
 ahead with, set by `Swarm-Lookahead-Buffer-Size` and held at 0 throughout, so
@@ -166,9 +166,9 @@ sends `Content-Length`, so the handler refused before reading the body, which
 the spec calls a convenience rather than the enforcement. Nothing was written,
 so usage being unchanged is trivially true here and proves no cleanup. The
 mid-stream refusal, where the limit is crossed part way through a body and a
-partial collection has to be removed, is covered by unit tests only and has not
-been measured on a node. What this arm does show is that the refusal names both
-the limit and what is held, so an operator can act on it.
+partial collection has to be removed, is measured separately below. What this
+arm does show is that the refusal names both the limit and what is held, so an
+operator can act on it.
 
 ### 5. Removal
 
@@ -208,15 +208,144 @@ the bench at all.** No arm ends a body early or disconnects mid-upload. It is
 covered by tests in `package storer_test`, and an earlier draft of this document
 wrongly listed it among the conditions the bench had cleared.
 
+## Three of the gaps, closed
+
+Measured the same night, once [#341](https://github.com/crtahlin/wasp/issues/341)
+had listed them. Harnesses `cp290/t9c.sh` and `t9f.sh`. Same provider,
+`local-ingest-limit: 8192`.
+
+These three needed no change to the node's configuration. The fourth gap, a
+second node producing the same reference, still stands.
+
+### Mid-stream refusal fires on a node
+
+The limit arm in section 4 fired the declared-length refusal, because `curl`
+sends `Content-Length`. Sending the body with **chunked transfer encoding**
+removes it, so that branch cannot fire and the limit has to bind while the body
+is being read.
+
+Two runs, 19,152,896 bytes against 2,676 chunks of room:
+
+```
+507  {"message":"local ingest limit reached","held":5516,"limit":8192}
+```
+
+**The status alone does not say which branch produced it**, and an earlier draft
+of this section claimed the mid-stream path on that evidence alone. Two things
+settle it, and the second is the stronger:
+
+- The branches log different lines. Both runs logged
+  `local ingest refused, limit reached`, and neither logged
+  `local ingest refused, declared length does not fit under the limit`.
+- **A paired control already existed.** An earlier attempt sent its body the
+  same way, from standard input, but **without** the chunked header, and was
+  refused on declared length with `wanted=8257`, which is exactly
+  33,554,432 / 4096 leaves plus its intermediates. Same body source, same
+  endpoint, header the only difference, different branch. That is what
+  establishes the header's effect, rather than any claim about what `curl` does
+  internally.
+
+Because this branch fires inside the pipeline, it is also the first run outside
+a unit test of the out-of-band limit report that exists because
+[#337](https://github.com/crtahlin/wasp/issues/337) discards the error chain.
+
+### Neither refusal nor abandonment leaves chunks behind
+
+This is the arm the spec cared about most: on a node that is not restarted, a
+leaked partial ingest is the one failure no limit would catch, because only the
+startup pass removes it.
+
+**The local ingest usage figure cannot answer this**, and two earlier attempts
+at this arm failed in different ways before that was clear:
+
+- The first posted a body larger than the room left, so the node refused it on
+  declared length and nothing was abandoned at all. It asserted on nothing.
+- The second genuinely abandoned an ingest, but asserted on the usage figure.
+  That figure is the committed total, and a leak is by definition chunks it does
+  not count, so a flat reading is equally consistent with cleanup working and
+  with a leak. The same objection applies to the refusal path, where the claim
+  is released whether or not anything was deleted.
+
+The quantity that can answer it is `ChunkStore.TotalChunks` from `/debugstore`,
+which counts what is on disk. Each window is paired with a control window of the
+same length and no ingest, because the node is syncing and that counter can move
+on its own.
+
+| Window | What the ingest did | Control drift | Measured drift |
+|---|---|---|---|
+| abandoned 1 | 2,097,024 B uploaded, then cut off | 0 | 0 |
+| abandoned 2 | 2,097,024 B uploaded, then cut off | 0 | 0 |
+| abandoned 3 | 2,097,024 B uploaded, then cut off | 0 | 0 |
+| refusal 1 | wrote its room, then 507 | 0 | 0 |
+| refusal 2 | wrote its room, then 507 | 0 | 0 |
+
+An abandoned 2 MiB ingest at level NONE writes about 512 chunks, and a refusal
+at this limit writes about 2,676 before the limit bites. **A leak would show as
+those numbers. Every window shows zero**, and `Pinning.TotalChunks` stayed at
+539,290 throughout, so no partial collection was committed either.
+
+Each window carries its own evidence rather than borrowing another's. Every
+abandoned run recorded 2,097,024 bytes uploaded and curl exit 28, every refusal
+recorded its 507, and the node's log for this run alone holds exactly three
+`local ingest: split write all failed` entries and two
+`local ingest refused, limit reached` entries, one per window in order.
+
+**Fresh random bytes every run**, which is what keeps the measurement from being
+blind: a re-ingest of content the node already held would raise `SharedSlots`
+and `ReferenceCount` rather than `TotalChunks`.
+
+An earlier pass of the abandoned arm saw drifts of 0, +5 and 0 against a control
+of 0, +1 and 0, on a node whose counter was moving slightly at the time. It
+pointed the same way and is superseded by the run above, where the counter was
+steady and every window was flat.
+
+### An encrypted ingest round-trips
+
+| Property | Value |
+|---|---|
+| Reference length | 128 hex characters, so 64 bytes |
+| Chunks reported | 261, and usage rose by exactly 261 |
+| Retrieved | 1,048,576 bytes in 4.10 s, from the other node, naming the holder |
+| SHA-256 | matched |
+
+The 64-byte reference is the case the record was deliberately sized for, working
+on a node rather than in a test. Address equality is not testable for encrypted
+content at all, because a fresh random key per chunk gives a different reference
+for identical bytes. Such a reference cannot be announced through
+`/wasp/providers`, which refuses encrypted references, so it is reachable only
+by explicit hint.
+
+This arm also settles the by-hand usage reading section 5 disowns: a later
+refusal reported `held=5255`, matching it.
+
+### What these cost in method
+
+Three attempts across one night went wrong, and each produced a
+confident-looking pass:
+
+- a refusal reported as an abandonment, when the node had rejected the body on
+  its declared length before anything was written;
+- a leak measured with the counter that by definition cannot see it, on both the
+  abandoned path and the refusal path;
+- an arm that recorded no evidence of its own, whose write-up then borrowed log
+  lines belonging to different runs.
+
+The discriminators that resolved all three were already in the code and the node
+rather than in the harness: two distinct log lines for the two refusal branches,
+and a chunk counter separate from the usage figure. Worth building into the next
+harness rather than reaching for afterwards.
+
 ## What this does not show
 
 - **Nothing about MEDIUM redundancy**, and nothing about why it truncated.
 - **Nothing about a second node** producing the same reference, per section 1.
-- **Nothing about mid-stream refusal** on a real node, per section 4.
-- **Nothing about abandoned ingests** on a real node, above.
-- **Nothing about encrypted ingests**, which cannot be tested for address
-  equality at all: a fresh random key per chunk gives different references for
-  identical bytes.
+- **Nothing about mid-stream refusal** on a real node in the arms above, now
+  covered separately.
+- **Nothing about abandoned ingests** in the arms above, now covered
+  separately.
+- **Nothing about encrypted address equality**, which is not testable at all:
+  a fresh random key per chunk gives different references for identical
+  bytes. Encrypted retrieval is covered separately.
 - **Nothing about directories**, which this endpoint does not handle.
 - **Nothing about disk actually consumed.** The usage figure counts distinct
   chunks and is an upper bound: a chunk the node already held cost no new disk
