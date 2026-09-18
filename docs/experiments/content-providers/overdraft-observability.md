@@ -2,121 +2,37 @@
 
 Issue: [#353](https://github.com/crtahlin/wasp/issues/353). Exists to unblock
 one measurement on [#343](https://github.com/crtahlin/wasp/issues/343), recorded
-in [retrieval-rate.md](retrieval-rate.md) and
-[truncation-cause.md](truncation-cause.md).
+in [retrieval-rate.md](retrieval-rate.md),
+[truncation-cause.md](truncation-cause.md) and
+[overdraft-terms.md](overdraft-terms.md).
 
-**This is revision 2.** Revision 1 was reviewed and refused. Its central claim,
-set in bold, was that `pkg/accounting` is byte-identical to `upstream/v2.8.2`
-and that this change would be the first fork modification to it. That is false.
-It was produced by running
+**This is revision 3.** Two reviews refused it, finding thirteen and fourteen
+defects. Two are worth stating at the top rather than in a footnote, because
+both are the failure this document exists to prevent.
 
-```
-git diff upstream/v2.8.2 main -- pkg/accounting
-```
+**Revision 1 reported an empty diff as verification.** It claimed in bold that
+`pkg/accounting` is byte-identical to `upstream/v2.8.2`. The command was run in
+a worktree whose local `main` ref was stale at `de136880` while `origin/main`
+was at `a561b5a5`, so it returned nothing, and nothing was read as confirmation.
+The package carries 782 inserted lines of fork change. Filed as
+[#355](https://github.com/crtahlin/wasp/issues/355), because `AGENTS.md` rule 13
+tells the reader to run exactly that command.
 
-in a worktree whose local `main` ref was stale at `de136880` while `origin/main`
-was at `a561b5a5`. The command returned empty, and the empty result was reported
-as verification.
+**Revision 2 fabricated a code citation.** It told the implementer to copy
+`pkg/retrieval/retrieval_test.go:355` as
+`log.NewLogger("test", log.WithSink(buf), log.WithVerbosity(log.VerbosityAll))`.
+The actual line is `log.NewLogger("test", log.WithSink(buf))`. The invented
+argument was the one thing that makes the test work, so the pattern it told the
+implementer to copy was the vacuous-pass trap the next paragraph warned about.
 
-This is the same failure that produced the four withdrawn designs on #343: a
-check that looked like verification and was run against the wrong thing. It is
-recorded here rather than quietly corrected, because a document whose purpose is
-to make a measurement trustworthy has no business hiding its own retraction.
-
-Five further defects from the same review are corrected below and marked where
-they appear.
-
-## What the base actually is
-
-Code references are to `origin/main` at `a561b5a5`, base `upstream/v2.8.2`.
-
-`pkg/accounting` is **not** unmodified. Against that base it carries 782 lines
-of fork changes from [#327](https://github.com/crtahlin/wasp/issues/327):
-
-| File | Change |
-|---|---|
-| `provider.go` | new, 237 lines, the per-peer provider grant |
-| `provider_test.go` | new, 466 lines |
-| `accounting.go` | 65 lines: `providerGrant` on the peer, `providerThreshold`, `providerBudget` and `providerBudgetUsed` on the service, grant release in `Connect` and `terminate` |
-| `metrics.go` | 23 lines: the three provider grant counters |
-
-Two consequences the refused revision missed.
-
-**The gate itself is unmodified upstream code.** The body of `PrepareCredit`
-carries no fork change, so the mechanism this document describes is upstream's.
-But the **line numbers are not upstream's**: the sites cited below as `:285`,
-`:325`, `:332-335` and `:1106` are at `273`, `313`, `321-322` and `1094` in
-`upstream/v2.8.2`. A reader following these citations into the upstream tree
-lands in the wrong place unless they translate.
-
-**`paymentThreshold` is not static in this fork.** The document previously set
-it aside as changing "only when the peer announces a new one", which is true and
-misleading. `provider.go:18` is explicit that the threshold a **provider**
-announces is what the requester stores as `paymentThreshold`, and
-`provider.go:156-157` raises `paymentThresholdForPeer` mid-connection when a
-grant is admitted. So with the provider feature on, the term this analysis
-treats as fixed moves, on the requester side, which is the side `PrepareCredit`
-runs on during a download.
-
-The measurement below therefore **asserts the provider grant is zero** rather
-than assuming it, and the harness refuses to record rows otherwise.
-
-## Terms
-
-- **Overdraft refusal**: `PrepareCredit` returning `ErrOverdraft`
-  (`pkg/accounting/accounting.go:334`) because the debt a request would create
-  exceeds what the peer currently allows.
-- **Settled debt**: the stored per-peer balance. Negative means this node owes
-  the peer.
-- **Reserved balance**: `reservedBalance`, charges for requests this node has
-  started and not yet completed. It rises when a request is prepared and falls
-  when it is applied or released.
-- **Shadow reserved balance**: `shadowReservedBalance`, charges the peer may
-  already have applied on its side but that this node has not yet confirmed.
-- **Refresh timestamp**: `refreshTimestampMilliseconds`. See below, because it
-  does not mean what its name suggests.
-- **V(2)**: the verbosity that the `all` level enables and plain `debug` does
-  not (`pkg/log/registry.go:118-125`).
-
-## The refresh timestamp does not record a completed refreshment
-
-Revision 1 defined it as "written only when a refreshment completes" and built
-a `refresh_age_ms` field on that. Both were wrong.
-
-```go
-// pkg/accounting/accounting.go:1097  "called by pseudosettle when refreshment is done or failed"
-accountingPeer.refreshTimestampMilliseconds = timestamp   // :1106
-if receivedError != nil {                                 // :1109
-```
-
-The assignment is **unconditional and sits above the error branch**. Nine of the
-ten callers in `pkg/settlement/pseudosettle/pseudosettle.go` (`:276, 285, 303,
-310, 319, 327, 334, 340, 350`) pass `timestamp = 0`; only `:358`, the success
-path, passes a real time.
-
-So a **failed** refreshment sets the timestamp to zero, and so does a peer that
-has never refreshed. An age computed from it would read about 1.79e12
-milliseconds, the time since the Unix epoch, in precisely the states worth
-distinguishing.
-
-**The field is therefore replaced.** The log line records the raw
-`refreshTimestampMilliseconds` and the saturated `timeElapsedInSeconds` that the
-gate actually used. Zero is then unambiguous and means "never refreshed, or the
-last refreshment failed", and the age is recoverable by subtraction when the
-value is not zero.
-
-The conclusion that `refreshDue` is pinned at its cap survives, but by a
-different route than revision 1 gave: a zero timestamp saturates the `min` just
-as an old one does.
-
-One further caveat. `min((now - ts)/1000, 1)` caps the top and not the bottom,
-so a backwards clock step yields a negative `timeElapsedInSeconds`, a negative
-`refreshDue`, and an `overdraftLimit` **below** `paymentThreshold`. Unlikely,
-but "exactly two values" was stated as fact in revision 1 and is not one.
+Of the thirteen defects in the first review, eleven were corrected in revision 2
+and the remaining two, the incomplete variable enumeration and the defect count
+itself, are corrected here. All fourteen from the second review are corrected
+below and marked where they appear.
 
 ## Problem
 
-The refusal is silent:
+An overdraft refusal is invisible.
 
 ```go
 // pkg/accounting/accounting.go:332-335
@@ -129,7 +45,7 @@ if increasedExpectedDebt.Cmp(overdraftLimit) > 0 {
 `AccountingBlocksCount` is an unlabelled counter (`metrics.go:110-115`), with no
 peer and no amounts. No log line is written at any level.
 
-The callers add little. `preferred.go:229-235` is:
+The callers add little. `preferred.go:229-235`:
 
 ```go
 if err != nil {
@@ -141,72 +57,154 @@ if err != nil {
 }
 ```
 
-The `skip.Add` is how a refusal becomes retrieval behaviour, and note it fires
-for **every** error and tags all of them with `overDraftRefresh`, whether or not
-the error was an overdraft. Only the counter is conditional. Revision 1
-described this as "increments a counter and returns", which hid the part that
-matters.
-
-`retrieval.go:360-364` likewise records a skip and retries.
+The `skip.Add` is how a refusal becomes retrieval behaviour, and it fires for
+**every** error, tagging all of them `overDraftRefresh` whether or not the error
+was an overdraft. Only the counter is conditional. `retrieval.go:360-364`
+likewise records a skip and retries.
 
 So a chunk refused for credit and a chunk that is genuinely gone both surface as
 `storage.ErrNotFound`. The lock-contention path at `:285` **does** log, at plain
 Debug, so a chunk delayed by lock contention is diagnosable and a chunk refused
 for credit is not. That asymmetry is the whole of this document.
 
-## What has to be measured
+## Hypothesis
 
-#343 has had four designs withdrawn, each because a remedy was chosen before the
-mechanism was measured. The deciding question is which term moves:
+The gate is
 
 ```
 increasedExpectedDebt  >  paymentThreshold + refreshDue
 ```
 
-`refreshDue` is pinned at its cap, for the reasons above. `paymentThreshold`
-moves only through a provider grant, which the measurement holds at zero. That
-leaves the settled debt and `reservedBalance`, and **the two answers imply
-opposite remedies**:
+where, from `getIncreasedExpectedDebt` (`accounting.go:256-279`),
 
-- if `reservedBalance` is the mover, the refusals are self-inflicted by this
-  node's own concurrency, spacing retries out is exactly wrong, and more
-  attempts beat fewer;
-- if a completed refreshment is what releases a chunk, the remedy concerns
-  triggering settlement, and because `settle()` is called from inside
-  `PrepareCredit` (`:313`), fewer attempts again means fewer chances to start
-  one.
+```
+increasedExpectedDebt = max(-balance, 0) + reservedBalance + price + surplusBalance
+```
 
-### What polling has already established, and why it is not enough
+Note `shadowReservedBalance` is **not** in it; it is subtracted only at `:306`
+to decide whether `settle()` fires (`:312`).
 
-`/accounting` exposes `reservedBalance` and `shadowReservedBalance` per peer, so
-the prior question, whether `reservedBalance` moves at all, needs no code. On
-the bench, sampling it every 50 ms during downloads that truncate
-(`curl` exit 18) gives a peak `reservedBalance` against the provider of about
-2.53 to 2.55 million.
+[overdraft-terms.md](overdraft-terms.md) measured twelve runs and established
+that **both** remaining terms move on the same timescale: the settled balance
+cycles between about -300,000 and a floor at or just short of the announced
+threshold, and `reservedBalance` peaks at 2,530,000 with the lookahead prefetch
+off against 12,860,000 with it on.
 
-Two things follow.
+The hypothesis is therefore **not** that one term is the culprit. It is that
+**which term dominates at the instant of refusal decides the remedy, and the two
+answers point opposite ways**:
 
-**It moves**, which refutes the pre-registered prediction that disabling the
-lookahead buffer would hold it near one chunk price. It does not, because
-`joiner.ReadAt` uses an unlimited errgroup, so a single read unit fans out
-concurrently whatever the lookahead setting is. Any design resting on
-`reservedBalance` being negligible is dead.
+- if `reservedBalance` dominates, the refusals are self-inflicted by this node's
+  own concurrency, spacing retries out is wrong, and bounding concurrent
+  reservation against one peer is the direction;
+- if the settled debt dominates and a completed refreshment is what releases a
+  chunk, the remedy concerns triggering settlement, and because `settle()` is
+  called from inside `PrepareCredit` (`:313`), fewer attempts means fewer
+  chances to start one.
 
-**It is not sufficient.** Against a 13,500,000 threshold, 2.55 million is under
-a fifth of the gate. `reservedBalance` alone cannot push
-`increasedExpectedDebt` over the limit, so the settled debt has to be carrying
-most of it, and the split between them is what decides the remedy.
+A log line at the refusal, carrying every term under the same lock that guards
+the comparison, distinguishes them. Nothing else does.
 
-Polling cannot supply that split. It has no event semantics, so no sample can be
-attributed to the refusal it coincided with, and a refusal resolving inside one
-50 ms sample is invisible. The per-refusal breakdown needs the log line.
+### Why the existing observability cannot
+
+| Quantity | API | Metric | Log |
+|---|---|---|---|
+| settled balance | `/accounting`, `/balances` | aggregate only | yes, V(2) at `:364`, `:1208`, `:1309` |
+| `reservedBalance` | `/accounting` | no | never |
+| `shadowReservedBalance` | `/accounting` | no | never |
+| `refreshTimestampMilliseconds` | no | no | never |
+
+`/accounting` is a snapshot with no event semantics, so no sample is
+attributable to the refusal it sat beside, and a refusal resolving inside one
+sampling interval is invisible. [overdraft-terms.md](overdraft-terms.md)
+demonstrates this rather than asserting it: it reached the limit of what polling
+can say and withdrew a conclusion that had added two values from different
+samples.
+
+## What the base actually is
+
+Code references are to `origin/main` at `a561b5a5`, base `upstream/v2.8.2`.
+
+`pkg/accounting` is **not** unmodified. Against that base it carries 782
+inserted lines (and 9 deleted) from
+[#327](https://github.com/crtahlin/wasp/issues/327):
+
+| File | Inserted | Deleted |
+|---|---|---|
+| `provider.go` | 237 | 0 |
+| `provider_test.go` | 466 | 0 |
+| `accounting.go` | 56 | 9 |
+| `metrics.go` | 23 | 0 |
+
+The `accounting.go` change adds `providerGrant` to the peer record,
+`providerThreshold`, `providerBudget`, `providerBudgetMu` and
+`providerBudgetUsed` to the service, and releases a grant in `Connect`
+(`:1420`) and `Disconnect` (`:1526`). Revision 2 named the second of those
+`terminate`, which is a function in `pkg/settlement/pseudosettle`, not here.
+
+Two consequences.
+
+**The gate itself is unmodified upstream code.** The body of `PrepareCredit`
+carries no fork change. But the **line numbers are not upstream's**: `:285`,
+`:325`, `:332-335` and `:1106` here are `273`, `313`, `320-323` and `1094` in
+`upstream/v2.8.2`, a constant offset of 12 through this function. Revision 2
+gave the third of those as `321-322`, which excludes the `if` and the closing
+brace.
+
+**`paymentThreshold` is not static in this fork.** `provider.go:18` is explicit
+that the threshold a **provider** announces is what the requester stores as
+`paymentThreshold`, and `provider.go:156-157` raises
+`paymentThresholdForPeer` mid-connection when a grant is admitted. So with the
+provider feature on, the term this analysis treats as fixed moves, on the
+requester side, which is where `PrepareCredit` runs during a download.
+
+## Terms, including one that is easy to invert
+
+- **Overdraft refusal**: `PrepareCredit` returning `ErrOverdraft`
+  (`accounting.go:334`).
+- **`paymentThreshold`**: what the **peer announced**, documented at `:137` as
+  "the threshold at which the peer expects us to pay", exposed as
+  `thresholdReceived`. It is **not** this node's own `payment-threshold`
+  setting. Revision 2 conflated the two and quoted 13,500,000 as though it were
+  a local default; it is the value the provider announced, and it was measured.
+- **The gate**: `paymentThreshold + refreshDue`, exposed whole as
+  `currentThresholdReceived` (`:765`). With `refreshRate` at 4,500,000
+  (`pkg/node/node.go:236`) and the measured announcement of 13,500,000, the gate
+  on the bench is **18,000,000**. Revision 2 called 13,500,000 "the gate".
+- **Reserved balance**: `reservedBalance`, charges for requests started and not
+  yet completed.
+- **Shadow reserved balance**: `shadowReservedBalance`, charges the peer may
+  have applied that this node has not confirmed. Not in the gate.
+- **V(2)**: the verbosity the `all` level enables and plain `debug` does not
+  (`pkg/log/registry.go:118-125`).
+
+## The refresh timestamp does not record a completed refreshment
+
+```go
+// accounting.go:1096  "called by pseudosettle when refreshment is done or failed"
+accountingPeer.refreshTimestampMilliseconds = timestamp   // :1106
+if receivedError != nil {                                 // :1109
+```
+
+The assignment is **unconditional and above the error branch**. Nine of the ten
+callers in `pkg/settlement/pseudosettle/pseudosettle.go` (`:276, 285, 303, 310,
+319, 327, 334, 340, 350`) pass `timestamp = 0`; only `:358` passes a real time.
+
+So a **failed** refreshment sets it to zero, as does a peer that never
+refreshed. An age computed from it would read about 1.79e12 milliseconds in
+precisely the states worth telling apart. The log line therefore records the raw
+timestamp and the saturated `timeElapsedInSeconds`, not an age.
+
+One caveat: `min((now - ts)/1000, 1)` caps the top and not the bottom, so a
+backwards clock step yields a negative `refreshDue` and a limit **below**
+`paymentThreshold`.
 
 ## Design
 
-One V(2) Debug line at the refusal site, under the existing `accounting` logger.
+One V(2) Debug line at the refusal site.
 
 ```go
-loggerV2.Debug("credit refused, would overdraw",
+a.loggerV2.Debug("credit refused, would overdraw",
 	"peer_address", peer,
 	"price", bigPrice,
 	"expected_debt", increasedExpectedDebt,
@@ -222,28 +220,36 @@ loggerV2.Debug("credit refused, would overdraw",
 )
 ```
 
-### What this requires that does not exist yet
+### Everything in that block, and where it comes from
 
-Revision 1 printed this block as though it dropped in. It does not. Eight of the
-names are already in scope at `:332`: `bigPrice` (`:295`),
-`increasedExpectedDebt`, `overdraftLimit`, `refreshDue`, `timeElapsedInSeconds`,
-`accountingPeer.paymentThreshold`, `.reservedBalance` and
-`.shadowReservedBalance`. `currentBalance` is in scope from `:300`. The rest
-have to be introduced:
+Revision 2 printed this as though it dropped in, and its accounting of the names
+was incomplete. In full, twelve values:
+
+**Already in scope at `:332`** (ten): `peer` (the function parameter, `:281`),
+`bigPrice` (`:295`), `increasedExpectedDebt`, `overdraftLimit`, `refreshDue`,
+`timeElapsedInSeconds`, `accountingPeer.paymentThreshold`,
+`accountingPeer.refreshTimestampMilliseconds`, `.reservedBalance`,
+`.shadowReservedBalance`. `currentBalance` is in scope from `:300`.
+
+**To be introduced** (two):
 
 - **`settleTriggered`**, a `bool` declared before `:312` and set inside that
-  branch. It does not exist in the tree.
-- **`loggerV2`**. `PrepareCredit` has none. The eight existing V(2)
-  registrations in this file (`:348, 959, 1017, 1184, 1221, 1254, 1478, 1507`)
-  each build one per call, and `logger.V(2)` forces the full `Build()` path
-  (clone, join, allocate, flatten, hash with two reflect calls, `sync.Map`
-  load) **whether or not the level is enabled**. `PrepareCredit` runs once per
-  chunk per peer attempt, which is the hottest accounting path there is, so
-  this one is built **once in `NewAccounting`** and stored on the service.
-  Revision 1 claimed the disabled cost is "a comparison and a return"; that
-  describes `Debug()`, not `V(2)`, and the claim is withdrawn.
+  branch. It exists nowhere in the tree. It is the field the #343 question turns
+  on and is derivable from nothing else.
+- **`a.loggerV2`**, a new field on the service, built **once in
+  `NewAccounting`** as `logger.WithName(loggerName).V(2).Register()` beside the
+  existing `logger` field (`:238`).
 
-### The supporting change, correctly described
+Building it once is not style. The eight existing V(2) registrations in this
+file (`:348, 959, 1017, 1184, 1221, 1254, 1478, 1507`) each build one per call,
+and `logger.V(2)` forces the full `Build()` path (clone, join, allocate,
+flatten, then `hash()` with a `fmt.Sprintf` and two `reflect.ValueOf` calls,
+then a `sync.Map` load) **whether or not the level is enabled**. `PrepareCredit`
+runs once per chunk per peer attempt, the hottest accounting path there is.
+Revision 2 claimed the disabled cost is "a comparison and a return"; that
+describes `Debug()`, not `V(2)`, and is withdrawn.
+
+### The supporting change
 
 At `:319` the post-settle recomputation discards its second return value:
 
@@ -251,76 +257,111 @@ At `:319` the post-settle recomputation discards its second return value:
 increasedExpectedDebt, _, err = a.getIncreasedExpectedDebt(peer, accountingPeer, bigPrice)
 ```
 
-Revision 1 said this discarded value "is the balance the gate then compares
-against". **That is false.** The gate compares `increasedExpectedDebt` against
-`overdraftLimit`; `currentBalance` is not an operand of it, and is read only at
-`:312`, before the recomputation.
+Revision 1 said this value "is the balance the gate then compares against".
+**False.** The gate's operands are `increasedExpectedDebt` and
+`overdraftLimit`; `currentBalance` is read only at `:312`, before the
+recomputation.
 
-The real reason to capture it is narrower and still sufficient: without it the
-logged `settled_balance` is the **pre-settle** balance, so on exactly the calls
-where settlement ran, the line would report a debt that no longer exists. The
-capture is behaviour-neutral, because `:319` already assigns with `=` and
-nothing reads `currentBalance` after `:312`.
-
-### Not in this change
-
-- **No config option.** Rule 8 governs tuning constants that measurably matter;
-  a log line is not one.
-- **No peer label on `AccountingBlocksCount`.** The bench requester carried 292
-  peers in `/accounting` during the polling run above, which is poor cardinality
-  for a Prometheus label, and the log line already carries the peer. (Revision 1
-  said "about 120" without a source.)
-- **No API change and no wire change.** `.github/protocol-freeze.lock` is
-  untouched.
-- **No behaviour change.** The gate, the comparison and both return values are
-  unchanged. This is asserted by a test, not claimed.
-
-## Raising the level, which is not what it looks like
-
-`PUT /loggers/accounting/all` returns **400**, not 404 as first assumed, and for
-two separate reasons.
-
-**The `exp` segment is base64, not a URL path.** The handler declares
-`map:"exp,decBase64url"` (`pkg/api/logger.go:115`) and `pkg/api/api.go:330-333`
-implements it as `base64.URLEncoding.DecodeString`. The literal `accounting` is
-ten bytes and fails padding, so `mapStructure` takes the 400 branch.
-
-**The logger's tree path is `node/accounting`, not `accounting`**
-(`accounting.go:238` registers under the root `node` logger).
-
-So the call is:
-
-```
-PUT /loggers/bm9kZS9hY2NvdW50aW5n/all      # base64("node/accounting")
-```
-
-Verified on the bench requester: reads back `info`, PUT returns 200, reads back
-`all`, and `info` restores it. No restart.
-
-**Order matters, and it is the opposite of what revision 1 implied.** All V(2)
-registrations in this file are lazy, on traffic-driven paths, and a V(2) logger
-is a separate registry entry keyed by its verbosity. So no `node/accounting`
-V(2) entry exists at boot, and raising verbosity **before** the first credit has
-no effect on an entry registered afterwards. The node must be warm and carrying
-traffic first, then the level raised. Revision 1 offered the runtime raise as a
-way to avoid waiting for the peer table to warm, which is backwards and would
-have wasted a bench run.
-
-Building `loggerV2` once in `NewAccounting`, as the design requires for cost
-reasons, also removes this trap, because the entry then exists from startup.
+The real reason to capture it is narrower and sufficient: otherwise the logged
+`settled_balance` is the **pre-settle** balance, so on exactly the calls where
+settlement ran, the line reports a debt that no longer exists. The capture is
+behaviour-neutral: `:319` already assigns with `=`, and nothing reads
+`currentBalance` after `:312`.
 
 ## Protocol impact
 
 None. No constant in `.github/protocol-freeze.lock` is read or written, no
 message type changes, and a peer cannot observe whether this node emits the
-line.
+line. `make protocol-freeze` is unaffected.
 
-## Verification
+## Configuration
+
+**No new configuration option, deliberately.** Rule 8 governs tuning constants
+that measurably matter; a log line is not one, and a flag would be permanent
+surface area for something `/loggers` already controls at runtime.
+
+The existing control is the `all` verbosity on the `node/accounting` logger. Its
+costs, which rule 8 asks for in both directions:
+
+- **Raising it** costs this node only. Under sustained concurrent load against a
+  slow peer it can emit a line per refused request; on the bench a failing
+  download produced a few hundred over its life. It costs other nodes nothing:
+  the line is local and no peer can see it.
+- **Leaving it low**, the default, costs the diagnosis. There is no other way to
+  tell a credit refusal from a missing chunk.
+
+It is a level to raise deliberately and lower afterwards, not to leave on.
+
+## Rollout and rollback
+
+The change is inert until the level is raised, so there is no rollout step for
+an operator who does not want it.
+
+**To turn it on**, and the order matters:
+
+1. Let the node run and carry retrieval traffic **first**.
+2. `PUT /loggers/bm9kZS9hY2NvdW50aW5n/all`
+3. Read the refusal lines from the journal.
+4. `PUT /loggers/bm9kZS9hY2NvdW50aW5n/info` to restore.
+
+`bm9kZS9hY2NvdW50aW5n` is base64 of `node/accounting`. Two things make the
+obvious call fail, and revision 1 got both wrong:
+
+- **`PUT /loggers/accounting/all` returns 400**, not 404. The handler declares
+  `map:"exp,decBase64url"` (`pkg/api/logger.go:115`) and `pkg/api/api.go:330-333`
+  implements it as `base64.URLEncoding.DecodeString`, so the literal
+  `accounting`, being ten bytes, fails padding.
+- **The logger's tree path is `node/accounting`**, not `accounting`
+  (`accounting.go:238` registers under the root `node` logger).
+
+Verified on the bench requester: reads back `info`, the PUT returns 200, reads
+back `all`, and `info` restores it. No restart.
+
+**Why step 1 comes first, and why this change removes the need for it.** All
+eight V(2) registrations in this file today are lazy, on traffic-driven paths.
+`SetVerbosityByExp` routes through `SetVerbosity` (`registry.go:148`), which for
+`all` sets a logger to **its own** `v` (`:118-125`). So `all` applied when only
+the V(0) entry exists sets that entry to 0, a V(2) child later cloned from it
+inherits 0 (`logger.go:111`, `c := *b.l`), and `0 >= 2` fails at `:180`.
+Revision 2 said an entry registered afterwards is simply unaffected, which is
+the wrong mechanism for the right conclusion.
+
+Building `loggerV2` in `NewAccounting` removes the trap: the V(2) entry exists
+from boot, so `SetVerbosity` clamps it to 2 and the order stops mattering. Step
+1 is kept in this procedure for nodes running a build without that change.
+
+**Rollback** is lowering the level. Removing the change entirely is deleting one
+log line, one bool, one struct field and one discarded underscore; nothing
+persists on disk and no peer state depends on it.
+
+**One consequence worth naming**: with `loggerV2` built at construction, a
+`node/accounting` V(2) row appears in `GET /loggers` from boot, where today it
+appears only after traffic. That is a visible difference in the response, so
+revision 2's flat "no API change" is qualified rather than repeated.
+
+## Upstream portability
+
+`PrepareCredit` and its gate are **unmodified upstream code**, verified: the
+function body is byte-identical to `upstream/v2.8.2` at an offset of 12 lines.
+So the silent refusal is upstream's behaviour, not this fork's, and Ethersphere
+could adopt this change essentially as written. The only fork-specific part is
+the surrounding file's line numbers.
+
+**Not tagged `affects-upstream`.** Rule 11 says to tag defects, not preferences,
+and a missing diagnostic is a gap rather than a defect. The code does what it
+was written to do.
+
+What would justify the tag later, recorded here so the judgement is not made
+twice: if the instrumented measurement shows the refusal path can strand a chunk
+that is provably retrievable, then returning `ErrNotFound` for a credit refusal
+is a defect in its own right, independent of the logging. That belongs to its
+own issue, and the tag belongs there rather than here.
+
+## Measurement
 
 A log line is verified by use, not by a benchmark, so rule 7's three-runs
-requirement does not apply to the change itself. It does apply to the
-measurement the line exists to enable, which is #343's and is reported
-separately.
+requirement does not apply to the change itself. It applies to the measurement
+the line enables, which is #343's and is reported separately.
 
 **Unit tests**, in `pkg/accounting`:
 
@@ -329,45 +370,101 @@ separately.
    compared.
 2. A prepared credit that succeeds emits no such line.
 3. With the level below V(2), neither case emits it.
-4. `PrepareCredit` returns the same value and error in every case above. This is
-   what makes "no behaviour change" a test rather than a claim.
+4. `PrepareCredit` returns the same value and error in every case above. This
+   makes "no behaviour change" a test rather than a claim.
 5. On a call where the settle branch at `:312` fires, the logged
    `settled_balance` is the post-settle balance, not the pre-settle one.
 
-These need a harness change the refused revision did not mention. Every
-`NewAccounting` call in `accounting_test.go` passes `log.Noop`, and the package
-has no log-capture facility. The pattern to copy is
-`pkg/retrieval/retrieval_test.go:355`:
-`log.NewLogger("test", log.WithSink(buf), log.WithVerbosity(log.VerbosityAll))`.
+These need a harness change. Every `NewAccounting` call in `accounting_test.go`
+passes `log.Noop`, and so do the three in `provider_test.go`; the package has no
+log-capture facility.
 
-One trap to avoid: `VerbosityDebug` is 0 and `Debug()` gates on
-`verbosity >= l.v` (`pkg/log/logger.go:180`), so a capture logger left at
-default verbosity emits nothing and tests 1 and 5 would **pass vacuously**. Test
-3 exists partly to catch that, and the tests must assert on captured content,
-never only on absence.
+The capture logger must set **both** a sink and a verbosity:
 
-**On the bench**, as the first use: warm the requester, then raise
-`node/accounting` to `all` on it. The requester is where `PrepareCredit` runs
-and therefore where the refusal happens, not the provider. Assert the provider
-grant is zero, request sole-source content held by a single provider, and
-confirm refusal lines appear, that `expected_debt` and `overdraft_limit` bracket
-the refusal, and that the per-term fields are consistent with `expected_debt`.
-An inconsistency there means the model in this document is wrong, which is a
-finding in itself.
+```go
+log.NewLogger("test", log.WithSink(buf), log.WithVerbosity(log.VerbosityAll)).Build()
+```
+
+`WithVerbosity` is an `Option` (`pkg/log/log.go:243`) and `NewLogger` takes
+options (`pkg/log/registry.go:62`). The in-tree precedent for the combination is
+`pkg/log/asyncsink_test.go:152`, which passes `VerbosityDebug` where this needs
+`VerbosityAll`.
+
+**`pkg/retrieval/retrieval_test.go:355` is not the pattern to copy.** It is
+`log.NewLogger("test", log.WithSink(buf))`, a sink with no verbosity, so its
+logger stays at the default. `VerbosityDebug` is 0, being the fifth value of
+`Level(iota - 4)` (`pkg/log/log.go`), and `Debug()` gates on
+`verbosity >= l.v` (`logger.go:180`), so `0 >= 2` is false and such a logger
+emits nothing at V(2). Tests 1 and 5 would **pass vacuously**.
+
+Revision 2 cited that line *as though* it already carried
+`WithVerbosity(log.VerbosityAll)`. The construct it quoted is valid and is what
+this section now prescribes; what was invented was the attribution, and the line
+actually cited is the one that breaks the tests. Test 3 exists partly to catch
+this, and every test must assert on captured content rather than only on
+absence.
+
+**On the bench**, as the first use. The requester is where `PrepareCredit` runs
+and therefore where the refusal happens.
+
+Assert before recording anything:
+
+- the requester's `thresholdReceived` for the provider, which is the
+  `paymentThreshold` the gate uses and the only threshold readable on that side;
+- the provider's `providers-payment-threshold`, read from its configuration,
+  since `providerGrant` is a field on the **granting** node and there is no
+  grant to read on the requester. Revision 2 put this assertion on the requester,
+  where it cannot be made.
+
+Then confirm refusal lines appear, that `expected_debt` and `overdraft_limit`
+bracket the refusal, and that the per-term fields are consistent with
+`expected_debt` by the formula above. An inconsistency means the model in this
+document is wrong, which is a finding in itself.
+
+**What a negative result looks like**: refusals occur and the logged terms show
+neither the settled debt nor `reservedBalance` dominating, for instance if both
+sit far below the limit and the surplus balance or the price carries it. That
+would mean the model is incomplete and the next step is a wider line, not a
+design.
+
+### What a completed refreshment cannot do, and why that matters here
+
+It is tempting to argue that a completed refreshment tightens the gate, because
+it sets `refreshTimestampMilliseconds` to now and so drops `refreshDue` from
+`refreshRate` to zero. An earlier analysis on #343 did argue that and was
+withdrawn. Three things in the code forbid it, and they are recorded here so the
+argument is not made a third time:
+
+- `NotifyRefreshmentSent` holds `accountingPeer.lock` for its whole body
+  (`:1100-1101`), covering both the timestamp write (`:1106`) and the balance
+  credit (`:1167`). `PrepareCredit` takes the same lock, so no refusal can
+  observe one without the other.
+- A refreshment is only attempted when `paymentAmount >= a.refreshRate`
+  (`:470`) and more than 999 ms have passed (`:473`), so it never pays down
+  less than the gate loses.
+- One accepted for less than expected is rejected and blocklists the peer
+  (`:1150-1156`), returning **before** the balance is credited.
+
+So on the success path the debt reduction is at least the lost allowance, and
+the gate after a refreshment is no tighter than before it.
+
+The line still records `refresh_timestamp_ms`, `refresh_due` and
+`settle_triggered`, because the point is to stop inferring this from reading and
+start reading it off a refusal.
 
 ### How this could still mislead
 
 The line reports the terms **as the gate saw them**, under
 `accountingPeer.lock`. It does not report what changed them, and two refusals of
-the same chunk can interleave with other requests to the same peer. So a rising
-`reserved_balance` across consecutive lines shows concurrency is present but
-does not by itself show the failing chunk is the victim of it. Attributing cause
-needs the refusals correlated with the chunk address, which the retrieval side
-supplies, not this line.
+the same chunk interleave with other requests to the same peer. So a rising
+`reserved_balance` across consecutive lines shows concurrency is present but not
+that the failing chunk is its victim. Attributing cause needs the refusals
+correlated with the chunk address, which the retrieval side supplies, not this
+line.
 
-Recording this because the four withdrawn designs on #343 all failed by treating
-a suggestive number as a demonstrated mechanism, and because this document has
-now done the same thing once itself.
+Recorded because the four withdrawn designs on #343 all failed by treating a
+suggestive number as a demonstrated mechanism, and because this document has now
+done the same thing twice itself.
 
 ## Reporting
 
@@ -375,17 +472,17 @@ Peer overlay addresses appear in this line at runtime. Rule 10 forbids them in
 the repository, so anything published from these logs is redacted to `peer A`,
 `peer B` and so on, as
 [per-peer-threshold-results.md](per-peer-threshold-results.md) already does
-after that rule was breached once.
+after that rule was breached once. The harness redacts both swarm overlays and
+libp2p peer identifiers before writing any file.
 
 ## Files
 
-- `pkg/accounting/accounting.go`, the log line, `settleTriggered`, the captured
-  balance, and `loggerV2` built in `NewAccounting`.
-- `pkg/accounting/accounting_test.go`, the five tests and the capture logger.
-- `docs/DIFFERENCES.md`, a row. Not because this is the first fork change to
-  `pkg/accounting`, which it is not, but because it adds a log line that is not
-  in Bee.
-- `docs/experiments/content-providers/operators.md`, the note on warming first,
-  raising the level, and lowering it afterwards.
+- `pkg/accounting/accounting.go`: the log line, `settleTriggered`, the captured
+  balance, and the `loggerV2` field built in `NewAccounting`.
+- `pkg/accounting/accounting_test.go`: the five tests and a capture logger.
+- `docs/DIFFERENCES.md`: a row, because the change adds a log line and a
+  `GET /loggers` row that Bee does not have. Not because it is the first fork
+  change to `pkg/accounting`, which it is not.
+- `docs/experiments/content-providers/operators.md`: the procedure above.
 
 Generated with help of AI.
