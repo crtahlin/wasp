@@ -1,33 +1,39 @@
-# Keep the only peer that holds the chunk
+# Space the retries at the only peer that holds the chunk
 
 Issue: [#343](https://github.com/crtahlin/wasp/issues/343). Diagnosis:
 [truncation-cause.md](truncation-cause.md).
 
 Code references are to `main` at `527f32b2`, base `upstream/v2.8.2`.
 
-**Two designs have already been withdrawn on this issue.** The first said credit
-exhaustion ends these downloads, and the data refuted it. The second proposed
-waiting for credit where the loop gives up, and a review showed the provider is
-no longer in the candidate list by then, so there would be nothing to retry.
-This one is built on the measurement rather than on reasoning about the code,
-and the thing that killed the second design is the thing it is designed around.
+**Three designs have now been withdrawn on this issue**, including the first
+draft of this document. They are listed at the end, because the reason each
+failed is what constrains this one.
 
 ## Terms
 
-- **Named provider**: a peer the requester was explicitly told holds the
-  content, through the `Wasp-Providers` header. Distinct from a peer chosen by
-  proximity.
-- **Readmission**: keeping a named provider for a later attempt at the same
-  chunk after it refused on credit, instead of dropping it, added by
-  [#324](https://github.com/crtahlin/wasp/issues/324).
+- **Named provider**: a peer the requester was told holds the content, through
+  the `Wasp-Providers` header, rather than chosen by proximity.
+- **Preferred path**: the branch that tries named providers,
+  `retrieval.go:274-315`. Distinct from **ordinary selection**, `:318` onward,
+  which picks by proximity.
 - **Skip**: a per-chunk exclusion with an expiry. A peer refused on credit is
-  skipped for `overDraftRefresh`, 600 ms.
+  added to it for `overDraftRefresh`, 600 ms.
 - **Sole-source content**: content no other node holds.
 
 ## Problem
 
-**A chunk stops asking the only peer that can serve it, a fifth of the way into
-its own life, and spends the rest asking peers that cannot.**
+**The preferred path never reads the skip list, so eight retries at the only
+peer that can serve the chunk all happen within a fifth of a second, before any
+of them could possibly succeed.**
+
+`candidates[0]` is taken unconditionally (`:274-276`). The `skip` argument is
+passed to `retrievePreferred` so that it can **write** to it (`preferred.go:230`),
+and the only reader is ordinary selection, which feeds `fullSkip` to
+`closestPeer` (`:318-320`).
+
+So the comment at `:284-286`, which says the loop "returns to this peer once its
+`overDraftRefresh` skip has expired", describes behaviour the code does not
+have. The loop returns to the peer immediately, on the next retry token.
 
 Measured, seven failing chunks across three runs:
 
@@ -36,136 +42,177 @@ Measured, seven failing chunks across three runs:
 | Readmit window, the 8 readmissions | 0.141 to 0.832 s | **0.217 s** |
 | Whole chunk, first attempt to not-found | 0.978 to 1.951 s | **1.06 s** |
 
-The sequence (`retrieval.go:274-315`, and see
-[truncation-cause.md](truncation-cause.md) for the evidence):
+Eight refusals inside 0.217 s are **eight attempts at one instant**, as far as
+credit is concerned. The gate they fail is
+`increasedExpectedDebt > paymentThreshold + refreshDue`, where
+`refreshDue = min(elapsed_seconds, 1) * refreshRate`
+(`accounting.go:324-331`). At 0.217 s the elapsed term has grown by about
+976,000 units, roughly three chunks' worth at a measured price near 307,000.
+Eight refusals spread across that are refused for the same reason each time.
 
-1. The named provider refuses on credit. It is skipped for 600 ms and kept,
-   up to `maxOverdraftReadmits`, which is 8 (`:159`).
-2. Each readmission falls through to ordinary selection in the same iteration,
-   so the eight are consumed in about **0.22 s**.
-3. On the ninth refusal the `default:` arm runs `candidates = candidates[1:]`
-   (`:299`). **The provider is gone from this chunk for good.**
-4. The chunk spends its remaining 0.84 s on ordinary peers. For sole-source
-   content none of them can answer.
-5. It exhausts `maxOriginErrors`, 32, raised by up to `maxMultiplexForwards`, 2,
-   and returns `storage: not found`.
-6. `joiner.ReadAt` is all or nothing, so one such chunk fails its read unit and
-   the download truncates.
-
-**The code already intends to do the right thing and cannot.** The comment at
-`:284-286` says the loop "returns to this peer once its `overDraftRefresh` skip
-has expired". It never does, because the candidate has been consumed at 0.22 s
-and the skip does not expire until 600 ms.
-
-**The chunk is not short of time.** It lives 1.06 s. A retry when the skip
-expires at 600 ms would fall **0.46 s inside the life it already has**.
+Then, on the ninth, the `default:` arm consumes the candidate (`:299`) and the
+provider is gone from the chunk for good. The chunk spends its remaining 0.84 s
+on ordinary peers which, for sole-source content, cannot answer, exhausts
+`maxOriginErrors` and returns `storage: not found`. `joiner.ReadAt` is all or
+nothing, so one such chunk truncates the download.
 
 ## Hypothesis
 
-A named provider refused on credit should not be dropped from a chunk while the
-reason it was refused is one that expires.
+Retries at a named provider refused on credit should be spaced by the skip the
+code already records, so that each is a genuinely different moment.
 
-**Predicted:** sole-source downloads that truncate today complete, and content
-the network also holds is not slower, because ordinary selection still runs
-first and unchanged and will have succeeded long before 600 ms.
+**Predicted:** a chunk that today spends eight useless attempts in 0.217 s
+instead makes one or two spaced attempts within its existing life, at least one
+of which finds the gate loosened. Content the network also holds is unaffected,
+because ordinary selection is untouched and runs in the same iteration as
+before.
 
 ## Design
 
-### 1. Do not consume the candidate for a reason that expires
+### 1. Read the skip list on the preferred path
 
-The `default:` arm at `:297-302` drops the candidate for every error that is not
-a readmitted overdraft. It should distinguish two cases:
+Before taking `candidates[0]`, pass over any candidate currently skipped for
+this chunk. This is the whole change. It makes the existing comment true, and it
+uses a structure that is already maintained and already written to on exactly
+this event.
 
-- **The reason expires**, which today means an overdraft past the readmit bound.
-  Keep the provider for the chunk and let its skip pace the retry.
-- **The reason does not expire**, for example a peer that is not connected.
-  Drop it, exactly as now.
+At 600 ms of spacing and a chunk life near 1.06 s, a chunk gets **one or two**
+provider attempts rather than eight. **That is fewer attempts, deliberately.**
+Eight attempts at one instant are worth less than one attempt at a moment when
+the gate has moved, and by 600 ms the elapsed term alone has added about
+2,700,000 units, roughly nine chunks' worth.
 
-Nothing about ordinary selection changes. A refused provider still falls through
-to ordinary peers in the same iteration, which is what #324 established and what
-keeps widely-held content fast.
+### 2. The readmit bound stays exactly as it is
 
-### 2. The retry is paced by the existing skip, not by a new wait
+An earlier draft of this document proposed not consuming the candidate at all,
+and that was wrong in a way worth recording. **`errorsLeft` does not decrement
+on the preferred path**: a preferred result returns early at `:400-405` with the
+comment that a miss at a preferred peer is not a peer error. So
+`maxOverdraftReadmits` is the **only** bound on preferred attempts, and its own
+doc comment says so: "Bounded so a peer that never regains credit cannot
+livelock the request" (`:156-158`). Removing it would have created exactly that
+livelock.
 
-**No new waiting is introduced anywhere.** A skipped peer is simply not selected
-until its 600 ms expires; the loop continues doing ordinary work in the
-meantime. This is the whole reason the design is cheap, and it is what separates
-it from the withdrawn one, which proposed a blocking wait.
+Keeping the bound and spacing the attempts is the smaller change and the safe
+one. Whether 8 is still the right number once attempts are spaced is a question
+for the measurement, not an assumption here.
 
-One consequence must be stated: `candidates` is computed once, at `:212`, and
-not recomputed. So keeping the provider is not enough on its own; the loop must
-be able to consider it again after its skip expires. Whether that is a recompute
-or a separate holding place is an implementation choice, and the spec requires
-only that a provider kept under 1 is actually reachable again.
+### 3. A refusal that is not an overdraft must not be treated as one
 
-### 3. A bound remains, because one is needed
+`PrepareCredit` returns a lock-acquisition failure before it reaches the
+overdraft check (`accounting.go:283-286`). That is not `ErrOverdraft`, so it
+reaches the `default:` arm and drops the provider permanently, and it is a
+transient condition that clears by itself. The bench log records **three** of
+these in a single run.
 
-Removing `maxOverdraftReadmits` entirely would let a chunk keep asking a peer
-that will never pay. Two bounds already prevent that and neither is removed:
-`errorsLeft` caps total attempts at 32 to 34, and the request context caps the
-whole download.
-
-The readmit count itself becomes a count of **refusals that were forgiven**
-rather than a licence to fail. Whether 8 is still the right number is a question
-for the measurement below, not an assumption of this design.
+This design does not change that arm, but the measurement must count the class
+separately, because a chunk lost to a lock timeout would otherwise be read as a
+chunk lost to credit and would fire this document's falsifier for the wrong
+reason.
 
 ### 4. What must not change
 
 - **Ordinary downloads.** Content the network holds must not get slower. This is
-  a reject condition, not a footnote: the first attempt at #324 regressed it
-  about 3x and that is how the regression was found.
-- **The wire.** No protocol identifier, message or handshake change.
-- **Forwarded requests.** A forwarded request gets `errorsLeft = 1` and no
-  preferred candidates (`:237-243`), so it does not reach this path. The change
-  must be verified not to touch it, because holding a forwarded request open
-  spends another node's connection, and rule 8 requires that cost be stated.
+  a reject condition and is weighted equally with the arm the change is for:
+  the first attempt at
+  [#324](https://github.com/crtahlin/wasp/issues/324) regressed it about 3x and
+  that is how it was caught.
+- **The wire.** No protocol identifier, message or handshake change. The freeze
+  file fingerprints `protocolName` and `protocolVersion`, neither of which this
+  touches.
+- **Forwarded requests.** A non-origin request gets `errorsLeft = 1`
+  (`:236-241`) and no preferred candidates (`preferred.go:175-181`, gated on
+  `origin`), so this path is untouched. Verified rather than assumed.
 
 ### 5. A counter, because the failure it replaces is silent
 
-A counter of chunks where a named provider was kept past the readmit bound and
-then served the chunk, and one where it was kept and the chunk still failed.
-Without the second, a change that keeps providers and still truncates looks
-exactly like one that works.
+Count chunks where a provider was passed over because it was skipped, and
+chunks where the provider was retried after a skip expired and then served the
+chunk. Without the second, a change that spaces attempts and still truncates
+looks exactly like one that works.
+
+## What this risks
+
+- **Fewer provider attempts per chunk.** If the gate does not loosen within the
+  chunk's life, spacing means one or two failures instead of eight, and the
+  chunk still dies. This is the main way the change does nothing, and the
+  falsifier below is aimed at it.
+- **A late success is worse than an early failure.** If a provider regains
+  credit late in a widely-held chunk's life, `retrievePreferred` returns nil,
+  the iteration takes `:304-313`, runs **no** ordinary selection, and arms
+  `preferredWait` at 500 ms (`preferred.go:37`). Today that cannot happen after
+  the eighth refusal because the candidate is gone. Spacing makes a late
+  attempt possible, so this is a new path on the arm that must not regress, and
+  the regression arm exists to find it.
+- **Less lock contention, not more.** Passing over a skipped provider means
+  fewer `prepareCredit` calls on that peer's lock, which should reduce the
+  class in 3 rather than increase it. Stated as an expectation to check, not a
+  claim.
 
 ## Protocol impact
 
-**None.** No wire format, protocol identifier, handshake or message change. This
-is entirely in which peer the requester asks next. `make protocol-freeze` must
-pass with the fingerprint unchanged.
+**None.** No wire format, protocol identifier, handshake or message change.
+`make protocol-freeze` must pass with the fingerprint unchanged.
+
+## Configuration
+
+**No new setting, and none of the three constants involved is exposed.**
+
+`maxOverdraftReadmits` (8), `overDraftRefresh` (600 ms) and `preferredWait`
+(500 ms) stay compiled in. Under rule 8 a constant becomes a setting only once a
+measurement shows the value matters, and this change alters what the first of
+them means, from eight attempts at an instant to eight spaced attempts, without
+yet showing that eight is the wrong number.
+
+If the measurement shows the count matters, the cost of each direction must be
+stated then: raising it keeps a chunk asking a provider that may never pay,
+holding the request open longer; lowering it gives up on the only holder sooner.
+Both are per chunk, so both scale with file size.
 
 ## Measurement
 
 Sole-source content is available on demand through local ingest
-([#326](https://github.com/crtahlin/wasp/issues/326)), so none of this waits on
-a postage batch.
+([#326](https://github.com/crtahlin/wasp/issues/326)), so nothing waits on a
+postage batch.
 
-- **The arm this is for.** Sole-source content, before and after, three runs
-  each, at the buffer used for the diagnosis. Accept on completion, with the
-  rate reported beside it.
-- **The regression arm, weighted equally.** Content the network also holds,
-  before and after, three runs each. A median more than 10% slower after the
-  change is a reject whatever the first arm did.
-- **Per run**: bytes against bytes wanted, SHA-256, curl exit, the balance with
-  the provider at the start, the announced threshold at both ends,
-  `preferred_attempts`, `preferred_hits`, `preferred_overdrafts`,
-  `preferred_readmits`, the two new counters, and `accounting_blocks_count`.
-- **Per failing chunk, where any remain**: the attempt count and the readmit
-  window, as measured here, so a partial improvement is visible rather than
-  being averaged away.
-- **Node state matched**, in one session, with the arms interleaved. Both arms
-  restart nothing. Three results in this project have been withdrawn for getting
-  this wrong.
+**The arms cannot be interleaved in one session, and an earlier draft of this
+plan said they could.** Before and after are different binaries, and there is no
+runtime toggle, so a binary swap and a restart sit between them. The plan is
+therefore the one this project already had to adopt after a withdrawal in
+[overdraft-retry-results.md](overdraft-retry-results.md):
 
-**Pre-registered falsifier.** If sole-source downloads still truncate with the
-provider kept, then the readmit bound was not what ended them and this document
-is wrong in the same way as the two before it. The per-chunk numbers above are
-what would show it.
+- **Restart cycles, not a single session.** Three cycles per build, each
+  starting from a restart, with the balance with the provider read at the start
+  of every run and reported. A run whose starting balance differs materially
+  from its counterpart is reported separately rather than averaged in.
+- **Randomised order within each cycle**, because both baselines in the
+  diagnosis fall monotonically across three runs, 2,359,296 then 1,441,792 then
+  917,504 in one and 1,736,704 then 1,146,880 then 917,504 in the other.
+  Interleaving does not remove a monotone trend.
+- **Buffer 0 named explicitly**, which is where the diagnosis ran.
+- **Report the spread, not only the median**, on both arms. Three runs cannot
+  resolve a 10% median difference without it, and the regression criterion
+  depends on that resolution.
+- **Per run**: bytes against bytes wanted, SHA-256, curl exit, starting balance,
+  announced threshold at both ends, `preferred_attempts`, `preferred_hits`,
+  `preferred_overdrafts`, `preferred_readmits`, the two new counters, the count
+  of lock-acquisition failures from 3, `accounting_blocks_count`, and the counts
+  of the `no peers left` and `sleeping to refresh overdraft balance` branches,
+  which an earlier harness recorded and a later one dropped.
+- **Per failing chunk that remains**: attempt count and readmit window, so a
+  partial improvement is visible rather than averaged away.
+
+**Pre-registered falsifier.** If sole-source downloads still truncate with
+attempts spaced, then spacing was not the constraint and this document is wrong
+in the same way as the three before it. The per-chunk readmit window is what
+would show it: spaced attempts should move it from about 0.22 s toward the
+chunk's whole life.
 
 ## Acceptance
 
 **Accept** if sole-source downloads complete in three runs of three where they
 truncated before, **and** content the network also holds is not more than 10%
-slower at the median.
+slower at the median with the spread reported.
 
 **Reject** if widely-held content regresses beyond that, since the whole
 difficulty is that the two cases want opposite behaviour; or if sole-source
@@ -176,14 +223,16 @@ implementation.
 
 In `package retrieval_test`:
 
-- a chunk held only by a named provider that is overdrafted at first and has
-  credit after its skip expires is retrieved, rather than failing;
-- a chunk whose named provider is not connected still drops it at once, so the
-  expiring and non-expiring cases stay separate;
+- a preferred peer skipped for this chunk is passed over rather than attempted,
+  asserted on the attempt count at that peer;
+- a preferred peer whose skip has expired is attempted again;
+- a chunk held only by a provider overdrafted at first and solvent after the
+  skip expires is retrieved rather than failing;
 - a chunk held by an ordinary peer is retrieved with no added delay, asserted on
   elapsed time, which is the #324 regression in test form;
-- the total attempt bound still holds, so a provider that never regains credit
-  cannot hold a request open;
+- the readmit bound still terminates a chunk whose provider never regains
+  credit, asserted to return rather than hang, since `errorsLeft` does not bound
+  this path;
 - a forwarded request is unaffected;
 - the two counters move exactly when their conditions are met.
 
@@ -192,19 +241,34 @@ the behaviour they named removed.
 
 ## Upstream portability
 
-The readmit path and the preferred candidate list are **fork code**, from #324
-and #290. Unmodified upstream drops a refused peer at once with no readmission
-at all, so upstream is worse in this case and this change extends a fork
-mechanism rather than correcting an upstream one.
+`maxOverdraftReadmits` and the preferred path are **fork code**, from #324 and
+#290; the constant is absent from `upstream/v2.8.2`.
+[retrieval-rate.md](retrieval-rate.md) lists it among unmodified upstream code
+and is wrong about that.
 
-`maxOriginErrors`, `maxMultiplexForwards`, the skip list and the all or nothing
-`joiner.ReadAt` are unmodified upstream. **No `affects-upstream` marker.**
+**Upstream is not worse here, and an earlier draft said it was.** Upstream's
+ordinary path already does what this change adds: it adds a credit-refused peer
+to the skip with `overDraftRefresh`, and `closestPeer` then honours that skip.
+What the fork's preferred path lacks is the skip *check*, so this change brings
+it in line with the behaviour upstream already has on the other path, rather
+than inventing anything.
 
-## Rollout and rollback
+**No `affects-upstream` marker.** The gap is in fork-authored code.
 
-A behaviour change with no setting, on by default, because the case it fixes is
-one where the download fails today. Rollback is a revert. Nothing is written to
-disk and nothing is announced, so there is no migration and no state to undo.
+## The three withdrawn designs
+
+Recorded because each was withdrawn for a different reason and the reasons
+constrain what is left.
+
+1. **Wait for credit where the loop gives up.** Withdrawn: by then the provider
+   is not in the candidate list, so there would be nothing to retry.
+2. **Do not consume the candidate for a reason that expires.** Withdrawn: the
+   preferred path never reads the skip, so the provider would return in about
+   30 ms rather than 600 ms, and removing the bound would remove the only thing
+   that terminates this path, since `errorsLeft` does not decrement on it.
+3. **The credit ceiling ends the download.** Withdrawn earlier and separately:
+   the run with the fewest refusals truncated earliest, and downloads fail at a
+   balance of zero.
 
 ---
 

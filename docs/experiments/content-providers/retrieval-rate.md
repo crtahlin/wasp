@@ -222,8 +222,10 @@ is about how long this node holds a stream open, not about what it sends.
 ## Upstream portability
 
 Everything examined here is **unmodified upstream code**: the `errorsLeft` loop,
-`maxOriginErrors`, `maxOverdraftReadmits`, the wait branch, `skippeers`, and the
-unlimited errgroup in `joiner.ReadAt` are all as they are in `upstream/v2.8.2`.
+`maxOriginErrors`, the wait branch, `skippeers`, and the unlimited errgroup in
+`joiner.ReadAt` are all as they are in `upstream/v2.8.2`. `maxOverdraftReadmits`
+is NOT: it is fork code from #324 and an earlier version of this line said
+otherwise.
 
 No `affects-upstream` marker is claimed, and under rule 11 that is the correct
 outcome for now: the truncation is reproduced but its cause is not isolated, and
