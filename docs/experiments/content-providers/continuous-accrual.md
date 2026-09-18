@@ -57,11 +57,18 @@ refusals, **2,251 (96.9 per cent) occurred with `refreshDue` at zero**, and ever
 one of them would have passed at the ceiling. The largest sum among them is
 13,800,000 against a ceiling of 18,000,000.
 
-The figure quoted when #359 was filed was 94.5 per cent, which pools peer A with
-two peers this node owes nothing and has never refreshed.
-`gate-terms-measured.md` lists that pooling under its own withdrawn claims, so
-the per-peer figure is used here and the pooled one is not used for comparison
-anywhere below.
+The figure quoted when #359 was filed was 94.5 per cent, which is the same 2,251
+over the whole capture of 2,381, pooling peer A with two peers this node owes
+nothing and has never refreshed. That figure is not withdrawn and is correct as
+a whole-capture statistic; what `gate-terms-measured.md:267` withdraws is the
+**framing**, reporting a three-peer capture as one relationship. Since every one
+of the other two peers' 59 refusals is at the ceiling, pooling can only dilute
+the figure, so the per-peer denominator is used here throughout.
+
+Two nearby numbers in that document are different populations and should not be
+matched against 96.9: `gate-terms-measured.md:123` gives 3.06 per cent at the
+ceiling, which is peer A overall (71 of 2,322), and 96.83 per cent at the floor,
+which is the dense arm alone (2,169 of 2,240).
 
 ## Hypothesis
 
@@ -70,18 +77,37 @@ and the measurement is explicit that it cannot answer it: the sum sits against
 whatever limit is in force, so raising the limit may simply let the sum rise to
 meet it.
 
-The hypothesis is narrower and testable: **if the cliff is what refuses those
-2,251 requests, then accruing the allowance continuously moves them, and the
-question is whether the bytes follow.** Three outcomes are possible and all are
-reportable:
+The hypothesis is narrower and testable, and the mechanism it has to move is
+already isolated in [truncation-cause.md](truncation-cause.md): a download stops
+because one chunk's refusals **exhaust the readmit bound**. The #324 path keeps a
+refused provider for up to `maxOverdraftReadmits`, which is 8
+(`pkg/retrieval/retrieval.go:159`); on the refusal after that,
+`candidates = candidates[1:]` (`:299`) drops the only holder, the chunk spends
+its error budget on peers that never had it, and `joiner.ReadAt` is all or
+nothing (`joiner.go:215-223`), so the whole read unit fails with it.
 
-1. refusals fall and delivered bytes rise, so the cliff was costing throughput;
-2. refusals fall and delivered bytes do not move, so the sum re-equilibrated and
-   the change achieves nothing;
-3. refusals do not fall, so the model in `gate-terms-measured.md` is wrong.
+That gives a graded observable this spec uses instead of a refusal count:
+**overdrafts not readmitted**, the difference between `preferred_overdrafts`
+(`preferred.go:232`) and `preferred_readmits` (`retrieval.go:295`). It was
+**4 in each of two truncating runs**, matching the number of failed read units
+exactly (`truncation-cause.md:36-46`), and **0 in the one run that completed**,
+where 438 of 438 refusals were readmitted (`retrieval-rate.md:74-78`).
 
-Outcome 2 is the one this spec expects to have to report, and it is why
-acceptance below is bytes rather than refusal count.
+**So the hypothesis is: continuous accrual lowers the refusals landing on any
+one chunk below the readmit bound, so overdrafts not readmitted goes to zero and
+the read unit survives.** Four outcomes are possible and all are reportable:
+
+1. overdrafts not readmitted falls to zero and the file completes, so the cliff
+   was costing throughput;
+2. it falls, the truncation point moves later, and the file still does not
+   complete, so the cliff was part of the cause and not all of it;
+3. it does not fall although floor refusals do, so the sum re-equilibrated
+   against the higher limit and the change achieves nothing;
+4. floor refusals do not fall, so the model in `gate-terms-measured.md` is wrong.
+
+Outcome 3 is the one this spec expects to have to report. Outcome 2 is a partial
+result that an earlier draft of this spec would have rejected as a failure, which
+is why acceptance below is graded rather than a single pass or fail.
 
 ## The constraint that shapes the design
 
@@ -165,11 +191,16 @@ minimum accepted threshold of 9,000,000 (`minPaymentThreshold = 2 * refreshRate`
 `pkg/node/node.go:244`) it is 0.500. And the headroom is
 `0.25 x threshold`, so it reaches a full `refreshRate` at a threshold of
 18,000,000: **at or above that the cap can never bind and continuous accrual is
-already safe unaided.** Thresholds grow as a peer repays (`:739`), and
-`docs/bandwidth-incentives.md:222` records one reaching 94,500,000, so a mature
-relationship sits in the region where the cap does nothing and a fresh one sits
-in the region where it does. The measurement must say which regime each arm ran
-in.
+already safe unaided.**
+
+The threshold that matters here is `accountingPeer.paymentThreshold`, the one the
+**peer announced to us**, which is what `:359` and the cap both read. It grows on
+the **provider's** node, by that node's own copy of `:739`, as **we** repay it.
+(`:739` on our node raises what we announce to a peer that has repaid us, which
+is the mirror of this and not the term in play.) `docs/bandwidth-incentives.md:222`
+records an announced threshold reaching 94,500,000, so a mature relationship sits
+in the region where the cap does nothing and a fresh one sits in the region where
+it does. The measurement must say which regime each arm ran in.
 
 ## Design
 
@@ -179,13 +210,17 @@ tolerates. Leave the behaviour at and after one second exactly as it is.**
 ```go
 elapsedMillis := a.timeNow().UnixMilli() - accountingPeer.refreshTimestampMilliseconds
 if elapsedMillis < 0 {
-        elapsedMillis = 0          // clock stepped backwards
+        elapsedMillis = 0          // clock stepped back a second or more
 }
 
 var refreshDue *big.Int
-if elapsedMillis >= 1000 {
-        // Unchanged: a full allowance, uncapped, exactly as today.
+if a.accrual != accrualContinuous || elapsedMillis >= 1000 {
+        // The step arm, and the continuous arm at or after one second:
+        // a full allowance, uncapped, exactly as today.
         refreshDue = new(big.Int).Set(a.refreshRate)
+        if elapsedMillis < 1000 {
+                refreshDue.SetInt64(0)
+        }
 } else {
         refreshDue = new(big.Int).Mul(a.refreshRate, big.NewInt(elapsedMillis))
         refreshDue.Div(refreshDue, big.NewInt(1000))
@@ -193,9 +228,13 @@ if elapsedMillis >= 1000 {
         // Never accrue past what a peer running stock Bee tolerates. Inside the
         // first second we must assume its own step has not fired, so the only
         // headroom we can rely on is its tolerance. Strictly below, because its
-        // check disconnects at equality where ours admits it.
-        if cap := a.safeAccrualCap(accountingPeer); refreshDue.Cmp(cap) > 0 {
+        // check disconnects at equality where ours admits it. Never negative:
+        // a peer tolerance of zero is legal and would otherwise take the limit
+        // BELOW the announced threshold, which is worse than today.
+        if cap := a.safeAccrualCap(accountingPeer); cap.Sign() > 0 && refreshDue.Cmp(cap) > 0 {
                 refreshDue.Set(cap)
+        } else if cap.Sign() <= 0 {
+                refreshDue.SetInt64(0)
         }
 }
 ```
@@ -206,14 +245,27 @@ announced**. The peer announces a threshold and nothing else; its tolerance is
 not on the wire, so this uses ours as a proxy. **That is the weakest point in
 the design and the measurement checks it rather than assuming it**, see below.
 
+At the shipped defaults the cap is 3,374,999 and the capped limit is
+**16,874,999**, one unit below the 16,875,000 at which a stock peer's `>=`
+disconnects. Stating it as 16,875,000, which an earlier draft did twice, asserts
+the exact value the minus one exists to avoid.
+
 **Why the cap must not apply at and after one second.** It would otherwise hold
-the limit at 16,875,000 forever instead of letting it reach 18,000,000, making
+the limit at 16,874,999 forever instead of letting it reach 18,000,000, making
 the node permanently worse. That is not hypothetical: `gate-terms-measured.md`
 records peers B and C, 59 refusals, **every one at the ceiling with
 `refresh_timestamp_ms` at zero**. A zero timestamp makes the elapsed term
 enormous, so those peers sit at the cap permanently, and an unconditional cap
-would lower their limit by 1,125,000 and refuse more, not less. A first draft of
+would lower their limit by 1,125,001 and refuse more, not less. A first draft of
 this design had exactly that defect.
+
+**Why the cap must never go negative.** `payment-tolerance-percent: 0` is legal
+(`pkg/node/node.go:814-815` rejects only negative values). With it the cap is
+`0 - 1`, and since `refreshDue` starts at zero the comparison would set it to
+minus one and put the limit one unit **below** the announced threshold for the
+whole sub-second window. That is the only reachable input on which the new code
+would be worse than the current code, and the sign check above is what removes
+it.
 
 Note also why a zero timestamp arises: `:1176` writes
 `refreshTimestampMilliseconds` above every check, and every error path in
@@ -228,12 +280,14 @@ with the threshold the peer announced, which a light peer sets lower. The
 asymmetry is called out here because it is the first thing an implementer will
 suspect.
 
-**The backwards-clock clamp is new behaviour, not a restatement.** Today a clock
-that steps backwards makes the elapsed term negative and puts the limit *below*
-the announced threshold. That is a defect on its own, so the clamp is applied in
-**both** arms, and `step` is then a control that reproduces current behaviour in
-every case except that one. A test pins the divergence so it is not mistaken for
-part of the treatment.
+**The backwards-clock clamp is new behaviour, not a restatement, and only past a
+full second.** Go truncates integer division toward zero, so a backwards step of
+1 to 999 ms already gives an elapsed term of zero and today's code is unaffected.
+Only a step of **a second or more** makes the term negative and puts the limit
+below the announced threshold. That is a defect on its own, so the clamp is
+applied in **both** arms, and `step` is then a control that reproduces current
+behaviour in every case except that one. The test for it must use a step of at
+least 1,000 ms, or it passes against the old code as well and pins nothing.
 
 ### Considered and dropped
 
@@ -267,8 +321,9 @@ behaviour. The other value is `continuous`.
 Per rule 8 the default is the current value, so a node that does not set it
 behaves as it does today.
 
-**The option ships only on outcome 1.** Rule 8 says a dial that turns out not to
-matter is worse than no dial. If the result is outcome 2 or 3, the change is
+**The option ships on outcome 1 or 2, and not otherwise.** Rule 8 says a dial
+that turns out not to matter is worse than no dial. Outcome 1 or 2 means the
+readmit exhaustion this targets actually moved. On outcome 3 or 4 the change is
 reverted and the measurement is kept as the record of why, rather than leaving a
 permanent setting that moves a counter and nothing else.
 
@@ -282,7 +337,15 @@ permanent setting that moves a counter and nothing else.
   bound. This is the reason blocklisting is a reject condition below.
 - **Being measured in the wrong regime.** A fresh peer pair exercises the capped
   regime, any mature relationship the uncapped one. See the crossover section.
-- **Reading success from a control arm with no variance.** Handled in Acceptance.
+- **Measuring an arm with no credit pressure in it.** At lookahead 0 the
+  unmodified node completed **3 of 3 with zero overdrafts**
+  (`retrieval-rate.md:41-46`). There is nothing there for this change to relieve,
+  so that arm can only show it does no harm. Treating it as a treatment arm would
+  manufacture a null result.
+- **Comparing against a baseline taken under different node state.**
+  `gate-terms-measured.md:44-45` did not reset balances between runs; this spec
+  does. Its delivered-byte figures are therefore not a control for these arms and
+  are not used as one.
 
 ## Protocol impact
 
@@ -305,73 +368,115 @@ provider grant asserted zero, balances reset between runs. Arms: `step`
 (control) against `continuous`, at two lookahead sizes, **three runs each**, for
 a budget of **12 runs**, interleaved so node state cannot separate the arms.
 
-**Lookahead sizes, and a caveat carried forward.** The two sizes are 262,144,
-which is the shipped default for this file size, and 0, which bypasses the
-prefetch. `gate-terms-measured.md` used 0 and 524,288 and neither was the
-default for its file, a mislabelling that had already reached one earlier
-document. The 524,288 arm is therefore **not** a usable control here and its
-runs are not reused; the default is measured instead, from scratch, in both
-arms.
+**The two lookahead sizes do different jobs, and only one is a treatment arm.**
+
+- **262,144**, the shipped default for this file size (`pkg/api/bzz.go:51`), is
+  **the arm under test**. It is where the credit pressure is: the unmodified
+  node completed 1 of 3 there with 609, 240 and 438 refusals per run
+  (`retrieval-rate.md:41-46,70-78`).
+- **0** is a **no-harm check, not a treatment arm**. The unmodified node
+  completed 3 of 3 there with **zero overdrafts**, so there is no refusal for
+  this change to remove and the only thing it can show is that nothing regresses.
+
+`gate-terms-measured.md` used 0 and 524,288, and neither was the default for its
+file, a mislabelling that had already reached one earlier document. The 524,288
+arm is not reused here. Nor are that document's delivered-byte figures used as a
+baseline at all, because it did not reset balances between runs and this spec
+does, so the two are not the same condition.
 
 Recorded per run, with the spread reported **per condition** and not only for
 the control:
 
-- delivered bytes, `curl` exit code, and the SHA-256 of the body, the primary
-  observable;
+- **`preferred_overdrafts` minus `preferred_readmits`, the overdrafts not
+  readmitted. This is the primary observable**, because it is the quantity the
+  mechanism in `truncation-cause.md` turns on, and it was exactly 4 in each of
+  two truncating runs and 0 in the one that completed;
+- delivered bytes, `curl` exit code, and the SHA-256 of the body. `curl` exit 18
+  means truncation, which is informative here rather than noise: it says a read
+  unit failed, and `truncation-cause.md` establishes why;
+- `preferred_misses`, which rose by only 1 or 2 per download in every run so far,
+  so a larger rise means something other than this change is at work;
 - refusals from #353's log line, with `refresh_due`, so the split between floor
   and ceiling can be compared **within peer A** against its own 96.9 per cent;
-- **the provider's `/blocklist` before and after**, and its
+- **the provider's `/blocklist` before and after**, naming the requester. That
+  is the deciding evidence for the safety gate, because
   `bee_accounting_disconnects_overdraw_count`
-  (`AccountingDisconnectsOverdrawCount`, incremented at `:1429`). That is the
-  counter the overdraw disconnect moves. It is not
-  `AccountingDisconnectsReconnectCount` (`:1615`, early reconnect), nor
-  `AccountingDisconnectsGhostOverdrawCount` (`:1455`), nor
-  `AccountingDisconnectsEnforceRefreshCount` (`:1193`), all of which are near
-  neighbours that cannot move when this hazard occurs. An earlier draft named
-  the first of those;
+  (`AccountingDisconnectsOverdrawCount`, `:1429`) is an unlabelled counter
+  (`pkg/accounting/metrics.go:23`) that any peer on the provider can move.
+  Record the counter too, as corroboration.
+
+  Two related counters, since an earlier draft of this spec got this wrong in
+  both directions. `AccountingDisconnectsOverdrawCount` is the **specific**
+  counter for this hazard. `AccountingDisconnectsReconnectCount` (`:1615`) then
+  rises **as a consequence**, not instead: the blocklist returns
+  `p2p.NewBlockPeerError` (`:1431-1435`), libp2p's `Blocklist` disconnects the
+  peer (`pkg/p2p/libp2p/libp2p.go:1017`), `pseudosettle` is registered for that
+  disconnect and calls back into accounting (`pseudosettle.go:118-125`), and the
+  peer is still marked connected at `:1608`. Its help text says "early attempt to
+  reconnect" (`metrics.go:107`), which is upstream's wording and describes only
+  one of the ways it moves. So a rise in it corroborates and does not
+  contradict. `AccountingDisconnectsGhostOverdrawCount` (`:1455`) and
+  `AccountingDisconnectsEnforceRefreshCount` (`:1193`) are different events;
 - the provider's `thresholdGiven` and `currentThresholdGiven`, to check the
   tolerance the cap assumes. `currentThresholdGiven` is
   `disconnectLimit + refreshDue` (`:829`), so the tolerance is recoverable as
   `100 * (currentThresholdGiven / thresholdGiven - 1)` **only while the
   provider's own `refreshDue` is zero**. Sample repeatedly across a run and take
-  the minimum; a single sample at an arbitrary moment returns a wrong tolerance;
+  the minimum; a single sample at an arbitrary moment returns a wrong tolerance.
+  **The minimum can still be wrong**, because the provider's term at `:820` has
+  no zero clamp either, so a peer whose `refreshReceivedTimestamp` is zero sits
+  permanently at a full `refreshRate` and no sample ever reaches zero. That state
+  is real on this bench, which is what peers B and C are. So discard the
+  estimate unless a refreshment from the requester is on record, and since both
+  nodes here are ours, read the provider's configured tolerance directly and use
+  the ratio only as a cross-check;
 - which regime each arm ran in, from `thresholdGiven`: capped below 18,000,000,
   uncapped at or above it.
 
 **A sanity check to run before the arms.** The capped limit at the shipped
-threshold is 16,875,000 and the largest sum among peer A's floor refusals is
+threshold is 16,874,999 and the largest sum among peer A's floor refusals is
 13,800,000. The cap must clear that measured maximum, or the design cannot move
 those refusals at all and there is nothing to measure.
 
+**What a negative result looks like.** Floor refusals fall substantially,
+overdrafts not readmitted stays at its baseline of about 4 per run, and delivered
+bytes stay inside the spread of the `step` arm. That is outcome 3: the sum
+re-equilibrated against the higher limit. It closes #359 as a measured negative
+rather than a failure, and it is the outcome this spec expects.
+
 ## Acceptance
 
-**Accept** if, at the shipped lookahead default, the `continuous` arm delivers
-the **complete 4,194,304 bytes with a matching SHA-256 and `curl` exit 0** in at
-least 2 of 3 runs where the `step` arm delivers a complete file in none, **and**
-peer A's floor refusals fall by at least half, **and** no reject condition below
-fires.
+All of this is at the shipped lookahead default of 262,144, the arm under test.
+The lookahead-0 arm decides nothing; it only has to not regress.
 
-The completeness requirement is deliberate and replaces a byte count. Both
-control arms in `gate-terms-measured.md` truncate: the 524,288 arm delivered 0,
-0, 0 and the lookahead-0 arm 196,608, 196,608, 131,072. Against a control with
-no variance at all, any single chunk more reads as "outside the spread", so a
-criterion phrased as delivered bytes can be satisfied by noise. A complete file
-cannot.
+**The safety gate comes first and overrides everything below.** If the provider's
+`/blocklist` names the requester in any run, the change is **rejected** whatever
+else it did. That is the hazard the cap exists to prevent, and a change that
+delivers the whole file by getting itself blocklisted has failed.
 
-**Reject**, meaning the change is reverted rather than tuned, if **any** of:
+Then, on the primary observable, **overdrafts not readmitted**, whose baseline
+is about 4 per truncating run:
 
-- the provider blocklists the requester, or
-  `bee_accounting_disconnects_overdraw_count` rises on the provider at all;
-- peer A's floor refusals fall but no arm delivers a complete file, which is
-  outcome 2 and closes #359 as a measured negative;
-- floor refusals do not fall, which is outcome 3 and refutes the model in
-  `gate-terms-measured.md` rather than the design.
+| Result | Bucket | Disposition |
+|---|---|---|
+| goes to 0 and the file completes with a matching SHA-256 | outcome 1 | accept and ship |
+| falls materially and the truncation point moves later, but no complete file | outcome 2 | accept as a partial result and ship, recording that the cliff was part of the cause and not all of it |
+| does not fall, although floor refusals do | outcome 3 | reject, revert, publish as a measured negative |
+| floor refusals do not fall either | outcome 4 | reject, revert; the model in `gate-terms-measured.md` is what is wrong, not the design |
 
-**`curl` exit 18 in the treatment arm means truncation and counts as an
-incomplete run**, not as an error to be retried. All six baseline runs exit 18,
-for a cause [retrieval-rate.md](retrieval-rate.md) records as not established,
-so an exit 18 here is the expected state and not evidence about this change
-either way.
+**Why this is graded and not a single pass.** An earlier draft required a
+complete file in 2 of 3 runs "where the `step` arm delivers a complete file in
+none". Prior measurement falsifies that in advance: the unmodified node already
+completes 1 of 3 at this lookahead size and 3 of 3 at lookahead 0
+(`retrieval-rate.md:41-46`). A criterion the control can satisfy on its own
+decides nothing, and the same draft would have thrown away outcome 2, which is a
+real partial win. It also mislabelled a rise in delivered bytes without
+completion as "achieves nothing", when going from 196,608 bytes to most of the
+file plainly is not nothing.
+
+Delivered bytes are reported with the spread per condition but are **not** the
+gate, because a truncation point is quantised to the read unit and moves in steps
+rather than smoothly.
 
 **What invalidates a run** rather than deciding it: a provider grant other than
 zero; the two arms running against different node states, which
@@ -416,12 +521,16 @@ expressions.
   - `TestRefreshDueCapBindsBelowTolerance`, that the cap binds from 0.750 s at
     the shipped threshold and from 0.500 s at 9,000,000, and that the capped
     value is strictly below the peer's disconnect limit;
+  - `TestRefreshDueZeroToleranceNeverLowersTheLimit`, the one input on which the
+    naive form is worse than the current code;
   - `TestRefreshDueCapDoesNotBindAtOrAfterOneSecond`, that the limit still
     reaches 18,000,000, and that a zero `refreshTimestampMilliseconds` takes
     that branch;
   - `TestRefreshDueCapAbsentAboveEighteenMillion`, that the cap never binds at a
     grown threshold;
-  - `TestRefreshDueBackwardsClockClamped`, in both arms.
+  - `TestRefreshDueBackwardsClockClamped`, in both arms, with a step of at
+    least 1,000 ms; a smaller step passes against the current code too and
+    pins nothing.
 - `cmd/bee/cmd/cmd.go` and `pkg/node/node.go`: the setting.
 - `docs/DIFFERENCES.md`: a row, since this changes what a node does.
 - `docs/experiments/content-providers/`: the results document.
