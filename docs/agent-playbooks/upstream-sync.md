@@ -28,9 +28,10 @@ of thousands of commits on every sync and break every clone. Merge is also what
 keeps the **merge base advancing**, which is the whole reason syncs stay cheap.
 
 This is worth being blunt about, because the previous fork got it wrong: if you
-squash an upstream sync, `git merge-base origin/main upstream/master` never moves, and
-the *next* sync three-way-merges from the original fork point again. That is how
-a fork ends up re-resolving the same conflicts forever. **Never squash a sync.**
+squash an upstream sync, `git merge-base origin/main upstream/master` never
+moves, and the *next* sync three-way-merges from the original fork point again.
+That is how a fork ends up re-resolving the same conflicts forever. **Never
+squash a sync.**
 
 ## The automated path
 
@@ -146,8 +147,8 @@ git push --force-with-lease
 
 Two different lifecycles, conflating them is the usual mistake.
 
-**Unmerged `exp/*` branches** get rebased onto `origin/main`, keeping them as clean
-patch series so `scripts/export-patch.sh` keeps working:
+**Unmerged `exp/*` branches** get rebased onto `origin/main`, keeping them as
+clean patch series so `scripts/export-patch.sh` keeps working:
 
 ```bash
 git switch exp/<n>-<slug>

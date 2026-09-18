@@ -135,8 +135,11 @@ validates only a minimum of 9,000,000, computed as 2 x refreshRate at
 pricing at `:1201`; the same value appears as the `minPaymentThreshold` constant
 at `:240`, which guards the node's own config (`pricing.go:100-102`), and
 `NotifyPaymentThreshold` stores whatever arrives (`accounting.go:992-1001`).
-Both files are byte-identical to `upstream/v2.8.2`, so this is upstream behavior
-and not something our fork arranged. A wasp provider would therefore serve more
+`pricing.go` and `accounting.go` are byte-identical to `upstream/v2.8.2` at
+`6eaaa651`, so this is upstream behavior and not something our fork arranged.
+(`node.go` is not: it carries 324 inserted lines at that commit. The lines
+cited from it above are upstream's, but the file as a whole is fork-modified.
+An earlier version of this sentence said "both files" after naming three.) A wasp provider would therefore serve more
 to downloaders running unmodified Bee. Those downloaders do not send the
 local-only header, so they would need a different trigger, or would be left out;
 the spec has to choose, and leaving them out is the safer default.
