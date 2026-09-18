@@ -6,9 +6,20 @@ in [retrieval-rate.md](retrieval-rate.md),
 [truncation-cause.md](truncation-cause.md) and
 [overdraft-terms.md](overdraft-terms.md).
 
-**This is revision 3.** Two reviews refused it, finding thirteen and fourteen
-defects. Two are worth stating at the top rather than in a footnote, because
-both are the failure this document exists to prevent.
+**This is revision 4.** Three reviews refused it, finding thirteen, fourteen
+and then fourteen more. Two of the failures are worth stating at the top rather
+than in a footnote, because both are the failure this document exists to
+prevent.
+
+**Revision 3 reinstated three claims that had already been withdrawn** in
+[overdraft-terms.md](overdraft-terms.md) on `main`, with the same citations:
+that the code forbids a completed refreshment tightening the gate, that the gate
+is a single number, and that `shadowReservedBalance` is subtracted only at
+`:306`. The cause was mechanical rather than analytical: this document was
+drafted while the companion was still being corrected, and was then applied
+without reconciling against what had changed in it. Where the two documents
+overlap, **the companion is the reference and this one cites it** rather than
+restating the argument.
 
 **Revision 1 reported an empty diff as verification.** It claimed in bold that
 `pkg/accounting` is byte-identical to `upstream/v2.8.2`. The command was run in
@@ -25,10 +36,8 @@ The actual line is `log.NewLogger("test", log.WithSink(buf))`. The invented
 argument was the one thing that makes the test work, so the pattern it told the
 implementer to copy was the vacuous-pass trap the next paragraph warned about.
 
-Of the thirteen defects in the first review, eleven were corrected in revision 2
-and the remaining two, the incomplete variable enumeration and the defect count
-itself, are corrected here. All fourteen from the second review are corrected
-below and marked where they appear.
+Every defect from all three reviews is corrected below and marked where it
+appears.
 
 ## Problem
 
@@ -63,7 +72,8 @@ was an overdraft. Only the counter is conditional. `retrieval.go:360-364`
 likewise records a skip and retries.
 
 So a chunk refused for credit and a chunk that is genuinely gone both surface as
-`storage.ErrNotFound`. The lock-contention path at `:285` **does** log, at plain
+`storage.ErrNotFound`: the retrieval loop returns it at `retrieval.go:414` once
+the attempt budget is spent, with nothing distinguishing why the budget went. The lock-contention path at `:285` **does** log, at plain
 Debug, so a chunk delayed by lock contention is diagnosable and a chunk refused
 for credit is not. That asymmetry is the whole of this document.
 
@@ -81,8 +91,11 @@ where, from `getIncreasedExpectedDebt` (`accounting.go:256-279`),
 increasedExpectedDebt = max(-balance, 0) + reservedBalance + price + surplusBalance
 ```
 
-Note `shadowReservedBalance` is **not** in it; it is subtracted only at `:306`
-to decide whether `settle()` fires (`:312`).
+Note `shadowReservedBalance` is **not** in it. The subtraction at `:306` decides
+whether `settle()` fires (`:312`); it is also subtracted at `:386`, `:429` and
+`:948-952`, and added at `:883` and `:911`. An earlier revision said "only at
+`:306`", which [overdraft-terms.md](overdraft-terms.md) already records as
+wrong.
 
 [overdraft-terms.md](overdraft-terms.md) measured twelve runs and established
 that **both** remaining terms move on the same timescale: the settled balance
@@ -109,7 +122,7 @@ the comparison, distinguishes them. Nothing else does.
 
 | Quantity | API | Metric | Log |
 |---|---|---|---|
-| settled balance | `/accounting`, `/balances` | aggregate only | yes, V(2) at `:364`, `:1208`, `:1309` |
+| settled balance (raw, = `consumedBalance`) | `/accounting`, `/balances` | aggregate only | yes, V(2) at `:364`, `:1208`, `:1309` |
 | `reservedBalance` | `/accounting` | no | never |
 | `shadowReservedBalance` | `/accounting` | no | never |
 | `refreshTimestampMilliseconds` | no | no | never |
@@ -123,7 +136,7 @@ samples.
 
 ## What the base actually is
 
-Code references are to `origin/main` at `a561b5a5`, base `upstream/v2.8.2`.
+Code references are to `origin/main` at `443b6246`, base `upstream/v2.8.2`.
 
 `pkg/accounting` is **not** unmodified. Against that base it carries 782
 inserted lines (and 9 deleted) from
@@ -151,12 +164,15 @@ carries no fork change. But the **line numbers are not upstream's**: `:285`,
 gave the third of those as `321-322`, which excludes the `if` and the closing
 brace.
 
-**`paymentThreshold` is not static in this fork.** `provider.go:18` is explicit
-that the threshold a **provider** announces is what the requester stores as
-`paymentThreshold`, and `provider.go:156-157` raises
-`paymentThresholdForPeer` mid-connection when a grant is admitted. So with the
-provider feature on, the term this analysis treats as fixed moves, on the
-requester side, which is where `PrepareCredit` runs during a download.
+**`paymentThreshold` is not static in this fork.** On the **granting** node,
+`provider.go:156-157` (inside `applyProviderGrant`, `:133`) raises
+`paymentThresholdForPeer`, "the threshold at which the peer is expected to pay"
+(`accounting.go:139`), and announces it. On the **requesting** node that arrives
+at `NotifyPaymentThreshold` (`accounting.go:1004-1013`), which is what actually
+writes `paymentThreshold`, the term the gate reads. So with the provider feature
+on, the term this analysis treats as fixed moves on the requester side, where
+`PrepareCredit` runs. Revision 3 cited only the provider-side write for a
+requester-side effect.
 
 ## Terms, including one that is easy to invert
 
@@ -168,11 +184,18 @@ requester side, which is where `PrepareCredit` runs during a download.
   setting. Revision 2 conflated the two and quoted 13,500,000 as though it were
   a local default; it is the value the provider announced, and it was measured.
 - **The gate**: `paymentThreshold + refreshDue`, exposed whole as
-  `currentThresholdReceived` (`:765`). With `refreshRate` at 4,500,000
-  (`pkg/node/node.go:236`) and the measured announcement of 13,500,000, the gate
-  on the bench is **18,000,000**. Revision 2 called 13,500,000 "the gate".
+  `currentThresholdReceived` (`:765`). Because `timeElapsedInSeconds` is
+  `min((now - ts)/1000, 1)` (`:325`), `refreshDue` is either 0 or one
+  `refreshRate` of 4,500,000 (`pkg/node/node.go:236`), so with the measured
+  announcement of 13,500,000 **the gate is either 13,500,000 or 18,000,000, not
+  a single number**; 18,000,000 is its ceiling. Revision 2 called 13,500,000
+  "the gate" and revision 3 called it 18,000,000. Both are wrong in the same
+  way, and which value is in force at a given refusal is exactly what the line
+  below records.
 - **Reserved balance**: `reservedBalance`, charges for requests started and not
   yet completed.
+- **Surplus balance**: `surplusBalance`, credit received from the peer that is
+  not treated as debt for settlement, and the fourth term of the gated quantity.
 - **Shadow reserved balance**: `shadowReservedBalance`, charges the peer may
   have applied that this node has not confirmed. Not in the gate.
 - **V(2)**: the verbosity the `all` level enables and plain `debug` does not
@@ -214,6 +237,7 @@ a.loggerV2.Debug("credit refused, would overdraw",
 	"refresh_timestamp_ms", accountingPeer.refreshTimestampMilliseconds,
 	"elapsed_seconds", timeElapsedInSeconds,
 	"settled_balance", currentBalance,
+	"surplus_balance", surplusBalance,
 	"reserved_balance", accountingPeer.reservedBalance,
 	"shadow_reserved_balance", accountingPeer.shadowReservedBalance,
 	"settle_triggered", settleTriggered,
@@ -222,27 +246,43 @@ a.loggerV2.Debug("credit refused, would overdraw",
 
 ### Everything in that block, and where it comes from
 
-Revision 2 printed this as though it dropped in, and its accounting of the names
-was incomplete. In full, twelve values:
+Revision 2 printed this as though it dropped in. Its accounting of the names was
+incomplete, and revision 3's was miscounted. In full, **thirteen** values.
 
-**Already in scope at `:332`** (ten): `peer` (the function parameter, `:281`),
-`bigPrice` (`:295`), `increasedExpectedDebt`, `overdraftLimit`, `refreshDue`,
-`timeElapsedInSeconds`, `accountingPeer.paymentThreshold`,
+**Already in scope at `:332`** (eleven): `peer` (the function parameter,
+`:281`), `bigPrice` (`:295`), `increasedExpectedDebt`, `overdraftLimit`,
+`refreshDue`, `timeElapsedInSeconds`, `accountingPeer.paymentThreshold`,
 `accountingPeer.refreshTimestampMilliseconds`, `.reservedBalance`,
-`.shadowReservedBalance`. `currentBalance` is in scope from `:300`.
+`.shadowReservedBalance`, and `currentBalance` from `:300`.
+
+Revision 3 said "ten in scope, two to introduce, twelve in all". That balanced
+only because it left `currentBalance` out of the ten and counted `a.loggerV2`,
+which is the receiver rather than a logged value, as one of the two.
 
 **To be introduced** (two):
 
 - **`settleTriggered`**, a `bool` declared before `:312` and set inside that
   branch. It exists nowhere in the tree. It is the field the #343 question turns
   on and is derivable from nothing else.
+- **`surplusBalance`**. It is the fourth term of the gated quantity and is
+  **not** in scope: `getIncreasedExpectedDebt` reads it at `:272` and does not
+  return it. Without it the Measurement section's consistency check cannot be
+  performed, which revision 3 required while omitting the field. Read it on the
+  refusal path only, with `a.SurplusBalance(peer)`, so the extra store read
+  costs nothing on the path that succeeds. It needs no special error handling:
+  it returns zero for a peer with no stored surplus (`:557-564`). On any other
+  error, log zero rather than failing the refusal, since a diagnostic must not
+  change the outcome it is describing.
+
+And one supporting change that is not a logged value:
+
 - **`a.loggerV2`**, a new field on the service, built **once in
   `NewAccounting`** as `logger.WithName(loggerName).V(2).Register()` beside the
   existing `logger` field (`:238`).
 
 Building it once is not style. The eight existing V(2) registrations in this
 file (`:348, 959, 1017, 1184, 1221, 1254, 1478, 1507`) each build one per call,
-and `logger.V(2)` forces the full `Build()` path (clone, join, allocate,
+and `a.logger.V(2).Register()` forces the full `Build()` path (clone, join, allocate,
 flatten, then `hash()` with a `fmt.Sprintf` and two `reflect.ValueOf` calls,
 then a `sync.Map` load) **whether or not the level is enabled**. `PrepareCredit`
 runs once per chunk per peer attempt, the hottest accounting path there is.
@@ -319,16 +359,22 @@ back `all`, and `info` restores it. No restart.
 
 **Why step 1 comes first, and why this change removes the need for it.** All
 eight V(2) registrations in this file today are lazy, on traffic-driven paths.
-`SetVerbosityByExp` routes through `SetVerbosity` (`registry.go:148`), which for
-`all` sets a logger to **its own** `v` (`:118-125`). So `all` applied when only
+`SetVerbosityByExp` reaches `SetVerbosity` (`registry.go:148`) for a pattern
+match, and `SetVerbosity` for `all` sets a logger to **its own** `v`
+(`:118-125`). There is an exact-key fast path at `:134-138`, which does not
+apply here because registry keys embed the verbosity and the values
+(`logger.go:261-268`), so a bare name never matches one. So `all` applied when only
 the V(0) entry exists sets that entry to 0, a V(2) child later cloned from it
 inherits 0 (`logger.go:111`, `c := *b.l`), and `0 >= 2` fails at `:180`.
 Revision 2 said an entry registered afterwards is simply unaffected, which is
 the wrong mechanism for the right conclusion.
 
-Building `loggerV2` in `NewAccounting` removes the trap: the V(2) entry exists
-from boot, so `SetVerbosity` clamps it to 2 and the order stops mattering. Step
-1 is kept in this procedure for nodes running a build without that change.
+Building `loggerV2` in `NewAccounting` removes the trap **for this line**: its
+V(2) entry exists from boot, so `SetVerbosity` clamps it to 2. It does not fix
+the other eight, which are still built per call, and two of those (`:364` and
+`:1208`) are the only log source for the settled balance. So step 1 stays
+required even on a build carrying this change, whenever those lines are wanted
+too.
 
 **Rollback** is lowering the level. Removing the change entirely is deleting one
 log line, one bool, one struct field and one discarded underscore; nothing
@@ -410,11 +456,14 @@ and therefore where the refusal happens.
 Assert before recording anything:
 
 - the requester's `thresholdReceived` for the provider, which is the
-  `paymentThreshold` the gate uses and the only threshold readable on that side;
-- the provider's `providers-payment-threshold`, read from its configuration,
-  since `providerGrant` is a field on the **granting** node and there is no
-  grant to read on the requester. Revision 2 put this assertion on the requester,
-  where it cannot be made.
+  `paymentThreshold` the gate uses. `/accounting` also exposes
+  `thresholdGiven` and `currentThresholdGiven` there, which are this node's own
+  announcements and are not what the gate reads;
+- the provider's grant. `providerGrant` is a field on the **granting** node, so
+  this is asserted there, either from its `providers-payment-threshold`
+  configuration or from its own `thresholdGiven` for the requester, which is the
+  `paymentThresholdForPeer` that `provider.go:157` raises. Revision 2 put this
+  assertion on the requester, where it cannot be made.
 
 Then confirm refusal lines appear, that `expected_debt` and `overdraft_limit`
 bracket the refusal, and that the per-term fields are consistent with
@@ -427,30 +476,30 @@ sit far below the limit and the surplus balance or the price carries it. That
 would mean the model is incomplete and the next step is a wider line, not a
 design.
 
-### What a completed refreshment cannot do, and why that matters here
+### The refreshment question this line is meant to settle
 
-It is tempting to argue that a completed refreshment tightens the gate, because
-it sets `refreshTimestampMilliseconds` to now and so drops `refreshDue` from
-`refreshRate` to zero. An earlier analysis on #343 did argue that and was
-withdrawn. Three things in the code forbid it, and they are recorded here so the
-argument is not made a third time:
+**Do not restate this from reading.** It has been argued twice on #343 and
+withdrawn twice, in opposite directions, and an earlier draft of this spec
+restated the withdrawn version a third time.
+[overdraft-terms.md](overdraft-terms.md) carries the reconciled account and is
+the reference; what follows is only what the instrument needs.
 
-- `NotifyRefreshmentSent` holds `accountingPeer.lock` for its whole body
-  (`:1100-1101`), covering both the timestamp write (`:1106`) and the balance
-  credit (`:1167`). `PrepareCredit` takes the same lock, so no refusal can
-  observe one without the other.
-- A refreshment is only attempted when `paymentAmount >= a.refreshRate`
-  (`:470`) and more than 999 ms have passed (`:473`), so it never pays down
-  less than the gate loses.
-- One accepted for less than expected is rejected and blocklists the peer
-  (`:1150-1156`), returning **before** the balance is credited.
+The position there, in short: a completed refreshment changes the headroom by
+`amount - refreshRate`, and `amount` is the **peer-accepted** amount, floored
+only by `min(allegedInterval * refreshRate, attemptedAmount -
+refreshReservedBalance)` (`:1132`, `:1143-1146`). `allegedInterval` comes from
+the peer (`pseudosettle.go:324`) and may be zero, and `refreshReservedBalance`
+is raised by ordinary traffic (`:518`, `:1241`), so `amount` **can** fall below
+`refreshRate`. The mechanism is possible under those preconditions, and none of
+them is exposed on `/accounting`.
 
-So on the success path the debt reduction is at least the lost allowance, and
-the gate after a refreshment is no tighter than before it.
+Note also that `:1106` writes the timestamp **unconditionally, above every
+check**, so the below-expectation return at `:1150-1156` advances the timestamp
+without crediting. That path is an instance of the mechanism, not a bar to it.
 
-The line still records `refresh_timestamp_ms`, `refresh_due` and
-`settle_triggered`, because the point is to stop inferring this from reading and
-start reading it off a refusal.
+What the instrument contributes: `refresh_timestamp_ms`, `refresh_due` and
+`settle_triggered` are recorded at the refusal, so the question is answered from
+a measurement instead of from another reading of the code.
 
 ### How this could still mislead
 
