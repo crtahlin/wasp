@@ -78,8 +78,24 @@ throughout this document, in both result tables and in the sentence beginning
 shipped one. No run in this document or in the #353 measurement exercises the
 default.
 
-The comparison itself stands, since it is between 0 and 524,288 in both, and
-the read-unit reasoning is unaffected. Only the label is wrong.
+The comparison itself stands, since it is between 0 and 524,288 in both. **The
+read-unit numbers derived from the wrong label do not.** 524,288 is
+**128 chunks**, not the 64 this document computes for 262,144 at the line
+beginning "At the shipped `smallFileBufferSize`". So:
+
+- the read units in the measured arms differ by a factor of **16**, not 8;
+- and with the langos double-buffering this document invokes, in-flight leaves
+  reach up to **32 times** buffer 0's, not 16.
+
+Both figures in the paragraph headed "A discrepancy this raises and does not
+settle" are therefore understated twofold, and the 64-chunk unit described there
+belongs to a buffer no run used. The direction of that paragraph survives and
+strengthens: the gap between read-unit ratio and measured peak ratio is wider
+than stated, not narrower.
+
+The wrong label also reaches prediction 2 and the heading "Prediction 2 holds",
+not only the two result tables and the sentence beginning "The default lookahead
+raises the peak".
 
 ## Conditions
 

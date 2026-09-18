@@ -7,17 +7,20 @@ Issue: [#343](https://github.com/crtahlin/wasp/issues/343). Instrument:
 [overdraft-terms.md](overdraft-terms.md), which established that polling could
 not answer this.
 
-**This is revision 3.** Two reviews refused it. Revision 1 named the wrong
+**This is revision 4.** Three reviews refused it. Revision 1 named the wrong
 invariant and re-asserted a claim the companion had withdrawn. Revision 2
-corrected the arithmetic but replaced one wrong causal claim with another, and
-left two experimental conditions mislabelled. Both wrong versions are stated
-where they occur.
+corrected the arithmetic and replaced one wrong causal claim with another.
+Revision 3 fixed that and left an identically pooled table three sections below
+the place it fixed. Every wrong version is stated where it occurs.
 
 ## Terms
 
 - **The gate**: `increasedExpectedDebt > paymentThreshold + refreshDue`
   (`pkg/accounting/accounting.go:363`), where
   `increasedExpectedDebt = max(-balance, 0) + reservedBalance + price + surplusBalance`.
+- **`amount - refreshRate = 0`**: the case where a refreshment credits exactly
+  the allowance that resetting its timestamp costs, so the headroom is
+  unchanged. Named in [overdraft-terms.md](overdraft-terms.md).
 - **The sum**: `max(-balance, 0) + reservedBalance`, that is the gated quantity
   without the price of the request being decided. Used throughout because it is
   the part that persists between requests.
@@ -80,7 +83,7 @@ which changes what the aggregate means:
 **Peer A is the provider relationship this work is about**, which the data
 shows rather than assumes: it is the only peer with any debt, and the only one
 present in the lookahead-0 runs. Peers B and C are a
-different phenomenon entirely: no debt at all, no refreshment ever attempted, and
+different phenomenon entirely: no debt at all, no refreshment on record, and
 a reserved balance near 18,000,000. They are pure concurrency overruns against
 peers this node owes nothing, and all 59 of their refusals are at the ceiling.
 
@@ -190,9 +193,12 @@ three step-downs in the capture, all peer A:
 | 6 | -13,480,000 to -9,620,000 | 4,480,000 to 3,840,000 | 17,960,000 to 13,460,000 | 280,000 both sides |
 
 The reserved balance is **bit-identical** across two of the three, and run 6 is
-not an exception once the arithmetic is done:
-`-13,480,000 + 4,500,000 - 640,000 = -9,620,000` exactly, so its 640,000 of
-reservation was **applied**, not cancelled. All three rows are consistent.
+not an exception if the credit was `refreshRate`:
+`-13,480,000 + 4,500,000 - 640,000 = -9,620,000` exactly, which fits its 640,000
+of reservation being **applied** rather than cancelled. Two unknowns, one
+equation: cancelled instead, the credit was 3,860,000. The reading that makes
+all three rows consistent is the first, and it carries the same hedge as the
+claim below, not more.
 
 What holds the invariant is that the sum falls by exactly 4,500,000 at each
 step-down, matching `refreshRate`, leaving the margin unchanged on both sides.
@@ -205,8 +211,11 @@ it is what the `amount - refreshRate = 0` case predicts. It is not proof that a
 credit occurred, for the reason given under the timestamp below, and revision 3
 asserted it as cause in this section while declining to in that one.
 
-That is the `amount - refreshRate = 0` case, measured. It is also the reason a
-step-down does not strand a request: the credit pays for the allowance it costs.
+This is the case the companion calls `amount - refreshRate = 0`, meaning a
+refreshment whose credit exactly equals the allowance its timestamp reset
+costs. If that is what happened, it is why a step-down does not strand a
+request. The measurement shows the sum moving as that case predicts; it does
+not show a credit occurring, for the reason under the timestamp below.
 
 ## The debt and the reservation trade off
 
@@ -220,8 +229,9 @@ balance median is **-620,000**; where it is zero the median is
 ## What the timestamp does not prove
 
 `refreshTimestampMilliseconds` is written unconditionally at `:1176`, above
-every check, and the below-expectation path at `:1222-1226` advances it and
-returns **without crediting**. A recent value proves an attempt reached that
+every check, and the below-expectation branch at `:1220` returns
+**without crediting** (`:1222-1226`), after `:1176` has already advanced the
+timestamp. A recent value proves an attempt reached that
 line, not that anything was credited. Revision 1 said "the refreshment
 completed"; withdrawn.
 
@@ -237,8 +247,9 @@ exactly what [#359](https://github.com/crtahlin/wasp/issues/359) exists to test,
 with delivered bytes as the acceptance criterion.
 
 Revision 2 cited #327 as evidence pointing the other way, quoting chunk counts
-of 416, 347 and 127 against 43 and 57. **Those numbers appear nowhere in the
-repository**; 43 and 57 trace to the #313 and #324 diagnostics, a different
+of 416, 347 and 127 against 43 and 57. **Those chunk counts appear nowhere in the
+repository**, though the bare digits occur in unrelated
+contexts; 43 and 57 trace to the #313 and #324 diagnostics, a different
 measurement. That citation is withdrawn.
 
 What [per-peer-threshold-results.md](per-peer-threshold-results.md) actually
@@ -267,8 +278,9 @@ That document gave 12,860,000 as its headline `reservedBalance` peak, from runs
 spanning 12,780,000 to 12,880,000, and inferred concurrency was the likely
 driver. Peer A's peak here is 12,860,000, inside that spread.
 
-But the peak and the refusal do not coincide: in 1,773 of 2,381
-refusals the reserved balance is **zero**. A peak sampled at 50 ms is not the
+But the peak and the refusal do not coincide: in 1,773 of peer A's 2,322
+refusals, 76 per cent, the reserved balance is **zero**. A peak sampled at
+50 ms is not the
 value the gate saw.
 
 ## History of this question
@@ -276,8 +288,8 @@ value the gate saw.
 Proposed on #343, then retracted on the grounds that the code forbids it, which
 was wrong, then restated as possible and unmeasured, and measured here at 94.5
 per cent of refusals. Four designs were withdrawn before this, each derived by
-reading the code. Revisions 1 and 2 of this document then made the same class of
-error three more times between them, which is why their wrong versions are left
+reading the code. Revisions 1, 2 and 3 of this document then made the same class of
+error four more times between them, which is why their wrong versions are left
 standing above rather than replaced.
 
 Generated with help of AI.
