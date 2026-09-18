@@ -66,6 +66,21 @@ can be sampled today.
   `surplusBalance` read 0 after the runs, so the two coincide and the surplus
   term is zero, but that was checked afterwards rather than sampled throughout.
 
+## Correction: the arm called "lookahead default" is not the default
+
+From [gate-terms-measured.md](gate-terms-measured.md). Both harnesses sent
+`Swarm-Lookahead-Buffer-Size: 524288`, which is `largeFileBufferSize`
+(`pkg/api/bzz.go:52`). A 4,194,304 byte file is below the 10,000,000 threshold
+in `lookaheadBufferSize` (`:59-64`) and therefore selects
+`smallFileBufferSize`, **262,144**. So the arm labelled "lookahead default"
+throughout this document, in both result tables and in the sentence beginning
+"The default lookahead raises the peak", is a **doubled** buffer and not the
+shipped one. No run in this document or in the #353 measurement exercises the
+default.
+
+The comparison itself stands, since it is between 0 and 524,288 in both, and
+the read-unit reasoning is unaffected. Only the label is wrong.
+
 ## Conditions
 
 Taken **2026-09-18**, the sequential set between about 10:08 and 10:18 UTC and

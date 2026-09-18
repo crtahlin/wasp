@@ -21,8 +21,12 @@ where they occur.
 - **The sum**: `max(-balance, 0) + reservedBalance`, that is the gated quantity
   without the price of the request being decided. Used throughout because it is
   the part that persists between requests.
-- **Floor and ceiling**: `refreshDue` is `0` or one `refreshRate`, from integer
-  division at `:356`, so the limit is **13,500,000** or **18,000,000**.
+- **Floor and ceiling**: `refreshDue` is `0` or one `refreshRate` of 4,500,000,
+  so the limit is **13,500,000** or **18,000,000**. The integer division at
+  `:356` puts it at 0 for the first second; the `min(..., 1)` cap on the same
+  line is what stops it growing after that. The distinction matters here,
+  because the cap is why peers that have never refreshed sit permanently at the
+  ceiling.
 - **Margin**: `expected_debt - overdraft_limit`, how far a refused request
   exceeded the limit it was measured against. It includes the price.
 - **SWAP block**: both nodes run `swap-enable: true`.
@@ -57,7 +61,10 @@ delivered nothing at all, which revision 2 omitted.
 
 **The data.** 2,381 refusal lines, redacted, at
 `bee-experimental-infra/cp290/t16-refusals-full.txt`, outside this repository
-per rule 10. Every figure below is computed from that file.
+per rule 10. Every refusal figure below is computed from that file. The
+delivered-byte table above and the 1,282-line capped count come from
+`t16-gate-terms.txt`, the harness output, in the same place. The provider build
+is from its `/health` at deploy time and is in neither file.
 
 ## Three peers, not one
 
@@ -66,11 +73,13 @@ which changes what the aggregate means:
 
 | Peer | Refusals | At ceiling | `refresh_timestamp_ms` = 0 | `settled_balance` | `reserved` max |
 |---|---|---|---|---|---|
-| A | 2,322 | 71 | 0 | 620,000 to 13,480,000 | **12,860,000** |
+| A | 2,322 | 71 | 0 | -620,000 to -13,480,000 | **12,860,000** |
 | B | 28 | **28** | **28** | 0 in every row | 17,980,000 |
 | C | 31 | **31** | **31** | 0 in every row | 17,880,000 |
 
-**Peer A is the provider relationship this work is about.** Peers B and C are a
+**Peer A is the provider relationship this work is about**, which the data
+shows rather than assumes: it is the only peer with any debt, and the only one
+present in the lookahead-0 runs. Peers B and C are a
 different phenomenon entirely: no debt at all, no refreshment ever attempted, and
 a reserved balance near 18,000,000. They are pure concurrency overruns against
 peers this node owes nothing, and all 59 of their refusals are at the ceiling.
@@ -89,23 +98,34 @@ refusals (94.5 per cent) occur with `refreshDue` at zero, so the limit is
 the ceiling.
 
 `refreshDue` is zero because the elapsed term is integer-divided at `:356`, so
-it is 0 for the first 999 ms after `refreshTimestampMilliseconds` is written and
-then steps to the full rate.
+it is 0 for the first 1,000 ms after `refreshTimestampMilliseconds` is written,
+that is 0 through 999 inclusive, and then steps to the full rate. The data
+agrees: the last floor refusal is at +999.7 ms and the first ceiling one at
++1,017.8 ms.
 
 ### Per run, since the arms differ by an order of magnitude
+
+**Peer A only**, since the section heading says so and revision 3 put a pooled
+table here:
 
 | Run | Arm | Refusals | At ceiling | `settled` median | `reserved` above 4.5M | Largest margin |
 |---|---|---|---|---|---|---|
 | 1 | lookahead 0 | 18 | 0 | -13,210,000 | 0% | 20,000 |
 | 2 | lookahead 0 | 50 | 0 | -13,370,000 | 0% | 290,000 |
 | 3 | lookahead 0 | 14 | 0 | -12,680,000 | 0% | 280,000 |
-| 4 | lookahead 524,288 | 778 | 48 | -13,450,000 | 17.9% | 300,000 |
-| 5 | lookahead 524,288 | 760 | 43 | -13,230,000 | 16.8% | 280,000 |
-| 6 | lookahead 524,288 | 761 | 39 | -13,480,000 | 17.1% | 300,000 |
+| 4 | lookahead 524,288 | 751 | 21 | -13,450,000 | 14.9% | 270,000 |
+| 5 | lookahead 524,288 | 744 | 27 | -13,230,000 | 15.1% | **50,000** |
+| 6 | lookahead 524,288 | 745 | 23 | -13,480,000 | 15.3% | 300,000 |
 
-The lookahead-0 runs are 82 refusals, 3.4 per cent of the total, and **all at
-the floor**. The dense arm is 94.35 per cent at the floor. A pooled figure
-describes mainly the dense arm.
+Peers B and C appear **only in the dense runs** (12 and 15, 8 and 8, 8 and 8),
+so they contaminate one arm and not the other, and all 59 of their refusals are
+at the ceiling. Pooling therefore inflates that arm's ceiling share by about
+1.8 times: **5.65 per cent pooled against peer A's own 3.17 per cent**, and it
+moved run 5's largest margin from 50,000 to 280,000.
+
+Peer A's totals: **3.06 per cent at the ceiling overall, 96.83 per cent at the
+floor in the dense arm.** The lookahead-0 runs are 82 refusals, all peer A, all
+at the floor.
 
 ### Timing
 
@@ -141,6 +161,22 @@ Measured: `max(sum - limit_in_force) = -20,000`. **The sum never reaches the
 limit in force at all.** Revision 2's "the sum never exceeds the floor limit by
 more than 300,000" conflated that with the margin, which includes the price.
 
+**The induction holds only while two things do not happen**, and revision 3
+called it "the exact statement" without saying so:
+
+- `NotifyRefreshmentReceived` (`:1253-1287`) lowers the balance without lowering
+  `reservedBalance`, and its own comment says it may "potentially put us into
+  debt". That raises the sum with no admission.
+- `NotifyPaymentThreshold` (`:1074-1083`) sets `paymentThreshold` to whatever
+  the peer announces, which can lower the limit. The `refreshDue` step-down is
+  handled below; this one is not the same thing.
+
+Neither is a race, since both take the same lock, and neither fires here:
+**`payment_threshold` reads 13,500,000 in all 2,381 rows**, and peer A is a peer
+this node owes throughout. That constancy is itself worth recording, because
+[overdraft-terms.md](overdraft-terms.md) flagged the mutability of
+`paymentThreshold` as a confounder it had not asserted away. It is asserted now.
+
 **What is not a construction is that the bound survives the limit stepping
 down.** The limit falls by 4,500,000 when the elapsed term resets, and a
 reservation made at the ceiling is not cancelled by that. Revision 2 asserted
@@ -153,10 +189,21 @@ three step-downs in the capture, all peer A:
 | 5 | -13,230,000 to -8,730,000 | 4,480,000 to 4,480,000 | 17,710,000 to 13,210,000 | 30,000 both sides |
 | 6 | -13,480,000 to -9,620,000 | 4,480,000 to 3,840,000 | 17,960,000 to 13,460,000 | 280,000 both sides |
 
-The reserved balance is **bit-identical** across two of the three. What holds
-the invariant is that the refreshment credit and the allowance loss are the
-**same event and equal in size**: the sum falls by exactly 4,500,000, matching
-`refreshRate`, and the margin is unchanged on both sides.
+The reserved balance is **bit-identical** across two of the three, and run 6 is
+not an exception once the arithmetic is done:
+`-13,480,000 + 4,500,000 - 640,000 = -9,620,000` exactly, so its 640,000 of
+reservation was **applied**, not cancelled. All three rows are consistent.
+
+What holds the invariant is that the sum falls by exactly 4,500,000 at each
+step-down, matching `refreshRate`, leaving the margin unchanged on both sides.
+The before and after rows are 8.1 ms, 0.1 ms and 5.0 ms apart, so the comparison
+is tight.
+
+Stated as strongly as the evidence allows: this is **consistent with** a credit
+of exactly `refreshRate` being applied at the moment the allowance is lost, and
+it is what the `amount - refreshRate = 0` case predicts. It is not proof that a
+credit occurred, for the reason given under the timestamp below, and revision 3
+asserted it as cause in this section while declining to in that one.
 
 That is the `amount - refreshRate = 0` case, measured. It is also the reason a
 step-down does not strand a request: the credit pays for the allowance it costs.
@@ -190,26 +237,37 @@ exactly what [#359](https://github.com/crtahlin/wasp/issues/359) exists to test,
 with delivered bytes as the acceptance criterion.
 
 Revision 2 cited #327 as evidence pointing the other way, quoting chunk counts
-of 416, 347 and 127 against 43 and 57. **Those numbers are not in
-[per-peer-threshold-results.md](per-peer-threshold-results.md)**, which reports
-bytes and no chunk counts; 43 and 57 come from the #313 and #324 diagnostics, a
-different measurement. The citation is withdrawn, and that source's own
-conclusion points the other way: every run truncated in both arms.
+of 416, 347 and 127 against 43 and 57. **Those numbers appear nowhere in the
+repository**; 43 and 57 trace to the #313 and #324 diagnostics, a different
+measurement. That citation is withdrawn.
+
+What [per-peer-threshold-results.md](per-peer-threshold-results.md) actually
+reports bears directly on the question, and cuts **for** an effect rather than
+against it: its one matched pair, both runs starting from a zero balance,
+delivered **2,293,760 bytes against 360,448, 6.4 times more** at the raised
+threshold. Revision 3 quoted only that source's "every run truncated in both
+arms", which answers completion rather than delivered bytes, and so cited the
+same document selectively after criticising revision 2 for miscitation.
+
+The honest reading is that #327 is **inconclusive on delivered bytes**: 6.4
+times is a large effect and it is n=1, against rule 7.
 
 ## A sampling error found and corrected inside this run
 
 The harness capped **each run's** journal at 400 lines. Three runs were under
 that; the three dense runs were cut at 400 of 760 to 778, giving 1,282 lines.
 Because peer A's ceiling refusals only begin past +1 s, they fell beyond the cap
-in every run (first at index 705, 688 and 661), so the capped sample contained
+in every run (the 706th, 689th and 662nd line of their runs), so the capped
 **zero** ceiling refusals and suggested a single universal mechanism. The cap is
 removed.
 
 ## A correction to overdraft-terms.md
 
-That document measured `reservedBalance` peaking at 12,860,000 and inferred
-concurrency was the likely driver. Peer A's peak here is **exactly 12,860,000**,
-confirming it. But the peak and the refusal do not coincide: in 1,773 of 2,381
+That document gave 12,860,000 as its headline `reservedBalance` peak, from runs
+spanning 12,780,000 to 12,880,000, and inferred concurrency was the likely
+driver. Peer A's peak here is 12,860,000, inside that spread.
+
+But the peak and the refusal do not coincide: in 1,773 of 2,381
 refusals the reserved balance is **zero**. A peak sampled at 50 ms is not the
 value the gate saw.
 
