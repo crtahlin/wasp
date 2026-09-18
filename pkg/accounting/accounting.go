@@ -156,7 +156,13 @@ type Accounting struct {
 	accountingPeersMu sync.Mutex
 	accountingPeers   map[string]*accountingPeer
 	logger            log.Logger
-	store             storage.StateStorer
+	// wasp #353: built once, not per call. logger.V(2) forces the full Build
+	// path whether or not the level is enabled, and PrepareCredit runs once
+	// per chunk per peer attempt. Registering it here also means the V(2)
+	// entry exists from startup, so the level can be raised before the node
+	// has carried any retrieval traffic.
+	loggerV2 log.Logger
+	store    storage.StateStorer
 	// wasp #327: the threshold announced to a peer asking this node as a
 	// provider, and how much extra credit may be granted across all
 	// connections holding a grant at one time. Both zero when off.
@@ -236,6 +242,7 @@ func NewAccounting(
 		earlyPayment:             EarlyPayment,
 		disconnectLimit:          percentOf(100+PaymentTolerance, PaymentThreshold),
 		logger:                   logger.WithName(loggerName).Register(),
+		loggerV2:                 logger.WithName(loggerName).V(2).Register(),
 		store:                    Store,
 		pricing:                  Pricing,
 		metrics:                  newMetrics(),
@@ -309,14 +316,38 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 	// and we are actually in debt, trigger settlement.
 	// we pay early to avoid needlessly blocking request later when concurrent requests occur and we are already close to the payment threshold.
 
+	// wasp #353: recorded for the refusal log line below. This says only that
+	// the branch was entered and settle was CALLED, and returned nil.
+	//
+	// settle itself often does nothing. The refreshment is gated on the amount
+	// reaching one refresh rate, on more than 999 ms since the last one, and on
+	// none already being in flight. The monetary payment is gated on a pay
+	// function existing at all, on none already being in flight, on
+	// failedSettlementInterval since the last failure, and on two minimumPayment
+	// checks. What settle does synchronously is bookkeeping: refreshOngoing,
+	// paymentOngoing, shadowReservedBalance and refreshReservedBalance. The
+	// stored balance is written later, by a goroutine. So true here does not
+	// mean a settlement started, still less that one completed.
+	settleCalled := false
+
 	if increasedExpectedDebtReduced.Cmp(threshold) >= 0 && currentBalance.Cmp(big.NewInt(0)) < 0 {
+		settleCalled = true
 		err = a.settle(peer, accountingPeer)
 		if err != nil {
 			a.metrics.SettleErrorCount.Inc()
 			return nil, fmt.Errorf("failed to settle with peer %v: %w", peer, err)
 		}
 
-		increasedExpectedDebt, _, err = a.getIncreasedExpectedDebt(peer, accountingPeer, bigPrice)
+		// wasp #353: currentBalance is captured rather than discarded so the
+		// logged balance comes from the same call as the logged debt.
+		//
+		// This is defensive, not load-bearing, and is not separately testable.
+		// accountingPeer.lock is held for the whole of PrepareCredit and every
+		// writer of peerBalanceKey takes it, so this call and the one above
+		// return the same balance by construction. Reverting this to _ passes
+		// every test, and an earlier version of this comment and of the spec
+		// justified it with a concurrent refreshment that the lock excludes.
+		increasedExpectedDebt, currentBalance, err = a.getIncreasedExpectedDebt(peer, accountingPeer, bigPrice)
 		if err != nil {
 			return nil, err
 		}
@@ -331,6 +362,45 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 	// this can happen if there is a large number of concurrent requests to the same peer
 	if increasedExpectedDebt.Cmp(overdraftLimit) > 0 {
 		a.metrics.AccountingBlocksCount.Inc()
+
+		// wasp #353: the refusal is otherwise invisible. AccountingBlocksCount
+		// carries no peer and no amounts, and this chunk goes on to surface as
+		// storage.ErrNotFound, indistinguishable from one that does not exist.
+		//
+		// Guarded rather than left to Debug's own level check, because the
+		// arguments are evaluated first: the surplus read below is a state
+		// store Get, and a sole-source download can produce several hundred
+		// refusals. With the level down this costs one comparison.
+		if a.loggerV2.Verbosity() >= 2 {
+			// Read the surplus here rather than earlier:
+			// getIncreasedExpectedDebt reads the same key under this lock and
+			// does not return it, and this path is the rare one.
+			surplusBalance, surplusErr := a.SurplusBalance(peer)
+			if surplusErr != nil {
+				// Practically unreachable, since getIncreasedExpectedDebt read
+				// the same key and would have returned the error. Logged
+				// rather than swallowed so a zero here is never mistaken for a
+				// measured zero surplus.
+				surplusBalance = big.NewInt(0)
+			}
+			a.loggerV2.Debug("credit refused, would overdraw",
+				"peer_address", peer,
+				"price", bigPrice,
+				"expected_debt", increasedExpectedDebt,
+				"overdraft_limit", overdraftLimit,
+				"payment_threshold", accountingPeer.paymentThreshold,
+				"refresh_due", refreshDue,
+				"refresh_timestamp_ms", accountingPeer.refreshTimestampMilliseconds,
+				"elapsed_seconds", timeElapsedInSeconds,
+				"settled_balance", currentBalance,
+				"surplus_balance", surplusBalance,
+				"surplus_error", surplusErr,
+				"reserved_balance", accountingPeer.reservedBalance,
+				"shadow_reserved_balance", accountingPeer.shadowReservedBalance,
+				"settle_called", settleCalled,
+			)
+		}
+
 		return nil, ErrOverdraft
 	}
 

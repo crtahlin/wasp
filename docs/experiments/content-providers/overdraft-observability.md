@@ -249,16 +249,20 @@ a.loggerV2.Debug("credit refused, would overdraw",
 	"elapsed_seconds", timeElapsedInSeconds,
 	"settled_balance", currentBalance,
 	"surplus_balance", surplusBalance,
+	"surplus_error", surplusErr,
 	"reserved_balance", accountingPeer.reservedBalance,
 	"shadow_reserved_balance", accountingPeer.shadowReservedBalance,
-	"settle_triggered", settleTriggered,
+	"settle_called", settleCalled,
 )
 ```
 
 ### Everything in that block, and where it comes from
 
 Revision 2 printed this as though it dropped in. Its accounting of the names was
-incomplete, and revision 3's was miscounted. In full, **thirteen** values.
+incomplete, and revision 3's was miscounted. In full, **fourteen** values.
+(Thirteen at the time of writing; `surplus_error` was added during
+implementation, so that a logged zero surplus is never mistaken for a read
+that failed.)
 
 **Already in scope at `:332`** (eleven): `peer` (the function parameter,
 `:281`), `bigPrice` (`:295`), `increasedExpectedDebt`, `overdraftLimit`,
@@ -272,9 +276,11 @@ which is the receiver rather than a logged value, as one of the two.
 
 **To be introduced** (two):
 
-- **`settleTriggered`**, a `bool` declared before `:312` and set inside that
+- **`settleCalled`**, a `bool` declared before `:312` and set inside that
   branch. It exists nowhere in the tree. It is the field the #343 question turns
-  on and is derivable from nothing else.
+  on and is derivable from nothing else. Named for what it records: `settle()`
+  often does nothing, so entering the branch is not the same as a settlement
+  starting. An earlier draft called it `settle_triggered`, which claimed more.
 - **`surplusBalance`**. It is the fourth term of the gated quantity and is
   **not** in scope: `getIncreasedExpectedDebt` reads it at `:272` and does not
   return it. Without it the Measurement section's consistency check cannot be
@@ -319,15 +325,19 @@ longer exists". **`settle()` is asynchronous.** It dispatches
 `go a.refreshFunction(...)` (`:476`) and `go a.payFunction(...)` (`:521`) and
 returns `nil` at `:527`, writing no balance. The store write happens later, in
 `NotifyRefreshmentSent` (`:1169`) or on the payment-sent path. So the re-read at
-`:319` normally returns the **same** value, and the only thing `settle()`
-changes synchronously is `shadowReservedBalance` (`:515`), which is in neither
-`settled_balance` nor `increasedExpectedDebt`.
+`:319` returns the **same** value, for the reason given below, and what
+`settle()` changes synchronously is bookkeeping (`refreshOngoing`,
+`paymentOngoing`, `shadowReservedBalance`, `refreshReservedBalance`), none of
+which is in `settled_balance` or `increasedExpectedDebt`.
 
-The reason that survives is weaker and still sufficient: **`settled_balance` and
-`expected_debt` should come from the same call**, so the logged terms actually
-reconcile with each other. Taking the balance from `:300` while the debt comes
-from `:319` would let a concurrently completed refreshment fall between them and
-produce a line whose own arithmetic does not close. The capture is
+The reason that survives is weaker still, and is worth stating as such:
+**`settled_balance` should come from the same call as `expected_debt`**, which
+is tidy rather than necessary. It is **not** true that a concurrent refreshment
+could otherwise fall between them, which an earlier draft claimed:
+`accountingPeer.lock` is held for the whole of `PrepareCredit` and every writer
+of the balance takes it, so both calls return the same value by construction.
+The capture is therefore defensive and **not separately testable**, and
+reverting it passes every test. The capture is
 behaviour-neutral, since `:319` already assigns with `=` and nothing reads
 `currentBalance` after `:312`.
 
@@ -529,7 +539,7 @@ check**, so the below-expectation return at `:1150-1156` advances the timestamp
 without crediting. That path is an instance of the mechanism, not a bar to it.
 
 What the instrument contributes: `refresh_timestamp_ms`, `refresh_due` and
-`settle_triggered` are recorded at the refusal, so the question is answered from
+`settle_called` are recorded at the refusal, so the question is answered from
 a measurement instead of from another reading of the code.
 
 ### How this could still mislead
@@ -557,9 +567,13 @@ libp2p peer identifiers before writing any file.
 
 ## Files
 
-- `pkg/accounting/accounting.go`: the log line, `settleTriggered`, the captured
+- `pkg/accounting/accounting.go`: the log line, `settleCalled`, the captured
   balance, and the `loggerV2` field built in `NewAccounting`.
-- `pkg/accounting/accounting_test.go`: the five tests and a capture logger.
+- `pkg/accounting/overdraft_logging_test.go`: a new file rather than an
+  addition to `accounting_test.go`, carrying a capture logger and seven tests.
+  The five below, plus one covering a refusal on a peer already in debt so the
+  settle branch is entered and the balance term is not zero, and one asserting
+  every field of the line is present.
 - `docs/DIFFERENCES.md`: a row, because the change adds a log line and a
   `GET /loggers` row that Bee does not have. Not because it is the first fork
   change to `pkg/accounting`, which it is not.

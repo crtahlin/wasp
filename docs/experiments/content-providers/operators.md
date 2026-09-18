@@ -70,4 +70,74 @@ Set `providers-enable: false` and restart.
   and charges for it, as stock Bee does.
 - **Pins stay.** Remove them with `DELETE /pins/{reference}`.
 
+## Finding out why a download stalled
+
+A download that returns HTTP 200 with a short body, and `curl` exit 18, has
+truncated. Two very different causes look identical from outside: the chunks
+are genuinely gone, or your node ran out of credit with the peer holding them
+and stopped asking. Both surface as `storage.ErrNotFound`.
+
+The accounting logger tells them apart, at its `all` level. The level is off by
+default, and with it off a refusal costs a verbosity check: an atomic load and
+a comparison. The line and the state-store read that fills it sit behind it, so
+nothing is formatted or read when nobody is looking.
+
+Do this on the node that is **downloading**, not the one serving. The credit
+decision is made by the requester.
+
+First read the level you are on, so you can put it back. `info` is the shipped
+default, but if your node runs at something else, this is your only chance to
+see it:
+
+```
+GET /loggers/bm9kZS9hY2NvdW50aW5n
+```
+
+Then raise it:
+
+```
+PUT /loggers/bm9kZS9hY2NvdW50aW5n/all
+```
+
+`bm9kZS9hY2NvdW50aW5n` is base64 of `node/accounting`. **The path segment is
+base64, not a URL path**, so the obvious `PUT /loggers/accounting/all` returns
+400: `accounting` is ten bytes and fails base64 padding.
+
+The name inside it is matched as an unanchored expression against the logger
+tree, so `bm9kZS9hY2NvdW50aW5n` and the base64 of plain `accounting`
+(`YWNjb3VudGluZw==`) both work. The full path is used here only because it says
+what is being changed.
+
+Run the download again and look for:
+
+```
+"msg"="credit refused, would overdraw"
+```
+
+Each line carries the peer, the price of the chunk, the debt the request would
+create, the limit it was measured against, and each term that fed them. If
+those lines are absent, credit was not the reason.
+
+Put the level back when you are finished, to whatever the first step showed.
+Restoring `info` on a node that was running at `debug` would silence ordinary
+accounting messages you were relying on:
+
+```
+PUT /loggers/bm9kZS9hY2NvdW50aW5n/info
+```
+
+**Leave it raised only while you are looking.** Under sustained load against a
+slow peer the node can emit one line per refused request. It costs nothing to
+other nodes, since the line never leaves this machine, but it will fill a
+journal.
+
+**If you are on a build older than this change**, the V(2) entry is created
+lazily, so raise the level only after the node has carried some retrieval
+traffic. Raising it on a node that has served nothing yet has no effect.
+
+**These lines contain peer overlay addresses.** If you are pasting output into
+an issue, a results document or anywhere else in this repository, redact them
+first: fork rule 10 forbids node addresses in a public repository, and that
+rule has been breached here once already.
+
 Generated with help of AI.

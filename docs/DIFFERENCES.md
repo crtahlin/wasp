@@ -7,7 +7,7 @@ is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
   on 2026-09-10.
-- **wasp described:** `main` at `35144644`, 2026-09-18. The latest wasp release is
+- **wasp described:** `main` at `66610224`, 2026-09-18. The latest wasp release is
   v0.1.3.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
 
@@ -166,6 +166,7 @@ on a node that has stake stranded in one of them. `stake-recovery-on-startup` is
 | Adds `bee_retrieval_preferred_overdrafts` and `bee_retrieval_preferred_readmits`, preferred-peer attempts refused for credit and how many of those peers were kept for a later attempt. | `main` | | [#324](https://github.com/crtahlin/wasp/issues/324) |
 | Adds `bee_accounting_provider_grants`, `bee_accounting_provider_grants_refused` and `bee_accounting_provider_budget_used`, for the per-peer provider payment threshold. | `main` | | [#327](https://github.com/crtahlin/wasp/issues/327) |
 | Adds `bee_localstore_local_ingest_chunks`, distinct chunks held from local ingests, and a warning log line when an ingest passes 90% of `local-ingest-limit` or is refused at it. The metric is an upper bound on disk rather than a measurement of it, because a chunk the node already held is counted and cost no new disk. | `main` | | [#326](https://github.com/crtahlin/wasp/issues/326) |
+| Adds a V(2) debug line at an overdraft refusal, `credit refused, would overdraw`, carrying the peer and both sides of the comparison, with every term that feeds them: the settled balance, surplus, reserved balance and chunk price on the debt side, and the announced payment threshold plus the refresh allowance on the limit side, with the raw refresh timestamp and saturated elapsed seconds that allowance is derived from, so the limit can be reconstructed from the line. Also logs the shadow reserved balance, which feeds the settlement decision rather than the comparison, whether the settle branch was entered, and any error from the surplus read so a logged zero is never mistaken for one that failed. Bee increments one unlabelled counter and logs nothing, so a chunk refused for credit and one that does not exist both surface as `storage.ErrNotFound`. Silent unless the `node/accounting` logger is raised to `all`. One further visible difference: a `node/accounting` V(2) row appears in `GET /loggers` from boot, where Bee creates it only after the path has run. | `main` | | [#353](https://github.com/crtahlin/wasp/issues/353) |
 | Removes four hive ping metrics that Bee declares but never records. | v0.1.0 | Yes | [#138](https://github.com/crtahlin/wasp/issues/138) |
 
 ## Version, identity and packaging
