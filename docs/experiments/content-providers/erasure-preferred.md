@@ -184,11 +184,19 @@ asking for a rise toward a number below the present value. Three drafts of this
 spec made that mistake with three different quantities, which is the strongest
 evidence that the existing counters do not measure what is being asked.
 
-**So the change adds a counter**, `PreferredCandidatesSelected`, incremented once
-per retrieval whose `preferredCandidates` returns a non-empty list
-(`retrieval.go:212`). That is "the set reached this fetch", stated directly, with
-no dependence on credit, on readmits, or on whether an ordinary peer got there
-first.
+**So the change adds a counter**, `PreferredCandidatesSelected`, incremented
+where `preferredCandidates` returns a non-empty list (`retrieval.go:212`). That
+is "the set reached this fetch", stated directly, with no dependence on credit,
+on readmits, or on whether an ordinary peer got there first: the call sits before
+the retry loop and before any peer is contacted, and reads only the preferred
+peers, the chunk address, the error skip list and connectivity.
+
+Two things an implementer and a reader both need. The call is inside the
+singleflight closure, so the counter rises once per **flight**, not once per
+`RetrieveChunk`, and a deduplicated caller does not move it. And the candidate
+list is filtered to connected full nodes (`preferred.go:184-190`), so a provider
+that is not connected produces no candidate and no increment, which the
+measurement holds fixed by asserting the peer count.
 
 Adding observability in order to make a measurement possible is the shape of
 [#353](https://github.com/crtahlin/wasp/issues/353), which existed only to make
@@ -199,7 +207,8 @@ could be measured at all. The cost here is one counter and one line.
 `preferred_candidates_selected` at MEDIUM rises to approach the chunk count of
 the download, where today it counts only the fetches the prefetch did not
 claim.** The level-NONE arm gives the figure a download reaches when nothing
-loses the set, and is the comparison the MEDIUM arm is read against.
+loses the set. It orients the prediction and decides nothing: every comparison
+that settles an outcome is patched against stock at MEDIUM, within one session.
 
 ### Whether it helps is a separate question, and it may not
 
@@ -482,12 +491,13 @@ control would compare across node states, which this repository has already had
 to withdraw a result for once.
 
 **What a negative result looks like.** `preferred_candidates_selected` does not
-move between stock and patched at MEDIUM, with the ranges apart. That says the
-set is not reaching the prefetch even with the re-attach, so the mechanism read
-from the code is not what happens, and the spec is wrong rather than the change.
-It is the reject row of the table below, and it is reachable: the counter rises
-only where a candidate list was built, so a patched arm that does not raise it
-has genuinely not carried the set anywhere new.
+separate between stock and patched at MEDIUM, with the three-run ranges
+overlapping. That says the set is not reaching the prefetch even with the
+re-attach, so the mechanism read from the code is not what happens, and the spec
+is wrong rather than the change. It is the reject row of the table below. The
+counter cannot fall, since the change only adds set-carrying fetches, so failing
+to separate is the whole of the negative case and there is nothing else for it
+to look like.
 
 ## Acceptance
 
@@ -510,8 +520,24 @@ not overlap, applied to **every** column below and not only the first:
 | rises, apart | not risen apart | not worse apart | **accept and ship** |
 | rises, apart | not risen apart | worse, apart | **accept the mechanism, do not ship**: the cost is the concentration, and the bound is the next issue |
 | rises, apart | rises, apart | either | **accept the mechanism, do not ship unbounded**: same follow-up, with the readmit exhaustion as its evidence |
-| ranges overlap | either | either | **undetermined**: rerun with more runs before reading it |
-| does not rise, apart | either | either | **reject**: the set is not reaching the prefetch even with the re-attach, so the mechanism read from the code is not what happens |
+| does not rise apart | either | either | **reject**: the set is not reaching the prefetch even with the re-attach, so the mechanism read from the code is not what happens |
+
+**The first column cannot fall, which is why it has no fall row and why an
+overlap is a refutation rather than a rerun.** The change only re-attaches the
+set to fetches that previously lost it, so every flight with a non-empty
+candidate list in the stock arm still has one in the patched arm: patched is
+greater than or equal to stock by construction. A draft made "falls, apart" the
+reject row and routed an overlap to "rerun with more runs", which put the only
+genuine negative into a row that can never fire and the real null result into an
+endless rerun.
+
+The predicted effect is large, from roughly 180 today to roughly the chunk count
+of the download. An effect of that size cannot hide inside three overlapping
+runs, so **overlapping ranges here refute the mechanism** rather than
+under-power the test. That is the opposite reading from an overlap in the other
+two columns, and the difference is deliberate: those columns ask whether a
+second-order harm appeared, where three runs genuinely cannot separate small
+moves.
 
 **Apartness applies to every column.** "Not risen apart" and "not worse apart"
 each cover both an overlap and a move the other way, so no dataset matches two
@@ -529,8 +555,6 @@ while harm is what has to be ruled out.
 selected is what produces more credit decisions, so the overdraft column is
 expected to move with the primary one; that is why it changes the disposition
 rather than the verdict.
-That draft made an overlapping fall a firm reject while an overlapping rise was
-undetermined, which three runs cannot support.
 
 Two quantities are recorded and deliberately decide nothing on their own. The
 **provider's served share** is credit-capped, so it may not move even when the
@@ -605,7 +629,7 @@ change touches two files, not one.
   - `TestProviderGetterRestoresSetOnBackgroundContext`, a fetch through the
     wrapper with `context.Background()` arrives at the underlying getter
     carrying the set;
-  - `TestPreferredCandidatesSelectedCountsOncePerRetrieval`, including a
+  - `TestPreferredCandidatesSelectedCountsOncePerFlight`, including a
     retrieval with an empty candidate list, which must not move it.
   - `TestProviderGetterKeepsDeliberateNil`, the suppression at the discover
     call is not undone;
