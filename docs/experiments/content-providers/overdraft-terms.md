@@ -142,8 +142,8 @@ Written before the run, so it can fail:
 
 All twelve truncated, `curl` exit 18, against a 4,194,304 byte file.
 
-**The balance floor came within 0.07 to 0.74 per cent of the announced
-13,500,000 in every run**, and reached it exactly in three of the twelve.
+**The balance floor reached the announced 13,500,000 exactly in three of the
+twelve runs, and came within 0.07 to 0.74 per cent of it in the other nine.**
 Revision 1 said "reached the announced threshold in every one of the twelve",
 which the table above contradicts.
 
@@ -298,7 +298,19 @@ What does work against it, and revision 2 missed: on every **error** path
 pseudosettle passes `timestamp = 0` (`pseudosettle.go:276, 285, 303, 310, 319,
 327, 334, 340, 350`), so `:1106` sets the timestamp to zero,
 `min((now - 0)/1000, 1)` saturates at 1, and the gate sits at its **ceiling**.
-Failed refreshments loosen the gate rather than tightening it.
+
+Said carefully, because this section has twice been wrong about direction: a
+refreshment is only attempted once `:473` has found more than 999 ms elapsed, so
+`refreshDue` was **already** at `refreshRate` beforehand. A failure keeps it
+there. So a failed refreshment **leaves the gate at its ceiling** rather than
+tightening it; it is looser only by comparison with the successful outcome, not
+looser than before. And nothing resets `refreshTimestampMilliseconds` except
+`:1106`, so the ceiling then persists until a refreshment succeeds.
+
+That counterweight is also less useful than it looks: an error other than
+`p2p.ErrPeerNotFound` blocklists the peer (`:1122-1125`), as the
+below-expectation path does, so both of the paths that leave the gate at its
+ceiling also end the connection.
 
 **None of the conditions that decide this were measured here.** `allegedInterval`,
 `refreshReservedBalance` and the accepted `amount` are not exposed on
