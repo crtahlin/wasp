@@ -40,8 +40,11 @@ wrong are marked where they appear rather than quietly removed.
 - **Lookahead buffer**: the read-ahead the API performs while streaming a
   download, set per request with `Swarm-Lookahead-Buffer-Size`. At its shipped
   default it prefetches, putting many chunks in flight at once; set to 0 it
-  reads one chunk at a time. **The whole result below turns on which of the two
-  is in play.**
+  puts fewer in flight, but **not one**: `joiner.ReadAt` uses an errgroup with
+  no limit, so a read unit still fans out. Measured, the peak reserved balance
+  is about 2,530,000 with it off against about 12,860,000 with it on, a factor
+  of five. See [overdraft-terms.md](overdraft-terms.md).
+  **The whole result below turns on which of the two is in play.**
 - **Sole-source content**: content that only the provider holds, because its
   postage batch expired and the network answers 404 for it. The provider still
   serves it because it is pinned, which needs no stamp.

@@ -4,9 +4,26 @@ Spec: [overdraft-retry.md](overdraft-retry.md). Issue:
 [#324](https://github.com/crtahlin/wasp/issues/324), which is the cause behind
 [#313](https://github.com/crtahlin/wasp/issues/313).
 
+> **Correction, from [overdraft-terms.md](overdraft-terms.md).** Everywhere this
+> document says the prefetch being off means "one chunk in flight at a time",
+> that is wrong. `joiner.ReadAt` uses an errgroup with no limit
+> (`pkg/file/joiner/joiner.go:215`, no `SetLimit` anywhere in the file), so a
+> single read unit fans out concurrently whatever the lookahead setting is.
+> Measured, the peak reserved balance with the prefetch off is about 2,530,000.
+> Dividing by the measured mean chunk price of about 306,735 suggests roughly
+> **eight** chunks in flight rather than one, though that conversion is only an
+> estimate: as `measurement.md` says where the price was taken, the metric
+> counts credit decisions node-wide including relayed retrievals, not
+> deliveries from one peer. The reserved balance itself is per peer and is
+> measured directly, so the refutation of "one chunk" does not depend on the
+> conversion. Where this document uses that phrase to argue a request
+> stays inside the free refresh allowance, the conclusion still holds, because
+> 2,530,000 is under the 4,500,000 the allowance supplies, but it holds by a
+> factor of under two rather than by the large margin "one chunk" implies.
+
 **Summary.** The fix works and it is not sufficient. With the prefetch off, so
-one chunk in flight at a time, it turns a truncated sole-source download into a
-complete one. At the shipped lookahead buffer the download still truncates on
+fewer chunks in flight (see the correction above, it is about eight rather than
+one), it turns a truncated sole-source download into a complete one. At the shipped lookahead buffer the download still truncates on
 both builds; on a cold node the fix delivers one read unit in one cycle of three
 where stock delivers nothing in three of three, and it consistently asks the
 provider more often, 67 to 155 attempts against stock's invariant 59. Content
@@ -46,7 +63,7 @@ provider P, both on mainnet, roles only (rule 10).
   `joiner.ReadAt` is all or nothing and `http.ServeContent` discards the copy
   error, so a truncated download still returns 200.
 
-## Table 1: sole-source, one chunk in flight
+## Table 1: sole-source, prefetch off
 
 `Swarm-Lookahead-Buffer-Size: 0`, which turns the lookahead prefetch off. Runs
 back to back with no spacing, because that is what depletes credit with one
@@ -90,8 +107,11 @@ whose credit has to clear.
 
 **This pairing is 2 stock runs against 1, and rule 7 asks for three per
 condition.** It is reported as a pointer, not as the result. The reason the
-condition is so hard to provoke here is that one chunk in flight rarely outruns
-the free refresh allowance. Table 2 is the arm where it fires every time.
+condition is so hard to provoke here is that the prefetch being off rarely
+outruns the free refresh allowance. That reasoning survives the correction at
+the top of this document but only just: the reserved balance in this arm peaks
+near 2,530,000 against an allowance of 4,500,000, not the much larger margin
+"one chunk in flight" would imply. Table 2 is the arm where it fires every time.
 
 ## Table 2, withdrawn: it compared conditions, not builds
 
