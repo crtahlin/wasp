@@ -252,7 +252,7 @@ a.loggerV2.Debug("credit refused, would overdraw",
 	"surplus_error", surplusErr,
 	"reserved_balance", accountingPeer.reservedBalance,
 	"shadow_reserved_balance", accountingPeer.shadowReservedBalance,
-	"settle_triggered", settleTriggered,
+	"settle_called", settleCalled,
 )
 ```
 
@@ -276,9 +276,11 @@ which is the receiver rather than a logged value, as one of the two.
 
 **To be introduced** (two):
 
-- **`settleTriggered`**, a `bool` declared before `:312` and set inside that
+- **`settleCalled`**, a `bool` declared before `:312` and set inside that
   branch. It exists nowhere in the tree. It is the field the #343 question turns
-  on and is derivable from nothing else.
+  on and is derivable from nothing else. Named for what it records: `settle()`
+  often does nothing, so entering the branch is not the same as a settlement
+  starting. An earlier draft called it `settle_triggered`, which claimed more.
 - **`surplusBalance`**. It is the fourth term of the gated quantity and is
   **not** in scope: `getIncreasedExpectedDebt` reads it at `:272` and does not
   return it. Without it the Measurement section's consistency check cannot be
@@ -327,11 +329,14 @@ returns `nil` at `:527`, writing no balance. The store write happens later, in
 changes synchronously is `shadowReservedBalance` (`:515`), which is in neither
 `settled_balance` nor `increasedExpectedDebt`.
 
-The reason that survives is weaker and still sufficient: **`settled_balance` and
-`expected_debt` should come from the same call**, so the logged terms actually
-reconcile with each other. Taking the balance from `:300` while the debt comes
-from `:319` would let a concurrently completed refreshment fall between them and
-produce a line whose own arithmetic does not close. The capture is
+The reason that survives is weaker still, and is worth stating as such:
+**`settled_balance` should come from the same call as `expected_debt`**, which
+is tidy rather than necessary. It is **not** true that a concurrent refreshment
+could otherwise fall between them, which an earlier draft claimed:
+`accountingPeer.lock` is held for the whole of `PrepareCredit` and every writer
+of the balance takes it, so both calls return the same value by construction.
+The capture is therefore defensive and **not separately testable**, and
+reverting it passes every test. The capture is
 behaviour-neutral, since `:319` already assigns with `=` and nothing reads
 `currentBalance` after `:312`.
 
@@ -533,7 +538,7 @@ check**, so the below-expectation return at `:1150-1156` advances the timestamp
 without crediting. That path is an instance of the mechanism, not a bar to it.
 
 What the instrument contributes: `refresh_timestamp_ms`, `refresh_due` and
-`settle_triggered` are recorded at the refusal, so the question is answered from
+`settle_called` are recorded at the refusal, so the question is answered from
 a measurement instead of from another reading of the code.
 
 ### How this could still mislead
@@ -561,7 +566,7 @@ libp2p peer identifiers before writing any file.
 
 ## Files
 
-- `pkg/accounting/accounting.go`: the log line, `settleTriggered`, the captured
+- `pkg/accounting/accounting.go`: the log line, `settleCalled`, the captured
   balance, and the `loggerV2` field built in `NewAccounting`.
 - `pkg/accounting/accounting_test.go`: the five tests and a capture logger.
 - `docs/DIFFERENCES.md`: a row, because the change adds a log line and a

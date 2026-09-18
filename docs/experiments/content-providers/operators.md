@@ -78,12 +78,22 @@ are genuinely gone, or your node ran out of credit with the peer holding them
 and stopped asking. Both surface as `storage.ErrNotFound`.
 
 The accounting logger tells them apart, at its `all` level. The level is off by
-default, and with it off a refusal costs one comparison: the line and the
-state-store read that fills it are behind a verbosity check, so nothing is
-formatted or read when nobody is looking.
+default, and with it off a refusal costs a verbosity check: an atomic load and
+a comparison. The line and the state-store read that fills it sit behind it, so
+nothing is formatted or read when nobody is looking.
 
 Do this on the node that is **downloading**, not the one serving. The credit
 decision is made by the requester.
+
+First read the level you are on, so you can put it back. `info` is the shipped
+default, but if your node runs at something else, this is your only chance to
+see it:
+
+```
+GET /loggers/bm9kZS9hY2NvdW50aW5n
+```
+
+Then raise it:
 
 ```
 PUT /loggers/bm9kZS9hY2NvdW50aW5n/all
@@ -108,10 +118,9 @@ Each line carries the peer, the price of the chunk, the debt the request would
 create, the limit it was measured against, and each term that fed them. If
 those lines are absent, credit was not the reason.
 
-Put the level back when you are finished. `info` is the shipped default, but if
-your node runs at some other level, read it first with
-`GET /loggers/bm9kZS9hY2NvdW50aW5n` and restore that instead, or you will
-silence ordinary accounting messages you were relying on:
+Put the level back when you are finished, to whatever the first step showed.
+Restoring `info` on a node that was running at `debug` would silence ordinary
+accounting messages you were relying on:
 
 ```
 PUT /loggers/bm9kZS9hY2NvdW50aW5n/info

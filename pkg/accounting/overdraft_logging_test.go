@@ -332,7 +332,8 @@ func TestAccountingOverdraftLineCarriesEveryField(t *testing.T) {
 		"peer_address", "price", "expected_debt", "overdraft_limit",
 		"payment_threshold", "refresh_due", "refresh_timestamp_ms",
 		"elapsed_seconds", "settled_balance", "surplus_balance",
-		"reserved_balance", "shadow_reserved_balance", "settle_called",
+		"surplus_error", "reserved_balance", "shadow_reserved_balance",
+		"settle_called",
 	} {
 		if v := logField(t, out, key); v == "" {
 			t.Errorf("field %q is present but empty in: %s", key, out)

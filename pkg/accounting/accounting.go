@@ -317,11 +317,15 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 	// we pay early to avoid needlessly blocking request later when concurrent requests occur and we are already close to the payment threshold.
 
 	// wasp #353: recorded for the refusal log line below. This says only that
-	// the branch was entered and settle was CALLED. settle itself does nothing
-	// when the amount is under one refresh rate, when a refreshment or payment
-	// is already in flight, or when a settlement failed recently, and it
-	// dispatches to goroutines rather than writing a balance. So true here
-	// does not mean a settlement started, still less that one completed.
+	// the branch was entered and settle was CALLED, and returned nil.
+	//
+	// settle itself often does nothing: it gates on the amount reaching one
+	// refresh rate, on more than 999 ms since the last refreshment, on no
+	// refreshment or payment already being in flight, on failedSettlementInterval
+	// since the last failure, and on two minimumPayment checks. What it does do
+	// synchronously is mutate shadowReservedBalance; the stored balance is
+	// written later, by a goroutine. So true here does not mean a settlement
+	// started, still less that one completed.
 	settleCalled := false
 
 	if increasedExpectedDebtReduced.Cmp(threshold) >= 0 && currentBalance.Cmp(big.NewInt(0)) < 0 {
@@ -332,9 +336,15 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 			return nil, fmt.Errorf("failed to settle with peer %v: %w", peer, err)
 		}
 
-		// wasp #353: currentBalance is captured rather than discarded so that
-		// it and increasedExpectedDebt come from the same call, which is what
-		// lets the logged terms reconcile with each other.
+		// wasp #353: currentBalance is captured rather than discarded so the
+		// logged balance comes from the same call as the logged debt.
+		//
+		// This is defensive, not load-bearing, and is not separately testable.
+		// accountingPeer.lock is held for the whole of PrepareCredit and every
+		// writer of peerBalanceKey takes it, so this call and the one above
+		// return the same balance by construction. Reverting this to _ passes
+		// every test, and an earlier version of this comment and of the spec
+		// justified it with a concurrent refreshment that the lock excludes.
 		increasedExpectedDebt, currentBalance, err = a.getIncreasedExpectedDebt(peer, accountingPeer, bigPrice)
 		if err != nil {
 			return nil, err
