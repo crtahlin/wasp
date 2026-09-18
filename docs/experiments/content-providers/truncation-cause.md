@@ -1,152 +1,170 @@
-# What ends a truncated provider download
+# Why a sole-source provider download truncates
 
 Issue: [#343](https://github.com/crtahlin/wasp/issues/343), step 1 of
-[retrieval-rate.md](retrieval-rate.md), which said nothing further should be
-specified until this was answered.
+[retrieval-rate.md](retrieval-rate.md).
 
 Measured 2026-09-18 on the two-node bench, `bench-1` as the provider and
-`bench-2` as the requester. Harnesses `cp290/t12b.sh`, `t12c.sh` and `t12d.sh`,
+`bench-2` as the requester. Harnesses `cp290/t12b.sh` through `t12e.sh`,
 outside this repository. Sole-source content from local ingest
-([#326](https://github.com/crtahlin/wasp/issues/326)), lookahead buffer 0, so
-nothing else on the network could serve it.
+([#326](https://github.com/crtahlin/wasp/issues/326)), 4,194,304 bytes at
+redundancy level NONE, lookahead buffer 0.
 
-**The requester gives up on a chunk after asking about thirty-four peers that do
-not hold it, having stopped asking the one peer that does.** One such chunk
-fails its read unit, and `joiner.ReadAt` is all or nothing, so the download
-truncates there.
+## The mechanism
 
-## Method
+1. The provider is refused credit for a chunk, because the requester's debt to
+   it is at the threshold it announced.
+2. [#324](https://github.com/crtahlin/wasp/issues/324) keeps the provider for a
+   later attempt instead of dropping it, **up to `maxOverdraftReadmits`, which
+   is 8** (`retrieval.go:159`, `:280-296`).
+3. On the refusal after that, the `default:` arm runs and
+   `candidates = candidates[1:]` (`:299`). **The only node holding the chunk is
+   now gone from that chunk's candidate list.**
+4. The chunk falls to ordinary selection. The content is sole-source, so no
+   ordinary peer can serve it.
+5. It spends its error budget, `maxOriginErrors = 32` raised by up to
+   `maxMultiplexForwards = 2` (`:155`, `:160`, `:356`), on about 34 peers that
+   do not have it, and returns `storage: not found`.
+6. `joiner.ReadAt` is all or nothing (`joiner.go:215-223`), so that one chunk
+   fails its whole read unit and the download stops there.
 
-The requester's own debug logging for `node/retrieval` was raised at run time
-through the `/loggers` API, so no restart was needed and node state was not
-disturbed. Every line the retrieval path emitted during each download was then
-read back from the node's journal for exactly that window.
+The truncation points are exact multiples of the read unit, which is step 6
+visible from outside.
 
-Chunks that ended in `context canceled` are excluded throughout. Those are
-consequences of the download having already stopped, not causes, and an earlier
-pass of this analysis picked one up by accident and drew the wrong conclusion
-from it.
+## The evidence
 
-## What the log says
+### Credit refusals exhaust the readmit bound, and the count of that is the count of failures
 
-Three runs, one fresh 4,194,304-byte file each.
+Two runs, both truncating, with the counters read either side:
 
-| Run | Delivered | Chunks that failed | Provider asked for them | Mean attempts per failed chunk | Chunks retrieved | Retrieved from the provider |
+| | Run 1 | Run 3 |
+|---|---|---|
+| Delivered | 1,507,328 | 1,671,168 |
+| `preferred_overdrafts` | +56 | +42 |
+| `preferred_readmits` | +52 | +38 |
+| **Overdrafts not readmitted** | **4** | **4** |
+| `preferred_misses` | +2 | +2 |
+
+`PreferredOverdrafts` counts every credit refusal on the preferred path
+(`preferred.go:232`). `PreferredReadmits` counts only those where
+`readmits[peer] < maxOverdraftReadmits`, meaning the peer was kept
+(`retrieval.go:295`). **The difference is the number of refusals that dropped
+the provider from a chunk**, because the only other route to the `default:` arm
+is an error that is not an overdraft, and those are not counted as overdrafts.
+
+Four in each run, and the same runs lose one or two chunks to
+`storage: not found`, with a failing read unit cancelling others in flight.
+
+### The provider is absent from the chunks that fail, and serves everything else
+
+From a separate pass over three runs:
+
+| Run | Delivered | Failed chunks | Provider among their attempts | Attempts per failed chunk | Chunks retrieved | From the provider |
 |---|---|---|---|---|---|---|
-| 1 | 1,736,704 | 1 | 1 | 34.0 | 478 | **478** |
-| 2 | 1,146,880 | 2 | 0 | 34.0 | 324 | **324** |
-| 3 | 917,504 | 2 | 0 | 34.0 | 261 | **261** |
+| 1 | 1,736,704 | 1 | 1 | 34 | 478 | 478 |
+| 2 | 1,146,880 | 2 | 0 | 34 | 324 | 324 |
+| 3 | 917,504 | 2 | 0 | 34 | 261 | 261 |
 
-Four things follow, and the first two are the finding.
-
-**Every chunk that succeeded came from the provider.** 478 of 478, 324 of 324,
-261 of 261. The provider is not failing, slow, or out of content. It serves
-everything it is asked for.
-
-**The chunks that fail are the ones it is not asked for.** In four of the five
-failures across these runs the provider does not appear among the attempts at
-all. Here is one such chunk in full, each line an attempt against a different
-peer:
+A failing chunk, with the peers written as letters because they are addresses of
+real nodes and rule 10 keeps those out of this repository:
 
 ```
 failed to get chunk -> peer A
 failed to get chunk -> peer B
 failed to get chunk -> peer C
-   ... thirty-four attempts in total, each to a different peer,
-       none of them the provider ...
+   ... thirty-four attempts, each to a different peer, none the provider ...
 retrieval failed [storage: not found]
 ```
 
-The peers are written as letters on purpose. They are overlay addresses of
-real nodes on the network, which rule 10 keeps out of this repository, and the
-excerpt says as much without them.
+That excerpt is from a separate single-chunk run rather than from the three in
+the table.
 
-**The attempt count is quantised at 34.0 in every run.** `maxOriginErrors` is 32
-(`pkg/retrieval/retrieval.go:155`), and `errorsLeft` is decremented once per
-failed result (`:408`). Thirty-four attempts ending in `storage: not found` is
-that budget being spent, to the chunk.
+**The 478, 324 and 261 figures are close to tautological** and are reported for
+what they are: the content is sole-source, so nothing else could have served it.
+They confirm the setup was sound, not that the provider was healthy.
 
-**The branch that would wait for credit never fires.** `sleeping to refresh
-overdraft balance` (`retrieval.go:331`) appears **zero** times across all three
-runs, and so does `no peers left`. That branch sits behind
-`errors.Is(err, topology.ErrNotFound)`, which means `closestPeer` has no
-unskipped peer left. With more than a hundred connected peers and a budget of
-32, the budget goes first, every time, in this regime.
+**The per-chunk attempt count is 34 where it can be read directly**, in the
+single-chunk run and in run 1, which had one failed chunk. Runs 2 and 3 average
+two chunks, so 34.0 there is a mean and an earlier draft of this document called
+it quantised, which the data does not support.
 
-## What this settles
+### What is ruled out
 
-- **The download does not stop for want of credit at the moment it stops.** It
-  stops because a chunk was asked of peers that cannot answer until its budget
-  ran out. Credit may be why the holder left that chunk's candidate list, which
-  is the open question below, but the failure itself is an exhausted retry
-  budget against the wrong peers.
-- **An earlier claim in [#343](https://github.com/crtahlin/wasp/issues/343),
-  withdrawn as unverified, is now measured and holds in this regime.** That
-  claim was that the credit wait cannot be reached because the error budget runs
-  out first. A review correctly said it was asserted rather than checked, and
-  that it is reachable in general. It is reachable in general and it was reached
-  zero times here.
-- **It also explains why the buffer matters without the buffer being the
-  cause.** A larger read unit contains more chunks, so it is more likely to
-  contain one that has lost its holder, and one is enough.
-- **It is consistent with `t7-cold`**, where downloads failed at a balance of
-  zero with maximum headroom. A chunk that has stopped asking its only holder
-  fails whatever the balance is.
+**Demotion after repeated misses is ruled out, from data recorded before this
+question was asked.** `PreferredSet.miss` drops a peer for ten minutes after
+`demoteAfterMisses`, 16, consecutive misses (`preferred.go:38-41`, `:115-137`),
+and the set lives for one HTTP request, so it would end a download. Across all
+eleven runs of the size sweep, completing and truncating alike,
+`preferred_misses` rose by **1 or 2**, never near 16. It never fires.
+
+## Corrections to the earlier draft of this document
+
+- **It said "the download does not stop for want of credit".** That is wrong.
+  Credit is the first step of the chain above. What is true is narrower: at the
+  moment the chunk fails, the failure is an exhausted retry budget against peers
+  that cannot help, and adding credit at that point would not be reached.
+- **It treated the zero count of the credit-wait log line as evidence about
+  credit.** It is not. That branch requires every peer to be skipped, so zero is
+  near enough guaranteed here, and credit refusal is routed around it with no
+  log line at all (`retrieval.go:280-296`, `:360-365`). The zero count is
+  consistent with no credit pressure and with heavy credit pressure alike, and
+  the counters above are what distinguish them.
+- **It said no instrumentation existed for the drop and that a new log line was
+  needed.** Seven counters already existed and answered it without any code
+  change.
+- **It listed three candidate mechanisms and missed two**, including the
+  candidate consumption that turns out to be the answer.
+- **It cited the wait branch at `retrieval.go:331`.** It is at `:330`.
+- **It did not reconcile 34 against `maxOriginErrors = 32`.** The two extra come
+  from `maxMultiplexForwards`.
+- **It quoted four peer overlay addresses**, against rule 10, now redacted.
 
 ## What this does not settle
 
-**Why the holder leaves a chunk's candidate list is not established.** Three
-mechanisms in the code could do it and the logs here do not separate them:
-
-- `maxOverdraftReadmits = 8` (`retrieval.go:159`): after eight credit refusals
-  of one chunk the preferred peer is dropped from that chunk's candidates.
-- `s.errSkip` (`:122`) is service-wide with a one minute life, so a peer that
-  fails a chunk once is excluded from it for a minute.
-- `preferredCandidates` (`preferred.go:184`) excludes anything in the skip list
-  and anything not reported as a connected full node.
-
-Separating them needs a log line at the point the candidate is dropped, which
-does not exist today. That is the next step and it is small.
-
-Also not settled: **one of the five failures did have the provider among its
-attempts**, and it still failed. One instance is not enough to say whether that
-is a different path or the same one seen a beat earlier.
-
-And nothing here touches **why buffer 0 runs at about 263,000 B/s** when there
-is no credit pressure at all. This explains where a download stops, not the rate
-it runs at until then.
+- **The three runs in the table fall monotonically**, 1,736,704 then 1,146,880
+  then 917,504, ten seconds apart with no reset. That is accumulating node state
+  across runs, which rule 7 exists to catch, and they are not interchangeable
+  samples.
+- **Two runs for the counter evidence, not three.** The third was lost to a
+  transient failure of an `ssh` invocation, the same fault that has eaten a
+  whole arm twice in this project.
+- **The gap of 4 is not tied chunk by chunk to the failures.** The counters are
+  node-wide and the failures are per download; that they agree in magnitude is
+  strong but it is not a per-chunk match.
+- **Why the provider is refused in the first place** is the balance sitting at
+  the announced threshold, which [#327](https://github.com/crtahlin/wasp/issues/327)
+  raises and which its measurement shows is not enough on its own.
+- **Nothing here explains the rate** at buffer 0 with no credit pressure. That
+  remains the other half of #343.
 
 ## What follows
 
-The shape of a fix is now constrained by evidence rather than guesswork, and the
-constraint kills the design this project already withdrew once. That design
-would have waited for credit at the point the loop gives up. **By then the
-provider is not in the candidate list**, so there would be nothing to retry and
-the wait would be spent before falling back to the same peers that do not have
-the chunk.
+The bound is the lever. `maxOverdraftReadmits = 8` is what decides whether a
+chunk keeps its only holder, and the same number governs both cases the
+requester cannot tell apart: content the network also holds, where giving up on
+the provider quickly is right, and sole-source content, where it is fatal.
 
-What the evidence points at instead is keeping the only holder available to a
-chunk that nothing else can serve. That is the same family as
-[#313](https://github.com/crtahlin/wasp/issues/313) and
-[#324](https://github.com/crtahlin/wasp/issues/324), and #324's readmit path is
-already most of it, bounded at eight.
+That the requester cannot tell them apart is the same difficulty
+[#324](https://github.com/crtahlin/wasp/issues/324) recorded. What is new is
+that the boundary now has a number on it and a counter that shows when it is
+crossed.
 
-No design is proposed here. The next measurement is the one named above:
-instrument the point at which a preferred peer is dropped from a chunk, and read
-which of the three mechanisms does it.
+No design is proposed here. The measurement that should come before one is
+whether a larger bound completes these downloads without the 3x regression on
+widely-held content that the first attempt at #324 produced.
 
 ## Upstream portability
 
-`maxOriginErrors`, `errSkip`, the error budget loop and the unreachable-in-practice
-wait branch are all unmodified upstream code, checked against `upstream/v2.8.2`.
-`maxOverdraftReadmits` and `preferredCandidates` are fork code from #324 and
-#290.
+The readmit bound and the preferred path are **fork code**, from #324 and #290.
+Unmodified upstream drops the candidate on the first refusal, with no readmit at
+all, so upstream is worse in this case rather than better, and this fork already
+improved it once.
 
-No `affects-upstream` marker is claimed. The behaviour is reproduced and its
-cause within the retrieval loop is now known, but which mechanism drops the
-holder is not, and a defect report that cannot name the mechanism is the kind of
-weak member rule 11 warns about. It becomes appropriate once the next
-measurement lands.
+`maxOriginErrors`, `maxMultiplexForwards`, the error budget loop and the all or
+nothing `joiner.ReadAt` are unmodified upstream code, checked against
+`upstream/v2.8.2`.
+
+**No `affects-upstream` marker.** The chain runs through fork-authored code, and
+the upstream parts of it behave as designed rather than in error.
 
 ---
 
