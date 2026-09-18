@@ -51,8 +51,9 @@ a fork ends up re-resolving the same conflicts forever. **Never squash a sync.**
 
 In order:
 
-1. **The protocol-freeze diff.** `git diff origin/main...HEAD -- .github/protocol-freeze.lock`,
-   after `git fetch origin`. Never a bare `main`; see rule 13 in `AGENTS.md`.
+1. **The protocol-freeze diff.** After `git fetch origin`, run
+   `git diff origin/main...HEAD -- .github/protocol-freeze.lock`.
+   Never a bare `main`; see rule 13 in `AGENTS.md`.
    If upstream moved a protocol minor, read
    `docs/agent-playbooks/protocol-compatibility.md` on what that means for
    dialability before merging.
@@ -145,7 +146,7 @@ git push --force-with-lease
 
 Two different lifecycles, conflating them is the usual mistake.
 
-**Unmerged `exp/*` branches** get rebased onto `main`, keeping them as clean
+**Unmerged `exp/*` branches** get rebased onto `origin/main`, keeping them as clean
 patch series so `scripts/export-patch.sh` keeps working:
 
 ```bash

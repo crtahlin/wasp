@@ -250,9 +250,9 @@ merge subject, resolve it from the branch tip instead. Do not link to the Bee
 repository (rule 1); the label is a marker for a later human decision, nothing
 more.
 
-`origin/main` there for the reason given under rule 13: a stale local `main`
-would silently narrow the range and could miss the very commit being looked
-for.
+`origin/main` is used there for the reason given under rule 13: a stale local
+`main` would silently narrow the range and could miss the very commit being
+looked for.
 
 ## Writing
 

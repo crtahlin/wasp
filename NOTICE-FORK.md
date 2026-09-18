@@ -30,7 +30,8 @@ The authoritative answer is the git history, every change this fork makes to
 upstream Bee is one merge commit on `main`:
 
 ```bash
-git log --first-parent main
+git fetch origin
+git log --first-parent origin/main
 ```
 
 The human-readable summary is [`docs/experiments/INDEX.md`](docs/experiments/INDEX.md).

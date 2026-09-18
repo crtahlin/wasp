@@ -6,25 +6,29 @@ implements.
 
 Code references are to `7bd5da14`, base `upstream/v2.8.2`.
 
-> **Correction.** This document said `pkg/accounting`, `pkg/pricing` and
-> `pkg/settlement/pseudosettle` were byte-identical to that base, "verified with
-> `git diff upstream/v2.8.2 main --` against those three paths, which is empty".
-> **That verification was run against a stale local `main` and two of the three
-> claims are false.** Against `origin/main` today the same paths carry 1,600
-> inserted lines and 11 deleted: `pkg/accounting` 1,196 and 11, `pkg/pricing`
-> 404, and only `pkg/settlement/pseudosettle` genuinely unchanged. Much of that
-> arrived after this document was written, but `provider.go` and the `pricing`
-> changes are this document's own feature, so the claim was wrong when made.
+> **Note on the verification below, from
+> [#355](https://github.com/crtahlin/wasp/issues/355).** This document said
+> `pkg/accounting`, `pkg/pricing` and `pkg/settlement/pseudosettle` were
+> byte-identical to the base, "verified with `git diff upstream/v2.8.2 main --`
+> against those three paths, which is empty".
 >
-> The cited line numbers in `PrepareCredit` were checked separately and its body
-> does carry no fork change, so the substance of what is quoted below stands.
-> What does not stand is the blanket "every line cited in them is also
-> upstream's". Check any individual citation against `upstream/v2.8.2` before
-> relying on it.
+> **That was true at `7bd5da14`**, the commit this document pins, and it is still
+> true there: the diff at that commit is empty. The defect is that the command
+> names `main`, a **moving** ref, rather than the pinned commit. Re-run today it
+> gives a different answer, because those paths now carry 1,600 inserted lines
+> and 11 deleted against the base: `pkg/accounting` 1,196 and 11, `pkg/pricing`
+> 404, and `pkg/settlement/pseudosettle` still unchanged. Most of that is #327's
+> own implementation and #353, all of which landed after this document was
+> written.
 >
-> This is the failure [#355](https://github.com/crtahlin/wasp/issues/355) is
-> about: a diff against a stale ref returns nothing, and nothing reads as
-> confirmation.
+> So **read every line number below against `7bd5da14`, not against current
+> `main`.** `PrepareCredit` in particular has both moved and gained fork code
+> since, so its citations here do not point where they did. The verification
+> command, restated so it stays true:
+>
+> ```bash
+> git diff upstream/v2.8.2 7bd5da14 -- pkg/accounting pkg/pricing pkg/settlement/pseudosettle
+> ```
 
 **Depends on [#324](https://github.com/crtahlin/wasp/issues/324)**, merged as
 [`558c93a5`](https://github.com/crtahlin/wasp/commit/558c93a5), which adds the
