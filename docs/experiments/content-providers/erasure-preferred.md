@@ -99,7 +99,7 @@ ship the unbounded form. It is also a candidate explanation **for** the phase 1
 negative: if the set is lost for most of a default-level download, the speed
 result was measured on a mechanism that was only partly running.
 
-That is a genuine reading and not a permission slip, and the binding has to be
+That is a genuine reading and it is not open-ended, and the binding has to be
 something the measurement can actually trigger. **It is this: accepting this
 change does not reopen the rest of phase 2.** The other phase 2 items stay
 stopped under the phase 1 rule, and each would need its own argument. If the
@@ -147,46 +147,59 @@ refute it, both from the document it cited:
 So an acceptance rule reading "share does not rise, therefore the mechanism is
 refuted" would have rejected a correct fix for a reason its own source excludes.
 
-### The observable, and why the obvious repair of it is also wrong
+### No existing counter can answer this, so the change adds one
 
-A second draft proposed `preferred_attempts + preferred_overdrafts`, on the
-reading that `prepareCredit` runs before either counter moves and then exactly
-one of them does, so the sum counts chunks. **That is false three ways, and the
-third is the one that matters.**
+Two drafts proposed observables built from the counters that exist. Both were
+wrong, and the second was wrong in the same shape as the first.
 
-- A chunk can consume two candidates, since `preferredCandidates` returns up to
-  `maxPreferredAttempts`, which is 2 (`pkg/retrieval/preferred.go:198-200`), and
-  they are tried one after the other (`retrieval.go:209-211,274-276`).
-- A non-overdraft failure from `prepareCredit` increments **neither** counter,
-  because the increment sits inside an `errors.Is(err, ErrOverdraft)` check
-  (`preferred.go:229-235`), and the candidate is then dropped
-  (`retrieval.go:296-301`).
-- **`preferred_overdrafts` counts the same chunk repeatedly.** The #324 readmit
-  branch keeps the peer and **does not consume the candidate**
-  (`retrieval.go:280-295`, against the success branch at `:304`), so a later
-  retry runs `prepareCredit` on the same peer again and increments again, up to
-  `maxOverdraftReadmits + 1`, which is 9 times for one chunk. So credit does
-  decide the total, and inflates it **exactly in the regime this spec predicts**,
-  where refusals rise. The sum would have been satisfied by repeated refusals on
-  a few chunks rather than by the set reaching more fetches.
+**`preferred_attempts + preferred_overdrafts` is inflated by retries.** The #324
+readmit branch keeps the peer and **does not consume the candidate**
+(`retrieval.go:280-295`, against the success branch at `:304`), so a later retry
+runs `prepareCredit` on the same peer and counts the same refusal again, up to
+`maxOverdraftReadmits + 1`, which is 9 times for one peer and 18 for one chunk
+with both candidates. Credit therefore sets the total, and inflates it exactly
+where refusals rise, which is the outcome this spec predicts.
 
-**The observable is therefore
-`preferred_attempts + (preferred_overdrafts - preferred_readmits)`.** The
-subtraction removes the readmit looping: `preferred_readmits` counts exactly the
-refusals where the candidate was kept (`retrieval.go:294`), so the difference is
-the refusals that ended in it being dropped. The sum is then the number of
-**preferred candidate decisions concluded on the credit path**, at most two per
-chunk and not inflated by retries against one peer.
+**Subtracting the readmits removes the signal instead.** On the readmit path
+there is no `continue`: ordinary selection runs immediately, and the code says so
+(`retrieval.go:314-315`). This measurement deliberately uses network-held
+content, so an ordinary peer serves the chunk and the flight ends with the
+candidate never concluded. The usual per-chunk sequence is one overdraft, one
+readmit, net zero. Reaching a net of one needs nine refusals inside one flight,
+which needs ordinary selection to keep failing, which is sole-source behaviour
+this content excludes.
 
-It is a proxy and the spec says which way it errs: it **undercounts**, because a
-candidate dropped for a non-credit reason concludes without moving any counter.
-That biases against the change, which is the safe direction for an observable
-whose rise is what acceptance turns on.
+What is left is `preferred_attempts`, and that increments **only after
+`prepareCredit` succeeds** (`pkg/retrieval/preferred.go:228-239`), which
+`measurement.md:338-340` states outright: a chunk whose provider was overdrawn
+has no attempt. It is credit-capped, which is what the first draft was rejected
+for.
 
-**The hypothesis is therefore: re-attaching the set raises
-`preferred_attempts + (preferred_overdrafts - preferred_readmits)` at MEDIUM,
-toward the figure a level-NONE download of the same bytes reaches.** That is the
-mechanism stated in a quantity the credit window does not set a ceiling on.
+**And the data says so.** Preferred attempts at level NONE with a hint are
+**165 (162 to 179)**; at the default level with a hint, **178 (178 to 203)**
+(`results.md:87,92`). Level NONE is the case where every fetch carries the set,
+and it produces fewer attempts than MEDIUM, where most fetches lose it. Any
+hypothesis of the form "raise the MEDIUM figure toward the level-NONE one" is
+asking for a rise toward a number below the present value. Three drafts of this
+spec made that mistake with three different quantities, which is the strongest
+evidence that the existing counters do not measure what is being asked.
+
+**So the change adds a counter**, `PreferredCandidatesSelected`, incremented once
+per retrieval whose `preferredCandidates` returns a non-empty list
+(`retrieval.go:212`). That is "the set reached this fetch", stated directly, with
+no dependence on credit, on readmits, or on whether an ordinary peer got there
+first.
+
+Adding observability in order to make a measurement possible is the shape of
+[#353](https://github.com/crtahlin/wasp/issues/353), which existed only to make
+an overdraft refusal visible so that [#343](https://github.com/crtahlin/wasp/issues/343)
+could be measured at all. The cost here is one counter and one line.
+
+**The hypothesis is therefore: with the set re-attached,
+`preferred_candidates_selected` at MEDIUM rises to approach the chunk count of
+the download, where today it counts only the fetches the prefetch did not
+claim.** The level-NONE arm gives the figure a download reaches when nothing
+loses the set, and is the comparison the MEDIUM arm is read against.
 
 ### Whether it helps is a separate question, and it may not
 
@@ -433,11 +446,13 @@ Arms: stock against patched, at both levels, for **12 runs**.
 
 Recorded per run:
 
-- **`preferred_attempts + preferred_overdrafts`, the primary observable.** Their
-  sum is the number of chunks for which a preferred candidate was selected,
-  which is what "the set reached this fetch" means, and unlike the served share
-  it is not capped by the credit window
-  (`pkg/retrieval/preferred.go:228-239`);
+- **`preferred_candidates_selected`, the counter this change adds, and the
+  primary observable.** It rises once per retrieval whose candidate list is not
+  empty, which is "the set reached this fetch" with no dependence on credit, on
+  readmits, or on an ordinary peer arriving first;
+- `preferred_attempts` and `preferred_overdrafts` separately, recorded because
+  they are needed to read the primary one and **not** usable as it, for the
+  reasons under the Hypothesis;
 - `preferred_overdrafts` and `preferred_readmits` separately, and **the
   difference between overdrafts and readmits**, which `truncation-cause.md`
   establishes as the quantity that decides whether a read unit survives;
@@ -466,10 +481,13 @@ figures are quoted for orientation only: they were taken on a 16 MiB file with
 control would compare across node states, which this repository has already had
 to withdraw a result for once.
 
-**What a negative result looks like.** The candidate count does not move between
-stock and patched at MEDIUM, beyond the spread. That says the set is not
-reaching the prefetch even with the re-attach, so the mechanism read from the
-code is not what is happening, and the spec is wrong rather than the change.
+**What a negative result looks like.** `preferred_candidates_selected` does not
+move between stock and patched at MEDIUM, with the ranges apart. That says the
+set is not reaching the prefetch even with the re-attach, so the mechanism read
+from the code is not what happens, and the spec is wrong rather than the change.
+It is the reject row of the table below, and it is reachable: the counter rises
+only where a candidate list was built, so a patched arm that does not raise it
+has genuinely not carried the set anywhere new.
 
 ## Acceptance
 
@@ -483,28 +501,34 @@ the change is **rejected** whatever else it did. A stock-arm hash failure
 invalidates the run instead, since it says the content or the bench is wrong
 rather than the change.
 
-Then, on the primary observable, the candidate count
-`preferred_attempts + preferred_overdrafts`, patched against stock in the same
-session, with "apart" meaning the three-run ranges do not overlap:
+Then, on the primary observable, `preferred_candidates_selected`, patched
+against stock in the same session, with **apart** meaning the three-run ranges do
+not overlap, applied to **every** column below and not only the first:
 
-| Candidate count | Overdrafts not readmitted | Download time | Outcome |
+| Candidates selected | Overdrafts not readmitted | Download time | Outcome |
 |---|---|---|---|
-| rises, apart | does not rise | not worse, apart | **accept and ship** |
-| rises, apart | does not rise | overlapping | **accept and ship**: time is a harm check, and an overlap is the absence of harm |
-| rises, apart | does not rise | worse, apart | **accept the mechanism, do not ship**: the cost is the concentration, and the bound is the next issue |
-| rises, apart | rises | either | **accept the mechanism, do not ship unbounded**: same follow-up, with the readmit exhaustion as its evidence |
+| rises, apart | not risen apart | not worse apart | **accept and ship** |
+| rises, apart | not risen apart | worse, apart | **accept the mechanism, do not ship**: the cost is the concentration, and the bound is the next issue |
+| rises, apart | rises, apart | either | **accept the mechanism, do not ship unbounded**: same follow-up, with the readmit exhaustion as its evidence |
 | ranges overlap | either | either | **undetermined**: rerun with more runs before reading it |
-| falls, apart | either | either | **reject**: the set is still not reaching the prefetch, so the mechanism read from the code is not what happens |
+| does not rise, apart | either | either | **reject**: the set is not reaching the prefetch even with the re-attach, so the mechanism read from the code is not what happens |
 
-Download time is a **harm check, not a signal**: only a worse time with ranges
-apart decides anything, and an overlap is read as no harm rather than as no
-information. A draft of this table used "not worse, apart" against "worse,
-apart", which left every overlapping time matching no row at all, and
-overlapping times are what this spec expects with three runs.
+**Apartness applies to every column.** "Not risen apart" and "not worse apart"
+each cover both an overlap and a move the other way, so no dataset matches two
+rows and none matches none. Two drafts got this wrong in opposite directions:
+one left every overlapping download time matching no row, and the next left an
+overlapping rise in the overdraft column matching two.
 
-The candidate-count column is symmetric for the same reason a draft of it was
-not: an overlapping rise and an overlapping fall are the same evidential
-quality, so both are undetermined, and only a fall with ranges apart rejects.
+**Download time is a harm check, not a signal.** Only a worse time with ranges
+apart decides anything; an overlap is read as the absence of harm rather than as
+the absence of information. That is the opposite reading from the first column,
+and deliberately so: a rise there is the claim, and a claim needs separation,
+while harm is what has to be ruled out.
+
+**The last two columns are not independent of the first.** More candidates
+selected is what produces more credit decisions, so the overdraft column is
+expected to move with the primary one; that is why it changes the disposition
+rather than the verdict.
 That draft made an overlapping fall a firm reject while an overlapping rise was
 undetermined, which three runs cannot support.
 
@@ -566,14 +590,23 @@ change touches two files, not one.
 
 - `pkg/retrieval/preferred.go`: `HasPreferredPeers`.
 - `pkg/api/providers.go`: the re-attach in `providerGetter`.
+- `pkg/retrieval/retrieval.go` and `pkg/retrieval/metrics.go`: the
+  `PreferredCandidatesSelected` counter, incremented once per retrieval whose
+  candidate list is not empty. Without it there is nothing to measure, for the
+  reasons under the Hypothesis, so it is part of the change rather than of the
+  harness.
 - `pkg/retrieval/preferred_test.go`, `package retrieval_test`:
-  - `TestHasPreferredPeersDistinguishesAbsentFromNil`, the whole reason the
-    helper exists.
+  - `TestHasPreferredPeersDistinguishesAbsentFromNil`, which pins the Go
+    semantics the helper rests on. It is not a discriminating test against the
+    naive check, because no reachable path today tells the two apart, and the
+    spec says so rather than implying the test proves the helper necessary.
 - `pkg/api/providers_test.go`, `package api_test`, following the existing idiom
   at `:75-79`, which asserts on the context a call receives:
   - `TestProviderGetterRestoresSetOnBackgroundContext`, a fetch through the
     wrapper with `context.Background()` arrives at the underlying getter
     carrying the set;
+  - `TestPreferredCandidatesSelectedCountsOncePerRetrieval`, including a
+    retrieval with an empty candidate list, which must not move it.
   - `TestProviderGetterKeepsDeliberateNil`, the suppression at the discover
     call is not undone;
   - `TestProviderGetterLeavesExistingSetAlone`, a context that already carries a
