@@ -11,10 +11,15 @@ Measured 2026-09-19 on the two-node bench, `bench-1` as the provider and
 in `cp290/t20b-discovery-lookup-after.txt`, all outside this repository per rule
 10.
 
-**Only arm 1 was run.** Arms 2, 3, 4, 5 and 6 were not. This document is scoped
-to what arm 1 establishes and is explicit about what it does not, which is most
-of the spec: arm 1 does **not** test the lifetime claim, and arms 2 and 6 are
-what do.
+**Arm 1 passes. Arms 2 and 6, which are the ones that test the lifetime claim,
+cannot be settled on this bench, and the reason is a measured property of the
+bench rather than of the change.** Arms 3, 4 and 5 were not run.
+
+The short version: arm 1 shows the lookup now completes, which it did not before.
+Neither arm that would show the **dial** outliving its request can be read here,
+because the two nodes reconnect to each other faster than any request can end,
+and because `connects_dialed` was observed counting a connect that was not a
+dial. Both of those are recorded below with the runs that show them.
 
 ## The result
 
@@ -56,10 +61,10 @@ control holds in all three of its own.
 ## What this does not show, and it is most of the spec
 
 - **Nothing about the dial outliving the request**, which is the actual lifetime
-  claim. That is arm 2 at level NONE and arm 6, and neither was run. Arm 1 shows
-  the lookup completes; the dial completing **inside** the request would satisfy
-  it equally, and at the default level the spec predicts exactly that, since the
-  lookup finishes about 1.7 seconds into a download lasting several seconds.
+  claim. Arm 1 shows the lookup completes; the dial completing **inside** the
+  request would satisfy it equally, and at the default level the spec predicts
+  exactly that. Arms 2 and 6 were run and neither can settle it here, for the
+  reasons in their own sections.
 - **Nothing about the pre-registered negative**, that the triggering download
   does not get faster. That is arm 4, which needs before and after in one
   session and therefore the alternating build design. Affordable, at about half
@@ -140,16 +145,91 @@ the counter reads coming back empty for the same reason. A harness must wait for
 `/readiness` and for the peer count to return, and must record a 503 as an
 invalid run rather than as a result.
 
+## Arm 6: the hinted dial. Three passes, all inconclusive, and the third says why
+
+Arm 6 was meant to be the sharp one: one short hinted request, not repeated, so
+the dial is certainly still running when it ends.
+
+**Pass 1** hinted at content the provider held. Every run returned HTTP 200 with
+the index document, so the dial finished **inside** the request and the arm
+showed only what arm 1 already had. It was scored a pass by a verdict that read
+the counter before the request and polled after, which cannot tell a dial that
+completed during the request from one that completed after it. That is the same
+class of harness fault as the three below, caught the same way.
+
+**Pass 2** asked for a reference nothing holds, so the request would fail fast,
+and read the counters **at the instant the response ended**, which is the spec's
+own read protocol. The 404 took six seconds and `connects_dialed` had already
+risen, with the provider already in `/peers`, in all three runs.
+
+**Pass 3** cut the client off after one second, so the request ends while the
+dial should still be in flight. Still 3 of 3 with the dial already counted.
+
+**So the hinted dial completes in under a second here.** Both nodes are on a
+local network and `ConnectHints` resolves the overlay through the address book,
+so it dials a local address. No request can end faster than that, and the arm has
+no window in which to observe a lifetime.
+
+That is **not** the path the before measurement saw being cancelled. At level
+NONE the #369 run recorded the **discovery** dial still running after about 3.5
+seconds. Discovery dials the underlays carried in the provider's record, which
+`Options.Address` filters to public ones, not the address-book entry the hinted
+path uses. Different addresses, different speeds, and only the slow one leaves a
+window.
+
+## Arm 2: the discovery dial. The confound the spec predicted, observed
+
+Arm 2 uses that slower path, so it should have a window. Three runs at level
+NONE, no hint, provider disconnected and confirmed absent before each, counters
+and `/peers` read at the instant the response ended and then sampled every 0.2
+seconds. The fine sampling is what made this readable: at one second the two
+events landed in the same bucket twice out of three and nothing could be ordered.
+
+| Run | Peer at response | Dial at response | Peer first seen | Dial first counted | `connects_already_connected` |
+|---|---|---|---|---|---|
+| 1 | absent | not yet | **1.2 s** | **1.4 s** | 0 |
+| 2 | present | already risen | 0.2 s | never rose again | 0 |
+| 3 | present | already risen | 0.2 s | never rose again | 0 |
+
+**Runs 2 and 3 are inconclusive**: the dial completed inside the request, as in
+arm 6.
+
+**Run 1 is the one run with a clean start, and it fails leg 3.** The provider's
+overlay appeared **before** `connects_dialed` rose, by one sample. And
+`connects_already_connected` stayed at **zero**, so discovery's connect was
+counted as a **dial** even though the node was already connected to that peer by
+then.
+
+That is the confound the spec predicts, observed rather than reasoned about.
+libp2p's already-connected short-circuit is keyed on the remote **address**
+rather than the peer, so a connect over a connection kademlia opened on a
+different underlay falls through, completes, and is counted as a dial.
+**`connects_dialed` does not mean a dial happened**, on this bench, in the one
+run that could have tested it.
+
+The ordered three-leg conjunction was the spec's answer to exactly this, and it
+does not survive kademlia reconnecting first. The spec says the conjunction is
+inference rather than proof; this is the measurement agreeing with it.
+
 ## What would settle the rest
 
-Arms 2 and 6 need no build swap and are the ones that test the lifetime claim
-rather than the lookup. Arm 6 is the sharper of the two, because the hinted
-request is short and is not repeated, so the dial is certainly still running when
-the request ends. Both need the ordered three-leg conjunction the spec sets out,
-which needs `/peers` and `/metrics` polled once a second through the interval.
+**The lifetime claim needs a bench these two nodes cannot provide.** Both arms
+that test it are defeated by the same thing: the requester and the provider hold
+each other in their address books and reconnect on their own, faster than a
+request can end. What would settle it is either
 
-Arm 4 needs the before build, and so needs either a second requester or an
-accepted cost of one restart pair.
+- **a pair of nodes that do not reconnect by themselves**, so that the only thing
+  that can connect them is the code under test; or
+- **the already-connected determination made per peer rather than per address**,
+  in `pkg/p2p/libp2p`, which would make `connects_dialed` mean what its name
+  says. That is outside #369's scope and is worth its own issue.
+
+Sampling at 0.2 seconds rather than one second is necessary either way, and is
+what turned an unreadable result into a readable one here.
+
+Arm 4 needs the before build and therefore the alternating design, which costs
+about half an hour of recovery per run and is affordable. Arms 3 and 5 need no
+build swap.
 
 ---
 
