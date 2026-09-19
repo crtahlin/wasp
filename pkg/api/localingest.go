@@ -109,6 +109,23 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 	// DefaultUploadLevel, not DefaultDownloadLevel. Pinning uses the download
 	// one, and copying pinning here would break address equivalence with
 	// POST /bytes for a reason unrelated to this feature.
+	//
+	// The redundancy this computes cannot help content only this node holds:
+	// dispersed replicas exist to put copies in other neighbourhoods of the
+	// network, and if this node is down its replicas are down with it. It costs
+	// exactly 1 + replicaCounts[level] times the level-NONE chunk count, so 3x
+	// at this default. It is kept anyway, for two reasons that outweigh the
+	// disk, and this comment exists so the question is not reopened a third
+	// time. See issue #375, closed not planned.
+	//
+	// The reference depends on the level, measured: the same bytes give one
+	// reference at this default and a different one at NONE. So ingesting
+	// without redundancy and later pushing the content to the network with it
+	// would publish under a reference other than the one already announced
+	// through /wasp/providers, breaking the link rather than saving anything.
+	// And where that push arrives, the parity and replica chunks already exist,
+	// are already counted against the limit and are already pinned, so nothing
+	// has to be split a second time.
 	rLevel := redundancy.DefaultUploadLevel
 	if headers.RLevel != nil {
 		rLevel = *headers.RLevel
