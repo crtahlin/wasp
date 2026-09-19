@@ -59,7 +59,11 @@ func dirIngestFiles(t *testing.T) []f {
 func TestLocalIngestDirAddressEquivalence(t *testing.T) {
 	t.Parallel()
 
-	for _, level := range []string{"0", "4"} {
+	// Levels are NONE 0, MEDIUM 1, STRONG 2, INSANE 3, PARANOID 4. Level 1 is
+	// here because it is DefaultUploadLevel and so the path that actually
+	// ships; a first version of this test covered 0 and 4 only, which left the
+	// default untested and had 4 down as the default by mistake.
+	for _, level := range []string{"0", "1", "4"} {
 		t.Run("level_"+level, func(t *testing.T) {
 			t.Parallel()
 
