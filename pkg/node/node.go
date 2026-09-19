@@ -1591,10 +1591,13 @@ func NewBee(
 	// api.Providers does not carry Metrics()
 	var providersService *providers.Service
 	if o.ProvidersEnable {
-		providersService, err = newProvidersService(logger, networkID, swarmAddress, nonce, signer, localStore, retrieval, post, batchStore, stamperStore, p2ps, kad, addressbook, stateStore)
-		if err != nil {
-			return nil, fmt.Errorf("content providers: %w", err)
+		// assigned through a local so this does not write NewBee's named
+		// return, which two deferred handlers act on
+		svc, svcErr := newProvidersService(logger, networkID, swarmAddress, nonce, signer, localStore, retrieval, post, batchStore, stamperStore, p2ps, kad, addressbook, stateStore)
+		if svcErr != nil {
+			return nil, fmt.Errorf("content providers: %w", svcErr)
 		}
+		providersService = svc
 		providersService.Start()
 		b.providersCloser = providersService
 		providersAPI = providersService

@@ -301,12 +301,23 @@ namespace `bee`, subsystem `providers`:
 | Field | Exported name | Incremented | Decides |
 |---|---|---|---|
 | `DiscoveriesStarted` | `bee_providers_discoveries_started` | on entry to `Discover`'s goroutine | arm 5's denominator |
+| `HintedConnectsStarted` | `bee_providers_hinted_connects_started` | on entry to `ConnectHints`'s goroutine | arm 6's denominator |
 | `LookupsServedFromCache` | `bee_providers_lookups_served_from_cache` | on the cache-hit return at `:273` | arms 1, 5 |
 | `LookupsCompleted` | `bee_providers_lookups_completed` | **only** on the `:302` return | arms 1, 5 |
-| `LookupsCancelled` | `bee_providers_lookups_cancelled` | on the `ctx.Err()` branch at `:279-282` | arm 1 |
-| `ConnectsDialled` | `bee_providers_connects_dialled` | the bee-level connect procedure ran to completion, handshake and topology included | arms 2, 6, and **not sufficient on its own** |
+| `LookupsCanceled` | `bee_providers_lookups_canceled` | on the `ctx.Err()` branch at `:279-282` | arm 1 |
+| `ConnectsDialed` | `bee_providers_connects_dialed` | the bee-level connect procedure ran to completion, handshake and topology included | arms 2, 6, and **not sufficient on its own** |
 | `ConnectsAlreadyConnected` | `bee_providers_connects_already_connected` | the peer was already connected | arms 2, 6 |
-| `ConnectsFailed` | `bee_providers_connects_failed` | the dial returned an error | reported per run |
+| `ConnectsFailed` | `bee_providers_connects_failed` | the dial returned an error **other than** the run being cut off | reported per run |
+
+**`ConnectsFailed` deliberately excludes cancellation**, which an earlier version
+of this table did not say and the first implementation did not do. Neither loop
+checked its context, so one shutdown or one expiry of the timeout called `Connect`
+for every remaining record and counted up to `lookupCandidates` failures with no
+dial attempted. That would have made this counter unusable for the one thing the
+acceptance list reads it for, telling "the change works and providers are
+undialable" from "the run was cut off". The loops now stop dialing once the
+context is done, and add the found overlays to the preferred set first regardless,
+because that set is worth keeping even when the dialing is cut off.
 
 **`LookupsCompleted` must count only the `:302` return, and an earlier version of
 this spec did not say so.** `Lookup` has three returns with no context error:
@@ -337,7 +348,7 @@ file is in the Files list. The `pkg/providers` call sites cannot tell the branch
 apart from a bare nil, so the distinction has to be made where the branch is.
 
 **The split narrows the confound and does not remove it, and a third version of
-this spec claimed otherwise.** `ConnectsDialled` counts "the
+this spec claimed otherwise.** `ConnectsDialed` counts "the
 `p2p.ErrAlreadyConnected` short-circuit did not fire", and that short-circuit is
 **address-keyed rather than peer-keyed**. `s.peers.isConnected(info.ID,
 remoteAddr)` (`pkg/p2p/libp2p/libp2p.go:1068`) requires both the peer ID in
@@ -346,7 +357,7 @@ remoteAddr)` (`pkg/p2p/libp2p/libp2p.go:1068`) requires both the peer ID in
 **different underlay** therefore does not take that branch: execution falls
 through to `s.host.Connect` at `:1076-1078`, which returns nil when a connection
 to that peer ID is already open, and the closure runs on to `return nil` at
-`pkg/node/providers.go:114`. `ConnectsDialled` rises with no dial.
+`pkg/node/providers.go:114`. `ConnectsDialed` rises with no dial.
 
 That is not a remote possibility on this bench. `Options.Address`
 (`pkg/node/providers.go:76-92`) deliberately filters a record's underlays to
@@ -360,7 +371,7 @@ when the response completes, the counter rising during the interval, and the
 overlay's first appearance at or after the second the counter rose.
 
 **This is inference and not proof, and the spec says so rather than leaving a
-later reader to discover it.** `ConnectsDialled` means "the bee-level connect
+later reader to discover it.** `ConnectsDialed` means "the bee-level connect
 procedure ran to completion". Ordering it against `/peers` makes a dial by
 discovery much the most likely reading of an absent-then-present transition, and
 it does not exclude every alternative: the counter still cannot distinguish a
@@ -571,7 +582,7 @@ Before every run of arms 1, 2, 5 and 6, and **not** between arm 2 and arm 3:
    curl, and the step was written as though it were curl.
 
    **The guard that actually catches a lookup finding nothing is post-hoc, and it
-   is already in acceptance 1**, which requires `ConnectsDialled` or
+   is already in acceptance 1**, which requires `ConnectsDialed` or
    `ConnectsAlreadyConnected` to rise. It is stronger than a pre-flight, which can
    pass and then have the chunk evicted before the run. It is therefore also an
    invalidation clause: a run where `LookupsCompleted` rose while all three
@@ -596,10 +607,21 @@ Read back before every arm: both versions from `/health`, that the requester
 holds none of the content, that `/blocklist` is empty, and `node/providers` set to
 debug, which is `bm9kZS9wcm92aWRlcnM%3D` on `/loggers`, **padded** base64url.
 
+**And make no operator lookup on the requester for the duration of a run.** The
+three `Lookups` counters are incremented in `Lookup`, which is also what
+`GET /wasp/providers/{reference}/lookup` calls
+(`pkg/api/providers.go:353`), so a single operator request during a run moves the
+same counters the arms decide on: arm 5 demands exact totals and arm 1 invalidates
+on `LookupsServedFromCache` rising. The counters are node-wide rather than scoped
+to discovery, which is the same fact this spec already records about the shared
+`s.cache`, and it is a precondition rather than a defect. `GET /chunks` is safe by
+contrast: it calls `withProviders` with a nil key, so `providerGetter` returns the
+bare getter and no discovery is triggered.
+
 **And read the provider's `/addresses` to confirm it advertises a single public
 underlay.** With more than one, a provider record's filtered underlay set can
 differ from the address kademlia dialled, the `ErrAlreadyConnected` branch is
-missed, and `ConnectsDialled` can rise with no dial, which is the confound arms 2
+missed, and `ConnectsDialed` can rise with no dial, which is the confound arms 2
 and 6 are built around. One underlay removes it at the source rather than
 reasoning about it. An arm run against a multi-underlay provider is reported with
 that noted, because the ordering requirement is then the only defence.
@@ -615,7 +637,7 @@ Three fresh 16 MiB uploads at the default level and three at level NONE, same
 bytes per pair, announced and network-held. Requester asks with
 `Swarm-Cache: false` and no hint. Alternating, disconnect before each.
 
-Observables: `LookupsCancelled` and `LookupsCompleted`, plus
+Observables: `LookupsCanceled` and `LookupsCompleted`, plus
 `LookupsServedFromCache` as a guard that no run was answered from cache.
 
 Before, measured: 3 of 3 cancelled at the default level, 0 of 3 at level NONE.
@@ -627,7 +649,7 @@ dial completed after the request ended:
 
 1. the provider's overlay is **absent** from the requester's `/peers` at the
    instant the response completes;
-2. `ConnectsDialled` rises in the interval between that instant and the end of the
+2. `ConnectsDialed` rises in the interval between that instant and the end of the
    poll, with `ConnectsAlreadyConnected` flat in that interval;
 3. the overlay is **present** in `/peers` at the end of the poll.
 
@@ -642,7 +664,7 @@ three legs must be ordered rather than merely all true.** Poll **both `/peers` a
 `/metrics` once a second** through the whole 45-second interval, which is longer
 than `discoverTimeout` so that "never dialled" is distinguishable from "dialled
 just after the poll stopped". Require that the overlay's **first appearance in
-`/peers` is at or after the second in which `ConnectsDialled` rose.**
+`/peers` is at or after the second in which `ConnectsDialed` rose.**
 
 **Without that ordering the conjunction is still satisfiable with no dial by
 discovery**, and a fourth version of this spec missed it. Kademlia re-dials the
@@ -650,7 +672,7 @@ provider from its address book, which the reset protocol below establishes it
 does, and it can do so **inside** the interval rather than before it. Then leg 1
 held, the overlay appeared, `Discover`'s `Connect` ran afterwards, missed the
 `ErrAlreadyConnected` branch on the underlay mismatch described under the
-counters, completed the handshake path and raised `ConnectsDialled`, and leg 3
+counters, completed the handshake path and raised `ConnectsDialed`, and leg 3
 held. All three legs, no dial. Ordering the first appearance against the counter
 is what separates the two cases: if the overlay appears first, kademlia got there
 and discovery only observed it.
@@ -733,7 +755,7 @@ no further request.
 
 Observable: the same three-leg conjunction as arm 2, over the interval between
 that request ending and the end of a 45-second poll: overlay absent from `/peers`
-at the request's end, `ConnectsDialled` rising and `ConnectsAlreadyConnected` flat
+at the request's end, `ConnectsDialed` rising and `ConnectsAlreadyConnected` flat
 in the interval, overlay present at the end of the poll.
 
 This is the sharpest form of the arm, because the request is short and is not
@@ -749,28 +771,28 @@ collection.
 
 Accepted when all of:
 
-1. **(arm 1)** at the default level, in all three runs: `LookupsCancelled` does
+1. **(arm 1)** at the default level, in all three runs: `LookupsCanceled` does
    not rise, `LookupsCompleted` rises by exactly one, `LookupsServedFromCache`
    does not rise, and **the lookup found the provider**, shown by
    **any of the three `Connects` counters** rising, since a lookup that completes
    having found nothing would otherwise satisfy this. All three prove records were
    returned, which is the only thing this leg is for. An earlier version accepted
-   only `ConnectsDialled` or `ConnectsAlreadyConnected`, which made arm 1
+   only `ConnectsDialed` or `ConnectsAlreadyConnected`, which made arm 1
    **unsatisfiable on a bench whose provider is undialable**: the lookup would work
    perfectly, only `ConnectsFailed` would rise, no invalidation clause would fire,
    and the arm would fail. That contradicted this spec's own statement that
    provider dialability is not its to guarantee, and the deliberate demotion of
    that case from a reject to a reported outcome; and at level NONE
-   `LookupsCancelled` stays flat **and `LookupsCompleted` rises by exactly one**,
+   `LookupsCanceled` stays flat **and `LookupsCompleted` rises by exactly one**,
    because a level-NONE run whose download never reached the 64-chunk trigger also
-   leaves `LookupsCancelled` flat and an earlier version of this condition would
+   leaves `LookupsCanceled` flat and an earlier version of this condition would
    have accepted it. Before at level NONE was 0 of 3 cancelled read from the log
    line and after is read from a counter, so that half is not a clean pair either;
 2. **(arm 2)** all three legs hold in all three level-NONE runs: the overlay is
-   absent from `/peers` when the response completes; `ConnectsDialled` rises
+   absent from `/peers` when the response completes; `ConnectsDialed` rises
    during the 45-second interval with `ConnectsAlreadyConnected` flat in it; and
    the overlay's **first appearance** in `/peers` is at or after the second in
-   which `ConnectsDialled` rose. **All three, in that order.** An earlier version
+   which `ConnectsDialed` rose. **All three, in that order.** An earlier version
    of this clause restated only the middle leg, which put the structural fix in the
    arm and left it out of the list that gets applied later by someone who will not
    re-derive the arm;
@@ -807,7 +829,7 @@ Arm 3 is **reported, not required**, and its negative is uninterpretable.
 
 Rejected if any of:
 
-- `LookupsCancelled` still rises at the default level in any run, which means the
+- `LookupsCanceled` still rises at the default level in any run, which means the
   change did not reach the path;
 - `Close` does not return within two seconds in the unit test, which means the
   shutdown guarantee was weakened;
@@ -820,7 +842,7 @@ Rejected if any of:
   `/debug/pprof/goroutine?debug=2` filtered on `pkg/providers` frames. Without
   that observable named, this row could not have been checked.
 
-**Not a reject, but an outcome to report:** `ConnectsDialled` staying flat while
+**Not a reject, but an outcome to report:** `ConnectsDialed` staying flat while
 `ConnectsFailed` rises in every run. That means the dial now runs to completion
 and fails, so the change is correct and the feature still does not work. An
 earlier version made this a reject clause, which contradicted this spec's own
@@ -887,7 +909,16 @@ choosing between releases would want both.
 ## Files and test plan
 
 - `pkg/providers/providers.go`: four lines each in `Discover` and `ConnectHints`;
-  `discoverTimeout` added to the constant block (`:30-54`); counter increments.
+  `discoverTimeout` added to the constant block (`:30-54`) as the default for a
+  per-service `timeout` field; counter increments; a context check before each
+  dial in both loops.
+
+  **The timeout must not be a package variable that a test writes**, which the
+  first implementation made it. A test shortening a package variable races every
+  other parallel test's background goroutines reading it, and that data race
+  failed **every** test in the package under `-race`, including the ones that
+  existed before. A per-service field removes the shared state rather than
+  synchronizing it.
 - `pkg/providers/metrics.go`, new: the seven counters in the house shape
   (`pkg/retrieval/metrics.go:13` and `:162`), subsystem `providers`, namespace
   `bee`.
@@ -901,7 +932,9 @@ choosing between releases would want both.
   block at `:1589-1597` so the registration at `:1629-1636` can reach it, and
   register only when providers are enabled. `providersAPI` will not serve: it is
   typed `api.Providers` (`pkg/api/providers.go:46-53`), which has no `Metrics()`.
-- `pkg/providers/providers_test.go`, `package providers_test`:
+- `pkg/providers/lifetime_test.go`, `package providers_test`, rather than adding
+  to `providers_test.go`: these tests share several stubs and read better beside
+  each other. The shared service helpers stay in `providers_test.go`.
   - `TestDiscoverSurvivesCallerCancel`: a caller context cancelled **before**
     `Discover` is called, with a stub `Connect` recording calls, asserting the
     overlay reaches the set and the connect still happens. Cancelling before the

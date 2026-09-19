@@ -6,17 +6,21 @@ package providers
 
 import (
 	"context"
+	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
 
-// counterValue reads a counter, which prometheus does not expose directly.
-func counterValue(c prometheus.Counter) float64 {
+// counterValue reads a counter, which prometheus does not expose directly. It
+// fails the test rather than returning zero on error, because a silent zero
+// would make every "this counter did not move" assertion vacuous.
+func counterValue(tb testing.TB, c prometheus.Counter) float64 {
+	tb.Helper()
 	var m dto.Metric
 	if err := c.Write(&m); err != nil {
-		return 0
+		tb.Fatalf("reading a counter: %v", err)
 	}
 	return m.GetCounter().GetValue()
 }
@@ -35,36 +39,43 @@ func (s *Service) RunOnce(ctx context.Context) {
 
 var WindowStart = windowStart
 
-// SetDiscoverTimeout shortens the bound on one discovery or hinted-connect
-// run and returns a function restoring it. A test needs this rather than the
-// service's injected clock, because context.WithTimeout reads the real one.
-func SetDiscoverTimeout(d time.Duration) func() {
-	old := discoverTimeout
-	discoverTimeout = d
-	return func() { discoverTimeout = old }
+// SetDiscoverTimeout shortens this service's bound on one discovery or
+// hinted-connect run. A test needs this rather than the injected clock, because
+// context.WithTimeout reads the real one. It is per service rather than a
+// package variable: a package variable written by one parallel test races every
+// other test's background goroutines reading it, which is a data race that
+// failed every test in this package under -race.
+func (s *Service) SetDiscoverTimeout(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.timeout = d
 }
 
-// Counts holds the discovery counters at one moment.
+// Counts holds the discovery counters at one moment. Field names match the
+// metric fields so that a reader does not have to map between them.
 type Counts struct {
-	Dialled          float64
-	AlreadyConnected float64
-	Failed           float64
-	LookupsCompleted float64
-	LookupsFromCache float64
-	LookupsCancelled float64
-	Discoveries      float64
+	ConnectsDialed           float64
+	ConnectsAlreadyConnected float64
+	ConnectsFailed           float64
+	LookupsCompleted         float64
+	LookupsServedFromCache   float64
+	LookupsCanceled          float64
+	DiscoveriesStarted       float64
+	HintedConnectsStarted    float64
 }
 
 // Counters reports the discovery counters, for tests that need to see which
 // outcome a connect or a lookup was recorded as.
-func (s *Service) Counters() Counts {
+func (s *Service) Counters(tb testing.TB) Counts {
+	tb.Helper()
 	return Counts{
-		Dialled:          counterValue(s.metrics.ConnectsDialled),
-		AlreadyConnected: counterValue(s.metrics.ConnectsAlreadyConnected),
-		Failed:           counterValue(s.metrics.ConnectsFailed),
-		LookupsCompleted: counterValue(s.metrics.LookupsCompleted),
-		LookupsFromCache: counterValue(s.metrics.LookupsServedFromCache),
-		LookupsCancelled: counterValue(s.metrics.LookupsCancelled),
-		Discoveries:      counterValue(s.metrics.DiscoveriesStarted),
+		ConnectsDialed:           counterValue(tb, s.metrics.ConnectsDialed),
+		ConnectsAlreadyConnected: counterValue(tb, s.metrics.ConnectsAlreadyConnected),
+		ConnectsFailed:           counterValue(tb, s.metrics.ConnectsFailed),
+		LookupsCompleted:         counterValue(tb, s.metrics.LookupsCompleted),
+		LookupsServedFromCache:   counterValue(tb, s.metrics.LookupsServedFromCache),
+		LookupsCanceled:          counterValue(tb, s.metrics.LookupsCanceled),
+		DiscoveriesStarted:       counterValue(tb, s.metrics.DiscoveriesStarted),
+		HintedConnectsStarted:    counterValue(tb, s.metrics.HintedConnectsStarted),
 	}
 }

@@ -7,59 +7,71 @@ package providers_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/bzz"
-	"github.com/ethersphere/bee/v2/pkg/log"
-	"github.com/ethersphere/bee/v2/pkg/postage"
-	postagemock "github.com/ethersphere/bee/v2/pkg/postage/mock"
 	"github.com/ethersphere/bee/v2/pkg/providers"
-	statestoremock "github.com/ethersphere/bee/v2/pkg/statestore/mock"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 // These cover issue #369: discovery and hinted connection are node-scoped
 // background work and must not die with the request that started them. See
 // docs/experiments/content-providers/discovery-lifetime.md.
+//
+// Two hazards run through all of them, and each has already produced a test
+// that proved nothing:
+//
+//   - The in-memory network takes a context and ignores it, so a stub that also
+//     ignores it makes a cancelled discovery look identical to a live one. Every
+//     stub here returns ctx.Err() first, as a real dial does.
+//   - Close cancels the service context BEFORE waiting on the goroutine, so
+//     closing first can cancel correct work in flight. Each test waits for the
+//     outcome it asserts before closing.
 
-var errNotInAddressBook = errors.New("not in the address book")
+var (
+	errDialRefused      = errors.New("dial refused")
+	errNotInAddressBook = errors.New("not in the address book")
+)
 
-// newServiceResolving is newServiceWith plus a Resolve, which ConnectHints
-// needs and which the shared helper leaves nil.
-func newServiceResolving(
-	t *testing.T,
-	n *network,
-	nd node,
-	c *clock,
-	connect func(context.Context, *bzz.Address) error,
-	resolve func(swarm.Address) (*bzz.Address, error),
-) *providers.Service {
+// blockingConnect returns a stub that reports when it is first called and then
+// waits for its context, which is what a hung dial looks like.
+func blockingConnect() (connect connectFunc, running <-chan struct{}, canceled <-chan error) {
+	var once sync.Once
+	start := make(chan struct{})
+	done := make(chan error, 8)
+	return func(ctx context.Context, _ *bzz.Address) (bool, error) {
+		once.Do(func() { close(start) })
+		<-ctx.Done()
+		done <- ctx.Err()
+		return false, ctx.Err()
+	}, start, done
+}
+
+// recordingConnect returns a stub that records the overlays it dials and
+// respects the context.
+func recordingConnect() (connectFunc, <-chan swarm.Address) {
+	dialed := make(chan swarm.Address, 8)
+	return func(ctx context.Context, addr *bzz.Address) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		dialed <- addr.Overlay
+		return false, nil
+	}, dialed
+}
+
+func announceOne(t *testing.T, pa *providers.Service) []byte {
 	t.Helper()
-
-	svc, err := providers.New(providers.Options{
-		Logger:    log.Noop,
-		NetworkID: networkID,
-		Overlay:   nd.addr.Overlay,
-		Signer:    nd.signer,
-		Getter:    n,
-		Fetcher:   n,
-		Uploader:  n.session,
-		Stamper: func([]byte) (postage.Stamper, func() error, error) {
-			return postagemock.NewStamper(), func() error { return nil }, nil
-		},
-		Address: func() (*bzz.Address, error) { return nd.addr, nil },
-		Connect: connect,
-		Resolve: resolve,
-		Store:   statestoremock.NewStateStore(),
-	})
-	if err != nil {
+	k := swarm.RandAddress(t).Bytes()
+	if err := pa.Announce(context.Background(), k, batch); err != nil {
 		t.Fatal(err)
 	}
-	svc.SetNow(c.now)
-	t.Cleanup(func() { _ = svc.Close() })
-	return svc
+	return k
 }
+
+func nilConnect(context.Context, *bzz.Address) (bool, error) { return false, nil }
 
 // TestDiscoverSurvivesCallerCancel is the defect itself: before the fix the
 // goroutine derived from the caller, so a context already cancelled meant the
@@ -71,24 +83,10 @@ func TestDiscoverSurvivesCallerCancel(t *testing.T) {
 	n, c := newNetwork(), &clock{t: midWindow(1000)}
 	a, b := newNode(t, 1), newNode(t, 1)
 
-	// the stub respects the context, as a real dial does: without that the
-	// test cannot see the defect at all, since the in-memory network ignores
-	// cancellation and a cancelled discovery would still appear to connect
-	dialed := make(chan swarm.Address, 4)
-	connect := func(ctx context.Context, addr *bzz.Address) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		dialed <- addr.Overlay
-		return nil
-	}
-
-	pa := newService(t, n, a, c, connect)
+	connect, dialed := recordingConnect()
+	pa := newService(t, n, a, c, nilConnect)
 	reader := newService(t, n, b, c, connect)
-	k := swarm.RandAddress(t).Bytes()
-	if err := pa.Announce(context.Background(), k, batch); err != nil {
-		t.Fatal(err)
-	}
+	k := announceOne(t, pa)
 
 	dead, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -96,10 +94,6 @@ func TestDiscoverSurvivesCallerCancel(t *testing.T) {
 	found := &adder{}
 	reader.Discover(dead, k, found)
 
-	// Wait for the dial rather than relying on Close to sequence it: Close
-	// cancels the service context before waiting on the goroutine, so calling
-	// it first can cancel the work in flight and fail a correct
-	// implementation.
 	select {
 	case got := <-dialed:
 		if !got.Equal(a.addr.Overlay) {
@@ -124,15 +118,7 @@ func TestConnectHintsSurvivesCallerCancel(t *testing.T) {
 	n, c := newNetwork(), &clock{t: midWindow(1000)}
 	a, b := newNode(t, 1), newNode(t, 1)
 
-	// as above, the stub respects the context
-	dialed := make(chan swarm.Address, 4)
-	connect := func(ctx context.Context, addr *bzz.Address) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		dialed <- addr.Overlay
-		return nil
-	}
+	connect, dialed := recordingConnect()
 	resolve := func(o swarm.Address) (*bzz.Address, error) {
 		if o.Equal(a.addr.Overlay) {
 			return a.addr, nil
@@ -147,7 +133,6 @@ func TestConnectHintsSurvivesCallerCancel(t *testing.T) {
 
 	reader.ConnectHints(dead, []swarm.Address{a.addr.Overlay})
 
-	// as above, wait for the dial before closing
 	select {
 	case got := <-dialed:
 		if !got.Equal(a.addr.Overlay) {
@@ -163,45 +148,56 @@ func TestConnectHintsSurvivesCallerCancel(t *testing.T) {
 // TestDiscoverStopsOnClose pins the guarantee the fix must not weaken: the
 // service context still ends the work. The stub signals that the goroutine is
 // running before Close is called, because goBackground checks the closed flag
-// and a Close racing the call would make the goroutine never start and the
-// test pass having proved nothing.
+// under a lock and a Close racing the call would make the goroutine never start
+// and the test pass having proved nothing.
+//
+// The timeout is left at its default deliberately. Shortened, the timeout rather
+// than Close would cancel the blocked dial, and the test would pass with the
+// shutdown path deleted.
 func TestDiscoverStopsOnClose(t *testing.T) {
 	t.Parallel()
 
 	n, c := newNetwork(), &clock{t: midWindow(1000)}
 	a, b := newNode(t, 1), newNode(t, 1)
 
-	running := make(chan struct{})
-	sawCancel := make(chan error, 1)
-	var once bool
-	connect := func(ctx context.Context, _ *bzz.Address) error {
-		if !once {
-			once = true
-			close(running)
-		}
-		<-ctx.Done()
-		sawCancel <- ctx.Err()
-		return ctx.Err()
-	}
-
-	pa := newService(t, n, a, c, func(context.Context, *bzz.Address) error { return nil })
+	connect, running, canceled := blockingConnect()
+	pa := newService(t, n, a, c, nilConnect)
 	reader := newService(t, n, b, c, connect)
-	k := swarm.RandAddress(t).Bytes()
-	if err := pa.Announce(context.Background(), k, batch); err != nil {
-		t.Fatal(err)
-	}
+	k := announceOne(t, pa)
 
 	reader.Discover(context.Background(), k, &adder{})
+	assertStopsOnClose(t, reader, running, canceled)
+}
+
+// TestConnectHintsStopsOnClose is the same for the hinted path, which runs on
+// every request carrying the header and so is the one whose goroutines
+// accumulate if shutdown stops reaching them.
+func TestConnectHintsStopsOnClose(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+
+	connect, running, canceled := blockingConnect()
+	resolve := func(swarm.Address) (*bzz.Address, error) { return a.addr, nil }
+	reader := newServiceResolving(t, n, b, c, connect, resolve)
+
+	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+	assertStopsOnClose(t, reader, running, canceled)
+}
+
+func assertStopsOnClose(t *testing.T, svc *providers.Service, running <-chan struct{}, canceled <-chan error) {
+	t.Helper()
 
 	select {
 	case <-running:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the discovery goroutine never reached the connect")
+		t.Fatal("the background goroutine never reached the connect")
 	}
 
 	done := make(chan struct{})
 	go func() {
-		_ = reader.Close()
+		_ = svc.Close()
 		close(done)
 	}()
 
@@ -212,45 +208,63 @@ func TestDiscoverStopsOnClose(t *testing.T) {
 	}
 
 	select {
-	case err := <-sawCancel:
-		if err == nil {
-			t.Fatal("the blocked connect saw no cancellation")
+	case err := <-canceled:
+		// the cause must be Close, not the run's own deadline: asserting only
+		// that it is non-nil lets a shortened timeout satisfy this test with
+		// the shutdown path removed
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the blocked connect saw %v, want context.Canceled", err)
 		}
 	default:
 		t.Fatal("the blocked connect did not return")
 	}
 }
 
-// TestDiscoverBoundedByTimeout is the other half of that: a connect that never
-// returns is abandoned rather than held for the life of the node.
+// TestDiscoverBoundedByTimeout is the other half: a connect that never returns
+// is abandoned rather than held for the life of the node.
 func TestDiscoverBoundedByTimeout(t *testing.T) {
 	t.Parallel()
-
-	defer providers.SetDiscoverTimeout(200 * time.Millisecond)()
 
 	n, c := newNetwork(), &clock{t: midWindow(1000)}
 	a, b := newNode(t, 1), newNode(t, 1)
 
-	sawCancel := make(chan error, 1)
-	connect := func(ctx context.Context, _ *bzz.Address) error {
-		<-ctx.Done()
-		sawCancel <- ctx.Err()
-		return ctx.Err()
-	}
-
-	pa := newService(t, n, a, c, func(context.Context, *bzz.Address) error { return nil })
+	connect, _, canceled := blockingConnect()
+	pa := newService(t, n, a, c, nilConnect)
 	reader := newService(t, n, b, c, connect)
-	k := swarm.RandAddress(t).Bytes()
-	if err := pa.Announce(context.Background(), k, batch); err != nil {
-		t.Fatal(err)
-	}
+	reader.SetDiscoverTimeout(200 * time.Millisecond)
+	k := announceOne(t, pa)
 
 	reader.Discover(context.Background(), k, &adder{})
+	assertBoundedByTimeout(t, canceled)
+}
+
+// TestConnectHintsBoundedByTimeout matters more than the Discover one: the
+// hinted path fires on every request carrying the header, with no lookup cache
+// in front of it, so an unbounded run there accumulates goroutines fastest.
+// Without this test the hinted path could be left unbounded and the whole suite
+// would still pass.
+func TestConnectHintsBoundedByTimeout(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+
+	connect, _, canceled := blockingConnect()
+	resolve := func(swarm.Address) (*bzz.Address, error) { return a.addr, nil }
+	reader := newServiceResolving(t, n, b, c, connect, resolve)
+	reader.SetDiscoverTimeout(200 * time.Millisecond)
+
+	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+	assertBoundedByTimeout(t, canceled)
+}
+
+func assertBoundedByTimeout(t *testing.T, canceled <-chan error) {
+	t.Helper()
 
 	select {
-	case err := <-sawCancel:
-		if err == nil {
-			t.Fatal("the connect was not cancelled by the timeout")
+	case err := <-canceled:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the connect saw %v, want context.DeadlineExceeded", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the timeout did not abandon a connect that never returns")
@@ -269,90 +283,149 @@ func TestLookupCountersDistinguishCacheFromWork(t *testing.T) {
 
 	pa := newService(t, n, a, c, nil)
 	reader := newService(t, n, b, c, nil)
-	k := swarm.RandAddress(t).Bytes()
-	if err := pa.Announce(context.Background(), k, batch); err != nil {
-		t.Fatal(err)
-	}
+	k := announceOne(t, pa)
 
 	// a key that is not a plain reference must touch neither counter
 	if _, err := reader.Lookup(context.Background(), []byte{1, 2, 3}); err != nil {
 		t.Fatal(err)
 	}
-	c1 := reader.Counters()
-	if c1.LookupsCompleted != 0 || c1.LookupsFromCache != 0 {
+	got := reader.Counters(t)
+	if got.LookupsCompleted != 0 || got.LookupsServedFromCache != 0 {
 		t.Fatalf("a short key moved the counters: completed=%v cached=%v",
-			c1.LookupsCompleted, c1.LookupsFromCache)
+			got.LookupsCompleted, got.LookupsServedFromCache)
 	}
 
 	if _, err := reader.Lookup(context.Background(), k); err != nil {
 		t.Fatal(err)
 	}
-	c2 := reader.Counters()
-	if c2.LookupsCompleted != 1 || c2.LookupsFromCache != 0 {
+	got = reader.Counters(t)
+	if got.LookupsCompleted != 1 || got.LookupsServedFromCache != 0 {
 		t.Fatalf("after a real lookup: completed=%v cached=%v, want 1 and 0",
-			c2.LookupsCompleted, c2.LookupsFromCache)
+			got.LookupsCompleted, got.LookupsServedFromCache)
 	}
 
 	if _, err := reader.Lookup(context.Background(), k); err != nil {
 		t.Fatal(err)
 	}
-	c3 := reader.Counters()
-	if c3.LookupsCompleted != 1 || c3.LookupsFromCache != 1 {
+	got = reader.Counters(t)
+	if got.LookupsCompleted != 1 || got.LookupsServedFromCache != 1 {
 		t.Fatalf("after a cache hit: completed=%v cached=%v, want 1 and 1",
-			c3.LookupsCompleted, c3.LookupsFromCache)
+			got.LookupsCompleted, got.LookupsServedFromCache)
+	}
+	if got.LookupsCanceled != 0 {
+		t.Fatalf("a lookup was counted as canceled: %v", got.LookupsCanceled)
+	}
+}
+
+// TestLookupCanceledCounted covers arm 1's primary observable, which drives its
+// first reject clause. Without it the counter could be wired to nothing and the
+// arm would read flat and pass.
+func TestLookupCanceledCounted(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+
+	pa := newService(t, n, a, c, nil)
+	reader := newService(t, n, b, c, nil)
+	k := announceOne(t, pa)
+
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Lookup is called directly, so the caller's cancellation is not detached
+	// the way Discover detaches it
+	if _, err := reader.Lookup(dead, k); err == nil {
+		t.Fatal("a lookup with a cancelled context returned no error")
+	}
+
+	got := reader.Counters(t)
+	if got.LookupsCanceled != 1 {
+		t.Fatalf("canceled=%v, want 1", got.LookupsCanceled)
+	}
+	if got.LookupsCompleted != 0 {
+		t.Fatalf("a canceled lookup was also counted as completed: %v", got.LookupsCompleted)
+	}
+}
+
+// TestStartedCountersAreTheDenominators covers the two counters that separate
+// "the work ran and found nothing" from "the work never ran", which is the only
+// thing the measurement uses them for.
+func TestStartedCountersAreTheDenominators(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+
+	connect, dialed := recordingConnect()
+	resolve := func(swarm.Address) (*bzz.Address, error) { return a.addr, nil }
+	pa := newService(t, n, a, c, nilConnect)
+	reader := newServiceResolving(t, n, b, c, connect, resolve)
+	k := announceOne(t, pa)
+
+	reader.Discover(context.Background(), k, &adder{})
+	<-dialed
+	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+	<-dialed
+	_ = reader.Close()
+
+	got := reader.Counters(t)
+	if got.DiscoveriesStarted != 1 {
+		t.Fatalf("discoveries=%v, want 1", got.DiscoveriesStarted)
+	}
+	if got.HintedConnectsStarted != 1 {
+		t.Fatalf("hinted connects=%v, want 1", got.HintedConnectsStarted)
 	}
 }
 
 // TestConnectCountersDistinguishDialFromAlreadyConnected is what stops the
-// measurement's dial arms passing without a dial. Options.Connect reports an
-// already-connected peer with a sentinel rather than a bare nil, because only
-// it can tell the two apart.
+// measurement's dial arms passing without a dial. The cancellation cases are
+// what stop a shutdown showing up as providers that cannot be reached: without
+// them one Close could add a failure per record.
 func TestConnectCountersDistinguishDialFromAlreadyConnected(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		name                     string
+		already                  bool
 		err                      error
-		dialled, already, failed float64
+		dialed, alreadyC, failed float64
 	}{
-		{"a dial", nil, 1, 0, 0},
-		{"already connected", providers.ErrAlreadyConnected, 0, 1, 0},
-		{"a failure", errNotInAddressBook, 0, 0, 1},
+		{"a dial", false, nil, 1, 0, 0},
+		{"already connected", true, nil, 0, 1, 0},
+		{"a failure", false, errDialRefused, 0, 0, 1},
+		{"canceled", false, context.Canceled, 0, 0, 0},
+		{"timed out", false, context.DeadlineExceeded, 0, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			n, c := newNetwork(), &clock{t: midWindow(1000)}
+			n, clk := newNetwork(), &clock{t: midWindow(1000)}
 			a, b := newNode(t, 1), newNode(t, 1)
 
-			pa := newService(t, n, a, c, nil)
-			reader := newService(t, n, b, c, func(context.Context, *bzz.Address) error {
-				return tc.err
+			called := make(chan struct{}, 4)
+			pa := newService(t, n, a, clk, nilConnect)
+			reader := newService(t, n, b, clk, func(context.Context, *bzz.Address) (bool, error) {
+				called <- struct{}{}
+				return tc.already, tc.err
 			})
-			k := swarm.RandAddress(t).Bytes()
-			if err := pa.Announce(context.Background(), k, batch); err != nil {
-				t.Fatal(err)
-			}
+			k := announceOne(t, pa)
 
-			// wait for the discovery to record an outcome before closing,
-			// for the reason given in TestDiscoverSurvivesCallerCancel
-			done := &adder{}
-			reader.Discover(context.Background(), k, done)
-			deadline := time.Now().Add(10 * time.Second)
-			for {
-				c := reader.Counters()
-				if c.Dialled+c.AlreadyConnected+c.Failed > 0 || time.Now().After(deadline) {
-					break
-				}
-				time.Sleep(5 * time.Millisecond)
+			reader.Discover(context.Background(), k, &adder{})
+			select {
+			case <-called:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the discovery never reached the connect")
 			}
 			_ = reader.Close()
 
-			got := reader.Counters()
-			if got.Dialled != tc.dialled || got.AlreadyConnected != tc.already || got.Failed != tc.failed {
-				t.Fatalf("dialled=%v already=%v failed=%v, want %v %v %v",
-					got.Dialled, got.AlreadyConnected, got.Failed,
-					tc.dialled, tc.already, tc.failed)
+			got := reader.Counters(t)
+			if got.ConnectsDialed != tc.dialed ||
+				got.ConnectsAlreadyConnected != tc.alreadyC ||
+				got.ConnectsFailed != tc.failed {
+				t.Fatalf("dialed=%v already=%v failed=%v, want %v %v %v",
+					got.ConnectsDialed, got.ConnectsAlreadyConnected, got.ConnectsFailed,
+					tc.dialed, tc.alreadyC, tc.failed)
 			}
 		})
 	}

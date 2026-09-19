@@ -125,15 +125,33 @@ func (a *adder) list() []swarm.Address {
 
 var batch = bytes.Repeat([]byte{1}, 32)
 
-func newService(t *testing.T, n *network, nd node, c *clock, connect func(context.Context, *bzz.Address) error) *providers.Service {
+// connectFunc matches Options.Connect: the bool reports that the node was
+// already connected, so no dial was needed.
+type connectFunc func(context.Context, *bzz.Address) (bool, error)
+
+// resolveFunc matches Options.Resolve.
+type resolveFunc func(swarm.Address) (*bzz.Address, error)
+
+func newService(t *testing.T, n *network, nd node, c *clock, connect connectFunc) *providers.Service {
 	t.Helper()
 	return newServiceWith(t, n, n, nd, c, connect)
+}
+
+// newServiceResolving is newService plus a Resolve, which ConnectHints needs.
+func newServiceResolving(t *testing.T, n *network, nd node, c *clock, connect connectFunc, resolve resolveFunc) *providers.Service {
+	t.Helper()
+	return newServiceOpts(t, n, n, nd, c, connect, resolve)
 }
 
 // newServiceWith builds a service whose lookups read local, which stands for
 // the node's own store in front of the network, and whose read-backs and
 // uploads use n, the network itself.
-func newServiceWith(t *testing.T, local, n *network, nd node, c *clock, connect func(context.Context, *bzz.Address) error) *providers.Service {
+func newServiceWith(t *testing.T, local, n *network, nd node, c *clock, connect connectFunc) *providers.Service {
+	t.Helper()
+	return newServiceOpts(t, local, n, nd, c, connect, nil)
+}
+
+func newServiceOpts(t *testing.T, local, n *network, nd node, c *clock, connect connectFunc, resolve resolveFunc) *providers.Service {
 	t.Helper()
 
 	svc, err := providers.New(providers.Options{
@@ -149,6 +167,7 @@ func newServiceWith(t *testing.T, local, n *network, nd node, c *clock, connect 
 		},
 		Address: func() (*bzz.Address, error) { return nd.addr, nil },
 		Connect: connect,
+		Resolve: resolve,
 		Store:   statestoremock.NewStateStore(),
 	})
 	if err != nil {
@@ -508,13 +527,25 @@ func TestDiscover(t *testing.T) {
 	n, c := newNetwork(), &clock{t: midWindow(1000)}
 	a, b := newNode(t, 1), newNode(t, 1)
 
+	// The stub respects the context, and the test waits for the dial before
+	// closing. Neither was true before: Close cancels the service context
+	// before waiting on the goroutine, so with a stub that ignored the context
+	// this test recorded a dial that a real implementation would not have made.
 	var mu sync.Mutex
 	var dialed []swarm.Address
-	connect := func(_ context.Context, addr *bzz.Address) error {
+	first := make(chan struct{}, 1)
+	connect := func(ctx context.Context, addr *bzz.Address) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		dialed = append(dialed, addr.Overlay)
-		return nil
+		select {
+		case first <- struct{}{}:
+		default:
+		}
+		return false, nil
 	}
 
 	pa := newService(t, n, a, c, connect)
@@ -529,7 +560,12 @@ func TestDiscover(t *testing.T) {
 	self := &adder{}
 	pa.Discover(context.Background(), k, self)
 
-	// Close waits for the discoveries to finish
+	select {
+	case <-first:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the discovery never dialed the provider")
+	}
+
 	_ = reader.Close()
 	_ = pa.Close()
 
