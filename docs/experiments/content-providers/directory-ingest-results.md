@@ -6,8 +6,12 @@ Issue: [#340](https://github.com/crtahlin/wasp/issues/340). Spec:
 merged as [`d32cb541`](https://github.com/crtahlin/wasp/commit/d32cb541).
 
 Measured 2026-09-19 on the two-node bench, `bench-1` as the provider and
-`bench-2` as the requester. Harness `cp290/t19.sh`, rows in
-`cp290/t19-directory-ingest.txt`, both outside this repository per rule 10.
+`bench-2` as the requester. **Arms 1 to 6 were run by hand**, with every command
+and its output recorded in `cp290/t19-directory-ingest.txt`; there is no
+`t19.sh`, and an earlier version of this line claimed one. The arm 5 and arm 6
+re-runs were scripted, as `cp290/t19b.sh` and `cp290/t19c.sh` with rows in
+`t19b-arm6-rerun.txt` and `t19c-arm56-drift.txt`. All of those live outside this
+repository per rule 10.
 
 **Terms.** A **collection** is a directory stored with the manifest that maps a
 path to the file at that path. **The reported count** is the `chunks` field of
@@ -20,33 +24,62 @@ node doing nothing.
 
 **Five of the six arms pass. The sixth, arm 4b, does not meet its condition.**
 
+That count needs two qualifications before it is quoted, because two of the five
+did not pass as first run. **Arm 4 passes only after its precondition was
+corrected**, having returned the opposite result against the spec as merged. And
+**arm 5 passes only under a rule this change rewrites**, twice: the merged rule
+compared against the wrong counter, and the first correction then demanded an
+exactness the node's own drift does not allow. Neither is a code defect, and both
+are set out below, but "five of six" reads like five clean passes and they are
+not that.
+
 What passes: a directory ingested with no postage produces the same manifest
 root as a stamped upload of the same archive, the holder serves every path in it,
-a node with no hint cannot reach it, the reported chunk count is exact, and an
-over-limit archive is refused without residue.
+a node with no hint cannot reach it, the reported chunk count is exact once
+background drift is subtracted, and an over-limit archive is refused without
+residue.
 
 What does not: arm 4b asks that a node naming the holder be served every inner
 path with a matching hash **in all three runs**. It was not. The one multi-chunk
 file in the collection returned HTTP 200 with an **empty body** in 2 of 13
-attempts. Every single-chunk file in the same collection, through the same
-manifest over the same path, was correct 12 of 12.
+attempts. Every single-chunk **inner** path was correct 12 of 12, and **inside
+the gated pass alone, where nothing else differs at all, three single-chunk paths
+were correct 9 of 9 while the multi-chunk file was 1 of 3.**
 
 That failure is the signature
 [#313](https://github.com/crtahlin/wasp/issues/313) reports and
 [#343](https://github.com/crtahlin/wasp/issues/343) traced, on a path both issues
 leave open: a chunk refused credit is dropped from that chunk's preferred path,
 falls to peers that never held it, and `joiner.ReadAt` is all or nothing, so one
-lost chunk loses the whole read unit. Nothing measured here puts it in #340's
-code, and nothing measured here proves the attribution either. It is stated as
-consistent with those issues, not as established. The consequence for this
-experiment is that **hosting a multi-chunk file for a remote reader is not yet
-shown to work reliably**, whatever the manifest does correctly.
+lost chunk loses the whole read unit.
 
-**Two of the spec's own rules were also found wrong**, and both were found only by
-running it: one would have rejected correct code, and one made an arm test
-something other than what it claimed. They have their own section below, as do
-the two faults found in the measuring script, one of which had already reported
-arm 4b as a pass.
+**Two facts put the failure downstream of everything this change added**, and
+both are stronger than the hit-rate contrast:
+
+- **A 200 with an empty body means the response headers were already written.**
+  So the manifest had been resolved and the path lookup had succeeded before
+  anything went wrong. A manifest fault gives 404 **before** headers, which is
+  what the no-hint arm returns. Whatever failed, failed after the manifest did
+  its work.
+- **The holder served a ten-chunk file correctly.** `/img/pixel.bin` in arms 2
+  and 3 is 40,960 bytes and was returned with a matching hash. So multi-chunk
+  resolution through a manifest works; chunk count alone is not the variable. The
+  variable is chunk count **over the remote hinted path**.
+
+Nothing measured here puts the failure in #340's code, and nothing measured here
+proves the attribution either. It is stated as consistent with those issues, not
+as established. The consequence for this experiment is that **hosting a
+multi-chunk file for a remote reader is not yet shown to work reliably**,
+whatever the manifest does correctly.
+
+**Four of the spec's own rules were found wrong**, every one of them only by
+running it, and **two of the four are defects in the corrections made here**
+rather than in the spec as merged. One rule would have rejected correct code; one
+made an arm test something other than what it claimed; one measured nothing at
+all; and one, written to fix the first, was stricter than the node's own
+background drift allows. They have their own section below, as do the two faults
+found in the measuring script, one of which had already reported arm 4b as a
+pass.
 
 ## The provider was running the wrong build, and the first arm failed against it
 
@@ -74,8 +107,9 @@ provider-side feature.
 before anything ran, which is what arms 5 and 6 need and what
 [local-ingest-results.md](local-ingest-results.md) records an earlier pass
 failing to have. Local ingest usage was 119,063 of 131,072, so **12,009 chunks
-of headroom**, and that figure turns out to matter for arm 6. The provider grant
-was zero on both settings.
+of headroom** at the start. By the time arm 6 ran, arms 1 and 5 had consumed 781
+of that and the headroom was **11,228**, which is the figure that matters there
+and the one arm 6 quotes. The provider grant was zero on both settings.
 
 ## What was measured
 
@@ -111,8 +145,9 @@ resolving through the index document.
 
 ### 4. A second node with no hint
 
-404 for the root and for an inner path, in all three runs, at 5.64, 1.80 and
-1.80 seconds.
+404 for the root and for an inner path, in all three runs. Times, root and inner
+path per run: 5.64 and 7.52, 1.80 and 1.80, 1.80 and 1.80 seconds. The first run
+of any sequence is slower, which is consistent across every arm here.
 
 **This arm failed on the first attempt for a reason that is the spec's, not the
 node's**, and that is the first of the two spec defects below.
@@ -137,6 +172,11 @@ harness fault recorded further down.
 The two `/blob.bin` failures were **HTTP 200 with an empty body**: zero bytes
 returned for a 16,384-byte file, and the harness first scored them as successes.
 
+**Per-path times were not recorded for either path sequence**, which is a gap in
+the rows rather than a result. The spec asks these arms for a spread over elapsed
+time, and only the standalone runs below and the root-only runs carry it. Any
+repeat of this arm should record the time of every fetch.
+
 Six further runs of `/blob.bin` on its own, with the overdraft counter read
 either side of each, were all correct:
 
@@ -152,17 +192,30 @@ either side of each, were all correct:
 Two of those six took credit refusals and still returned the whole file, so a
 refusal is not sufficient on its own to lose the content.
 
-**Tally for the multi-chunk file: 11 correct of 13.** Both failures fell in one
-sequence, as the fourth request of four in rapid succession. But the first pass
-fetched it in that same position three times and got it right three times, so
-**"fourth in succession" is not the cause and the cause is not established.**
-What separates the successful conditions from the failing one is at most timing,
-and the evidence does not distinguish timing from chance at this sample size.
+**Tally for the multi-chunk file: 11 correct of 13.** The thirteen are the three
+of the first pass, the three of the gated pass, the six standalone runs above,
+and **one further standalone fetch made while diagnosing the first harness
+fault**, which is the one not in any table here; it was correct. Ten of the
+twelve tabulated attempts succeeded, and the diagnostic fetch is the eleventh
+success.
 
-**The bare root failed twice in thirteen attempts across every pass**, both times
-at first contact with the provider and both times in a sequence with no
-connectivity gate. The earlier of the two ran with the provider read back as
-**not connected**.
+Both failures fell in one sequence, as the fourth request of four in rapid
+succession. **Position is not the cause, and the cleanest evidence is inside the
+gated pass itself:** run 3 fetched the file in that same fourth position and
+returned all 16,384 bytes with a matching hash. The first pass did the same three
+times. What separates the successful conditions from the failing one is at most
+timing, and the evidence does not distinguish timing from chance at this sample
+size.
+
+**The bare root failed once in the twelve attempts tabulated above**, in run 3 of
+the first pass, at first contact and in a sequence with no connectivity gate. A
+**second** root failure occurred earlier still, in the pass whose rows were set
+aside because of the first harness fault, and that one ran with the provider read
+back as **not connected**. It is mentioned because it is the case that carries
+the connectivity evidence, and it is kept out of the count because rows from a
+discarded pass cannot be counted when they help and ignored when they do not. So
+the defensible figure is **one failure in twelve**, with a second in a pass that
+is not being counted.
 
 **Those two failures are a different mode and are not pooled with the empty
 bodies.** The root failed with **404**, which is the path not resolving. The
@@ -182,10 +235,10 @@ selection.
 spec's Accept condition 4 wants every inner path served correctly in all three
 runs, and its catch-all clause rejects anything the accept conditions do not
 cover. Two empty bodies in a qualifying, gated pass is a reject under both. The
-single-chunk paths passing 12 of 12 does not rescue it, because a website is
-made of files of arbitrary size and the only multi-chunk file in the fixture is
-the one that failed. Splitting the difference here would be the same mistake as
-scoring on the status code.
+single-chunk inner paths passing 12 of 12 does not rescue it, because a website
+is made of files of arbitrary size and the only multi-chunk file in the fixture
+is the one that failed. Reporting it as a pass with a caveat would be the same
+mistake as scoring on the status code.
 
 ### 5. Does the count cover the manifest
 
@@ -195,71 +248,200 @@ scoring on the status code.
 | 2 | 0 | 206 | 203 | 0 | **206** |
 | 3 | 0 | 206 | 203 | 0 | **206** |
 
-**The reported count is exact against `ReferenceCount`, in all three runs.** It
-is short by 3 against `TotalChunks`, and that shortfall is not a miscount. Two
-diagnostics locate it:
+A second pass was added after review, on 303-chunk collections, with the control
+window matched in length to the ingest and the ingest itself under 0.12 seconds:
+
+| Run | Control drift | Reported | `TotalChunks` rise | `ReferenceCount` rise |
+|---|---|---|---|---|
+| 1 | 0 | 303 | 300 | **303** |
+| 2 | 0 | 303 | 300 | **303** |
+| 3 | 0 | 303 | 300 | **303** |
+
+**The reported count equals the `ReferenceCount` rise exactly in all six runs**,
+and is short against `TotalChunks` by exactly 3 in all six. That shortfall is not
+a miscount. Two diagnostics locate it:
 
 | Kind | Reported | `TotalChunks` rise | `ReferenceCount` rise | Shortfall |
 |---|---|---|---|---|
 | blob, 225,280 bytes | 65 | 65 | 65 | **0** |
 | collection, one small file and an index | 26 | 23 | 26 | **3** |
 
-So the shortfall is a **constant 3 for a collection and 0 for a blob**, the same
-3 whether the collection is 26 chunks or 206. Those are manifest chunks the node
-already held, and `TotalChunks` cannot rise for a chunk that is already stored.
+So the shortfall is **3 on every collection measured directly**, at 26, 206 and
+303 chunks, and **0 for a blob**. Those are manifest chunks the node already
+held, and `TotalChunks` cannot rise for a chunk that is already stored.
 `SharedSlots` rising by 3 on the first such ingest and by 0 afterwards is those
 slots going from one reference to two, and then to three.
 
-That makes the spec's own rule for this arm wrong, which is the second defect
-below.
+**It is not a constant, and an earlier version of this document said it was.**
+Arm 6 run 1 of the first pass ingested a collection of about 5,841 chunks, and
+its shortfall works out at **9**. That figure is **derived and was never
+recorded**: the run's reported count was not written down, so it is reconstructed
+from the headroom before it (11,228, giving held = 119,844) and the held figure
+the later refusals report (125,685), against a `TotalChunks` rise of 5,832. A
+number derived from rows that were not collected for the purpose is weaker than
+six direct measurements, and it is reported here rather than relied on. What can
+be said is that **3 is what was measured between 26 and 303 chunks and must not
+be projected past that**: a deeper manifest trie shares more nodes with every
+other manifest, so the shortfall is a function of manifest shape. The spec now
+records it per run instead of predicting it, and the invalidation clause that
+depended on a constant has been removed.
+
+### The rule must allow drift, which corrects the correction
+
+A seventh run, the first attempt at the second pass, measured a 303-chunk
+collection whose ingest took about 25 seconds against a 20-second control window
+that read 0. It gave reported 303, `TotalChunks` **306** and `ReferenceCount`
+**309**.
+
+`TotalChunks` cannot rise by more than the reported count on its own, so the
+excess has to be background drift. Solving the three readings together, with N
+the archive's distinct addresses, S the ones the node already held and d the
+drift:
+
+```
+reported            = N         = 303
+TotalChunks rise    = N - S + d = 306
+ReferenceCount rise = N + d     = 309
+```
+
+gives **d = 6 and S = 3**, and S = 3 is what every other row in this section
+shows. So `ReferenceCount` equality holds once drift is subtracted. The three
+runs above hold **exactly** because their ingests take 0.11 seconds, which leaves
+no room for drift, not because the node never drifts.
+
+That matters for the spec. The merged rule allowed the drift the paired control
+window shows; the first correction in this change tightened it to *exactly*, and
+that tightening would reject a correct node on a busy one. It is corrected again,
+back to equality within the observed drift, with the control window read on
+`ReferenceCount` rather than on `TotalChunks`, since those are different counters
+and only one of them decides.
 
 ### 6. An over-limit collection
 
-Three qualifying runs, all 507, all leaving `TotalChunks` exactly flat.
+**The first pass at this arm measured nothing, and a review caught it.** It
+reported "507 leaving `TotalChunks` exactly flat" as evidence of no residue. But
+its run 1 ingested the 20 MB archive **successfully**, and the runs after it
+re-posted an archive whose chunks the node therefore already held. `TotalChunks`
+cannot rise for a chunk already stored, so it reads flat on a leak exactly as it
+does on a clean refusal. The observable had no power at all. Those rows are kept
+at the end of this section for the record; they are not the result.
 
-| Run | Control drift | HTTP | `TotalChunks` rise after | Qualifies |
-|---|---|---|---|---|
-| 1 | 0 | **201** | 5,832 | no, it fit |
-| 2 | 0 | 507 | +2 | yes |
-| 3 | 22 | 507 | 0 | no, control not flat |
-| 4 | 0 | 507 | 0 | yes |
-| 5 | 0 | 507 | 0 | yes |
-| 6 | 1 | 507 | 0 | no, control not flat |
-| 7 | 0 | 507 | 0 | yes |
+Re-run with a **never-ingested archive of fresh random bytes for every attempt**,
+and with `ReferenceCount` read as well, because it rises for an already-held
+chunk where `TotalChunks` cannot, so it detects a re-Put that `TotalChunks`
+hides.
+
+| Run | Control drift, both counters | HTTP | `TotalChunks` rise | `ReferenceCount` rise | `held` |
+|---|---|---|---|---|---|
+| 1 | 0 | 507 | 0 | 0 | 127,878 |
+| 2 | 0 | 507 | 0 | 0 | 127,878 |
+| 3 | +1 | 507 | +2 | +2 | 127,878 |
+| 4 | 0 | 507 | 0 | 0 | 127,878 |
+| 5 | 0 | 507 | 0 | 0 | 127,878 |
+
+**Four runs with an exactly flat control window and an exactly zero rise on both
+counters**, which is the arm passing with one run to spare. Run 3's +2 sits
+against a control window of +1, is the only nonzero reading, and is reported
+rather than averaged away; the result does not need it.
+
+**`held` is unchanged at 127,878 across all five refusals**, and across the five
+timing posts that preceded them, so ten refusals left the committed count
+untouched. That is the **counted** residue check. The two `ChunkStore` counters
+are the **uncounted** one, and both are needed: `held` is reported by the code
+under test, so a leak that stored chunks without counting them would not move it.
+That is exactly why the spec reads a database-wide counter as well, and it is the
+reason `held` is not a substitute for it.
+
+**The check has power, which is shown rather than assumed.** Three sensitivity
+runs on the same node minutes earlier ingested a small fresh archive that fits,
+and both counters moved by about the reported count every time, 303 and 300. A
+flat reading is evidence of no residue only if a real ingest would not have read
+flat too. These say it would not.
 
 The 507 body carries both figures: `{"message":"local ingest limit reached",
-"held":125685,"limit":131072}`.
+"held":127878,"limit":131072}`.
 
-**Run 1 is reported rather than dropped.** A 20 MB archive cost 5,832 chunks
-against 11,228 of headroom, so it was accepted and tested a large ingest instead
-of the limit. Sizing an archive to cross a limit needs the headroom read first,
-and that run is what then gave arm 6 a limit to bind against. Run 2's `+2` is the
-only nonzero rise and sits against a flat control window; runs 4, 5 and 7 are all
-exactly 0, so it reads as background rather than residue.
+#### The first pass's rows, kept for the record
 
-## The two spec defects
+| Run | Control drift | HTTP | `TotalChunks` rise after | Note |
+|---|---|---|---|---|
+| 1 | 0 | **201** | 5,832 | it fit, and this is the run that made the archive already-held |
+| 2 | 0 | 507 | +2 | |
+| 3 | 22 | 507 | 0 | control not flat |
+| 4 | 0 | 507 | 0 | |
+| 5 | 0 | 507 | 0 | |
+| 6 | 1 | 507 | 0 | control not flat |
+| 7 | 0 | 507 | 0 | |
 
-### Arm 5 compared against the wrong counter, and would have rejected correct code
+**Run 1 is reported rather than dropped, and it matters twice.** A 20 MB archive
+cost 5,832 chunks against 11,228 of headroom, so it was accepted and tested a
+large ingest instead of the limit. Sizing an archive to cross a limit needs the
+headroom read first,
+and that run is what then gave arm 6 a limit to bind against.
+
+**No conclusion is drawn from this pass.** An earlier version of this document
+argued that run 2's `+2` against a flat control window "reads as background
+rather than residue", and counted it as one of three qualifying runs. That is
+precisely the smoothing this document refuses three sections earlier for arm 4b,
+and it was applied here without noticing. Under the spec's own rule, a `+2` rise
+against a flat control window is a failing run, and the rule says a single
+failing run is a reject rather than an average. The re-run above removes the
+question, because it has four runs at exactly 0 against control windows at
+exactly 0, so nothing has to be argued.
+
+## The spec defects, every one found by running it
+
+Four, not the two an earlier version of this document claimed, and two of the
+four are defects in this document's **own corrections**. That is worth stating
+plainly: the first attempt to fix a measurement rule was wrong twice, and both
+times the error was in the direction of making the rule look sharper than the
+evidence allowed.
+
+### One: arm 5 compared against the wrong counter, and would have rejected correct code
 
 The merged spec makes Accept condition 5 "the reported chunk count equals the
 `TotalChunks` rise", and rejects a difference in either direction beyond the
 control drift. **On a collection that can never hold.** Every unencrypted
 manifest shares a small number of canonical node chunks with every other one, so
 a node that has ingested anything before already holds them, and `TotalChunks`
-does not rise for a chunk that is already stored. The shortfall here is a
-constant 3.
+does not rise for a chunk that is already stored. The shortfall measured 3 on
+every collection between 26 and 303 chunks.
 
 `ReferenceCount` is the invariant the arm was reaching for: it rose by exactly
-the reported count in all five measurements, collections and blob alike. The spec
-is corrected to compare against it, with the `TotalChunks` rise and
+the reported count in all six direct measurements, collections and blob alike.
+The spec is corrected to compare against it, with the `TotalChunks` rise and
 `SharedSlots` kept as the evidence that explains any difference.
 
 The spec's reject clause also said a run whose `SharedSlots` or `ReferenceCount`
 moved should be discarded as content the node already held. `ReferenceCount`
 moves on **every** ingest, by one per chunk stored, so that clause would have
-discarded every run ever made. Corrected to `SharedSlots` alone.
+discarded every run ever made.
 
-### Arm 1 destroys arm 4's precondition
+### Two: the first correction to arm 5 was wrong in three ways
+
+The replacement rule demanded the reported count equal the `ReferenceCount` rise
+**exactly**, controlled the window on `TotalChunks`, and kept an invalidation
+clause referring to "the constant a collection always shares". All three are
+wrong, and a review found them before they could reject a correct node.
+
+- **Exactness is not supportable.** A measured run with 25 seconds of ingest time
+  gave reported 303 against a `ReferenceCount` rise of 309, purely from
+  background drift, as the arithmetic in arm 5 above shows. The rule is back to
+  equality within the drift the paired control window shows.
+- **The control window was on the wrong counter.** `ReferenceCount` is
+  database-wide and rises for a chunk the node already holds, which `TotalChunks`
+  cannot. So a window flat on `TotalChunks` is no evidence that `ReferenceCount`
+  is quiet, and the rule decided on one counter while controlling the other.
+- **There is no such constant.** 3 was measured between 26 and 303 chunks and a
+  derived 9 appears at about 5,841. A clause naming a constant that does not
+  exist cannot be applied, and it was also unnecessary: deduplication does not
+  break the `ReferenceCount` comparison at all, since a `Put` of an already-held
+  address still raises that chunk's reference count and the session still counts
+  the address once. Only a repeated address **within one archive** breaks
+  equality, and the spec now forbids that directly, which is a rule the original
+  measurement satisfied by luck in using random bytes.
+
+### Three: arm 1 destroys arm 4's precondition
 
 Arm 1 requires a **stamped** upload of the same archive. The roots are identical,
 which is arm 1's own result. So that upload publishes the content to the network
@@ -271,7 +453,25 @@ holder. Nothing was wrong with the node. Rerun on an archive that was ingested
 and never stamped, it returns 404 in all three runs.
 
 The spec now says arms 4 and 4b take an archive that has never been stamped, and
-the invalidation list says that reusing arm 1's archive invalidates them.
+the invalidation list says that reusing arm 1's archive invalidates them. The
+list also gained the connectivity gate arm 4b's second pass ran under, which had
+been applied as an after-the-fact judgement rather than a rule.
+
+### Four: arm 6's residue check had no power against a reused archive
+
+The merged spec asks arm 6 to show an over-limit ingest leaves no residue, and
+measures that on `TotalChunks`. It never says the archive must be one the node has
+not already ingested, and without that the observable is empty: an already-held
+archive contributes no new chunk addresses, so the counter reads flat whether the
+refusal leaked or not. The first pass at the arm ingested its archive
+successfully on run 1 and then measured refusals of what may have been the same
+archive.
+
+The spec now requires a never-ingested archive per run, `ReferenceCount` beside
+`TotalChunks`, and a **sensitivity control**: a small fresh archive that fits and
+must move both counters. The general form of the rule is worth keeping in mind
+beyond this arm: a null result is evidence only when a positive result would have
+looked different, and nothing in the first pass established that.
 
 ## Two harness faults worth recording
 
@@ -283,8 +483,12 @@ two passes.
 wrote every fetch to the same file, so `/blob.bin` reported the SHA of the
 previously fetched file and looked exactly like a manifest serving the wrong
 content for a path. Fetched on its own it is 16,384 bytes with the correct SHA,
-and with one output file per path all twelve fetches were correct. Printing the
-byte count alongside the hash is what would have caught it immediately.
+and with one output file per path eleven of that pass's twelve fetches were
+correct, the twelfth being the bare root's 404 in run 3, which is a real result
+and not an artefact of the fault. An earlier version of this paragraph said all
+twelve were correct, which contradicted the table two sections above it. Printing
+the byte count alongside the hash is what would have caught the fault itself
+immediately.
 
 **Scoring on the HTTP status code.** The gated pass at arm 4b printed
 `paths_200=4/4` for a run in which `/blob.bin` returned **zero bytes**, because
