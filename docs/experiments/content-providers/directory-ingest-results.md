@@ -159,9 +159,16 @@ fetched it in that same position three times and got it right three times, so
 What separates the successful conditions from the failing one is at most timing,
 and the evidence does not distinguish timing from chance at this sample size.
 
-**The bare root failed twice across every pass**, both times at first contact
-with the provider and both times in a sequence with no connectivity gate. The
-earlier of the two ran with the provider read back as **not connected**.
+**The bare root failed twice in thirteen attempts across every pass**, both times
+at first contact with the provider and both times in a sequence with no
+connectivity gate. The earlier of the two ran with the provider read back as
+**not connected**.
+
+**Those two failures are a different mode and are not pooled with the empty
+bodies.** The root failed with **404**, which is the path not resolving. The
+multi-chunk file failed with **200 and no bytes**, which is the path resolving
+and the content not arriving. Pooling them would hide the one observation this
+arm contributes.
 `Wasp-Providers` connects in the background and a preferred candidate is filtered
 to connected peers, so a first request can be made before the provider is usable.
 That is the likeliest cause and it is **correlational, not established**: it
@@ -314,6 +321,15 @@ path, to the same peer, in the same collection, at the same moment, never
 failed.** That narrows the candidate causes to ones that need more than one
 chunk, which is what #343's reading of `joiner.ReadAt` predicts and what a
 connectivity or discovery fault would not.
+
+It also gives #313 a **cheap reproduction**, which every arm on that issue so far
+has lacked. A collection holding one four-chunk file fails in roughly one attempt
+in six at sub-second latency, and a single-chunk file in the same collection is a
+built-in control saying whether a candidate fix broke the path rather than
+removed the size dependence. Every previous arm on #313 needed a 4 MiB object and
+a download lasting a minute or more, and none ever returned a complete body, so
+this is also the first evidence that **small content over that path completes at
+all.** Posted there as a comment rather than filed as a new issue.
 
 ## What this does not show
 
