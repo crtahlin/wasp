@@ -18,15 +18,35 @@ reference, and total references. A **control window** is an equal period read
 immediately before a measured one, showing how far the counters drift with the
 node doing nothing.
 
-**The feature is accepted.** A directory ingested with no postage produces the
-same manifest root as a stamped upload of the same archive, the holder serves
-every path in it, a node with no hint cannot reach it, a node that names the
-holder can, the reported chunk count is exact, and an over-limit archive is
-refused without residue.
+**Five of the six arms pass. The sixth, arm 4b, does not meet its condition.**
 
-**Two defects were found in the spec rather than in the code**, and both were
-found only by running it. They are in their own section below because they are
-the useful part of this document.
+What passes: a directory ingested with no postage produces the same manifest
+root as a stamped upload of the same archive, the holder serves every path in it,
+a node with no hint cannot reach it, the reported chunk count is exact, and an
+over-limit archive is refused without residue.
+
+What does not: arm 4b asks that a node naming the holder be served every inner
+path with a matching hash **in all three runs**. It was not. The one multi-chunk
+file in the collection returned HTTP 200 with an **empty body** in 2 of 13
+attempts. Every single-chunk file in the same collection, through the same
+manifest over the same path, was correct 12 of 12.
+
+That failure is the signature
+[#313](https://github.com/crtahlin/wasp/issues/313) reports and
+[#343](https://github.com/crtahlin/wasp/issues/343) traced, on a path both issues
+leave open: a chunk refused credit is dropped from that chunk's preferred path,
+falls to peers that never held it, and `joiner.ReadAt` is all or nothing, so one
+lost chunk loses the whole read unit. Nothing measured here puts it in #340's
+code, and nothing measured here proves the attribution either. It is stated as
+consistent with those issues, not as established. The consequence for this
+experiment is that **hosting a multi-chunk file for a remote reader is not yet
+shown to work reliably**, whatever the manifest does correctly.
+
+**Two of the spec's own rules were also found wrong**, and both were found only by
+running it: one would have rejected correct code, and one made an arm test
+something other than what it claimed. They have their own section below, as do
+the two faults found in the measuring script, one of which had already reported
+arm 4b as a pass.
 
 ## The provider was running the wrong build, and the first arm failed against it
 
@@ -97,26 +117,68 @@ resolving through the index document.
 **This arm failed on the first attempt for a reason that is the spec's, not the
 node's**, and that is the first of the two spec defects below.
 
-### 4b. A second node that names the holder
+### 4b. A second node that names the holder. Condition not met
 
-**Inner paths: 12 of 12**, every one 200 with a matching SHA-256 and the right
-byte count.
+Two passes over the same never-stamped collection, three runs each. The second
+pass is the one that counts, because it reads `provider_connected` back as 1
+before making any request and the first pass did not gate on that at all.
 
-**The bare root: 8 of 10, intermittent.** Two hinted requests for the root
-returned 404 where the others returned 200 with the index document. Six
-further root-only runs were 200 without exception.
+Correct below means all three of: HTTP 200, the exact byte count, and a SHA-256
+matching the local original. **Status alone is not correct**, which is the second
+harness fault recorded further down.
 
-Both failures were at first contact with the provider, and the earlier of them
-ran with the provider **not connected** to the requester, read back as zero at
-the start of that sequence. `Wasp-Providers` connects in the background, and a
-preferred candidate is filtered to connected peers, so a first request can be
-made before the provider is usable. That is the likeliest cause. It is
-**correlational and not established**: it would take a run that disconnects the
-provider deliberately and then makes one hinted request to settle it.
+| Path | Chunks | First pass, ungated | Second pass, gated |
+|---|---|---|---|
+| `/` bare root, through the index document | 1 | 2 of 3 | 3 of 3 |
+| `/css/style.css` | 1 | 3 of 3 | 3 of 3 |
+| `/a/b/note.txt` | 1 | 3 of 3 | 3 of 3 |
+| `/blob.bin` | **4** | 3 of 3 | **1 of 3** |
 
-Credit refusals do occur on this path and do not prevent the root from serving:
-two of the six root-only runs raised `preferred_overdrafts` by 12 and by 3 and
-both returned 200, because a refusal falls through to ordinary selection.
+The two `/blob.bin` failures were **HTTP 200 with an empty body**: zero bytes
+returned for a 16,384-byte file, and the harness first scored them as successes.
+
+Six further runs of `/blob.bin` on its own, with the overdraft counter read
+either side of each, were all correct:
+
+| Run | HTTP | Bytes | Seconds | curl exit | SHA | `preferred_overdrafts` |
+|---|---|---|---|---|---|---|
+| 1 | 200 | 16,384 | 0.248 | 0 | matches | 0 |
+| 2 | 200 | 16,384 | 0.248 | 0 | matches | 0 |
+| 3 | 200 | 16,384 | 0.247 | 0 | matches | 0 |
+| 4 | 200 | 16,384 | 0.411 | 0 | matches | **+16** |
+| 5 | 200 | 16,384 | 0.247 | 0 | matches | 0 |
+| 6 | 200 | 16,384 | 0.747 | 0 | matches | **+11** |
+
+Two of those six took credit refusals and still returned the whole file, so a
+refusal is not sufficient on its own to lose the content.
+
+**Tally for the multi-chunk file: 11 correct of 13.** Both failures fell in one
+sequence, as the fourth request of four in rapid succession. But the first pass
+fetched it in that same position three times and got it right three times, so
+**"fourth in succession" is not the cause and the cause is not established.**
+What separates the successful conditions from the failing one is at most timing,
+and the evidence does not distinguish timing from chance at this sample size.
+
+**The bare root failed twice across every pass**, both times at first contact
+with the provider and both times in a sequence with no connectivity gate. The
+earlier of the two ran with the provider read back as **not connected**.
+`Wasp-Providers` connects in the background and a preferred candidate is filtered
+to connected peers, so a first request can be made before the provider is usable.
+That is the likeliest cause and it is **correlational, not established**: it
+would take a run that disconnects the provider deliberately and then makes one
+hinted request to settle it. The gated pass had the root 3 of 3 and six
+root-only runs were 6 of 6, two of them with `preferred_overdrafts` rising by 12
+and by 3 and both still serving, because a refusal falls through to ordinary
+selection.
+
+**Why this arm is reported as not met rather than as a pass with a caveat.** The
+spec's Accept condition 4 wants every inner path served correctly in all three
+runs, and its catch-all clause rejects anything the accept conditions do not
+cover. Two empty bodies in a qualifying, gated pass is a reject under both. The
+single-chunk paths passing 12 of 12 does not rescue it, because a website is
+made of files of arbitrary size and the only multi-chunk file in the fixture is
+the one that failed. Splitting the difference here would be the same mistake as
+scoring on the status code.
 
 ### 5. Does the count cover the manifest
 
@@ -204,17 +266,54 @@ and never stamped, it returns 404 in all three runs.
 The spec now says arms 4 and 4b take an archive that has never been stamped, and
 the invalidation list says that reusing arm 1's archive invalidates them.
 
-## A harness fault worth recording
+## Two harness faults worth recording
 
-A first pass at arm 4b wrote every path to one output file and printed no size.
-So `/blob.bin` reported the SHA of the previously fetched file and looked exactly
-like a manifest serving the wrong content for a path. Fetched on its own it is
-16,384 bytes with the correct SHA, and with one output file per path all twelve
-fetches are correct.
+Both were in the measuring script rather than the node, both produced plausible
+output rather than an obvious failure, and the second one hid a real result for
+two passes.
 
-It is recorded because it produced plausible output rather than an obvious
-failure, which is the kind that gets believed. Printing the byte count alongside
-the hash is what would have caught it immediately, and the arm now does.
+**One output file for every path, and no size printed.** A first pass at arm 4b
+wrote every fetch to the same file, so `/blob.bin` reported the SHA of the
+previously fetched file and looked exactly like a manifest serving the wrong
+content for a path. Fetched on its own it is 16,384 bytes with the correct SHA,
+and with one output file per path all twelve fetches were correct. Printing the
+byte count alongside the hash is what would have caught it immediately.
+
+**Scoring on the HTTP status code.** The gated pass at arm 4b printed
+`paths_200=4/4` for a run in which `/blob.bin` returned **zero bytes**, because
+the script counted statuses. Rule 7 of `AGENTS.md` says in one line that an HTTP
+200 from an API endpoint is never proof a node is healthy, and this is that rule
+being broken inside the tool written to enforce it. The arm now scores a fetch
+correct only on status, byte count and hash together, which is what turned a
+reported pass into the reject above.
+
+The general lesson is the same one both times: **a measuring script needs the
+same adversarial reading as the code it measures.** A harness that cannot fail
+the node cannot validate it either, and here one nearly published an accept for a
+condition that was not met.
+
+## What follows from arm 4b
+
+The implementation is not changed and #340 is not reopened. Every arm that tests
+#340's own code passes, and the arm that does not fails on the retrieval path,
+which this change does not touch: the collection's single-chunk files travel the
+same hinted path through the same manifest and never failed.
+
+What arm 4b establishes is narrower and worth saying plainly: **serving a
+multi-chunk file from a node that holds it, to a node that names it as the
+holder, is not yet reliable.** For hosting a website that is not a detail, since
+any image or stylesheet above 4,096 bytes is multi-chunk. The feature is usable
+for a holder serving itself, which arms 2 and 3 show without a failure, and
+provisional for a remote reader.
+
+The evidence belongs on
+[#313](https://github.com/crtahlin/wasp/issues/313) rather than in a new issue,
+because #313 is the same observation and is open. What this pass adds to it is
+the contrast the earlier reports did not have: **single-chunk content on the same
+path, to the same peer, in the same collection, at the same moment, never
+failed.** That narrows the candidate causes to ones that need more than one
+chunk, which is what #343's reading of `joiner.ReadAt` predicts and what a
+connectivity or discovery fault would not.
 
 ## What this does not show
 
@@ -230,6 +329,14 @@ the hash is what would have caught it immediately, and the arm now does.
   by construction and so have no equivalence to test.
 - **Nothing about the bare-root intermittency's cause**, only its rate and a
   correlation with the provider not yet being connected.
+- **Nothing about why a multi-chunk file returns an empty body**, only that it
+  did, twice in thirteen attempts over the hinted path, and that the signature
+  matches what #313 reports and #343 traced. No run here isolated a cause. The
+  two failures and the eleven successes differ in timing and in nothing else the
+  harness recorded, and thirteen attempts cannot separate timing from chance.
+- **Nothing about where the size threshold for that failure is.** The fixture has
+  exactly one multi-chunk file, at four chunks. Whether the rate rises with size,
+  and whether a one-chunk file can fail at all, are unmeasured.
 - **Nothing about a directory large enough to cross a trie shape boundary.** The
   largest collection measured is 5,832 chunks and the sites are small.
 - **Nothing about disk actually consumed**, as distinct from chunks counted. The
