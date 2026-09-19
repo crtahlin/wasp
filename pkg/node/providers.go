@@ -96,23 +96,28 @@ func newProvidersService(
 		},
 		// dial a provider without forcing past a full bin, and keep the
 		// connection only if the topology accepts the peer
-		Connect: func(ctx context.Context, addr *bzz.Address) error {
+		Connect: func(ctx context.Context, addr *bzz.Address) (bool, error) {
 			got, err := p2ps.Connect(ctx, addr.Underlays)
 			if errors.Is(err, p2p.ErrAlreadyConnected) {
-				return nil
+				// A success that needed no dial. Reported separately because
+				// only this branch can tell the two apart and the measurement
+				// for issue #369 has to. Note the branch is keyed on the
+				// remote address rather than the peer, so a peer connected on
+				// another underlay falls through to the dial below.
+				return true, nil
 			}
 			if err != nil {
-				return err
+				return false, err
 			}
 			if !got.Overlay.Equal(addr.Overlay) {
 				_ = p2ps.Disconnect(got.Overlay, "provider overlay mismatch")
-				return errProviderOverlay
+				return false, errProviderOverlay
 			}
 			if err := kad.Connected(ctx, p2p.Peer{Address: got.Overlay, FullNode: true}, false); err != nil {
 				_ = p2ps.Disconnect(got.Overlay, "provider not accepted by topology")
-				return fmt.Errorf("topology: %w", err)
+				return false, fmt.Errorf("topology: %w", err)
 			}
-			return nil
+			return false, nil
 		},
 		// the dial is checked against the overlay in Connect, so an address
 		// the handshake has not verified yet is good enough to try

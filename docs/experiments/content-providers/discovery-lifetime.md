@@ -294,6 +294,13 @@ observability, not to write arms around its absence. This follows the shape #299
 argued for at `erasure-preferred.md:150-204` and for the same reason: no existing
 counter can answer the question, so the change adds one.
 
+**Identifiers are American, prose is left as the repository has it.** Metric
+names and Go identifiers use `canceled` and `dialed`, per the style rules in
+`AGENTS.md`, because a metric name is permanent surface that an operator's
+dashboards depend on. Surrounding prose in this repository is predominantly
+British and is not being normalised by this change. Stated so that the next
+person does not normalise it in one direction at random.
+
 New `pkg/providers/metrics.go`, house shape (exported fields, `newMetrics()`, a
 `Metrics() []prometheus.Collector` method, as `pkg/retrieval/metrics.go:13` and `:162`),
 namespace `bee`, subsystem `providers`:
@@ -301,12 +308,23 @@ namespace `bee`, subsystem `providers`:
 | Field | Exported name | Incremented | Decides |
 |---|---|---|---|
 | `DiscoveriesStarted` | `bee_providers_discoveries_started` | on entry to `Discover`'s goroutine | arm 5's denominator |
+| `HintedConnectsStarted` | `bee_providers_hinted_connects_started` | on entry to `ConnectHints`'s goroutine | arm 6's denominator |
 | `LookupsServedFromCache` | `bee_providers_lookups_served_from_cache` | on the cache-hit return at `:273` | arms 1, 5 |
 | `LookupsCompleted` | `bee_providers_lookups_completed` | **only** on the `:302` return | arms 1, 5 |
-| `LookupsCancelled` | `bee_providers_lookups_cancelled` | on the `ctx.Err()` branch at `:279-282` | arm 1 |
-| `ConnectsDialled` | `bee_providers_connects_dialled` | the bee-level connect procedure ran to completion, handshake and topology included | arms 2, 6, and **not sufficient on its own** |
+| `LookupsCanceled` | `bee_providers_lookups_canceled` | on the `ctx.Err()` branch at `:279-282` | arm 1 |
+| `ConnectsDialed` | `bee_providers_connects_dialed` | the bee-level connect procedure ran to completion, handshake and topology included | arms 2, 6, and **not sufficient on its own** |
 | `ConnectsAlreadyConnected` | `bee_providers_connects_already_connected` | the peer was already connected | arms 2, 6 |
-| `ConnectsFailed` | `bee_providers_connects_failed` | the dial returned an error | reported per run |
+| `ConnectsFailed` | `bee_providers_connects_failed` | the dial returned an error **other than** the run being cut off | reported per run |
+
+**`ConnectsFailed` deliberately excludes cancellation**, which an earlier version
+of this table did not say and the first implementation did not do. Neither loop
+checked its context, so one shutdown or one expiry of the timeout called `Connect`
+for every remaining record and counted up to `lookupCandidates` failures with no
+dial attempted. That would have made this counter unusable for the one thing the
+acceptance list reads it for, telling "the change works and providers are
+undialable" from "the run was cut off". The loops now stop dialing once the
+context is done, and add the found overlays to the preferred set first regardless,
+because that set is worth keeping even when the dialing is cut off.
 
 **`LookupsCompleted` must count only the `:302` return, and an earlier version of
 this spec did not say so.** `Lookup` has three returns with no context error:
@@ -337,7 +355,7 @@ file is in the Files list. The `pkg/providers` call sites cannot tell the branch
 apart from a bare nil, so the distinction has to be made where the branch is.
 
 **The split narrows the confound and does not remove it, and a third version of
-this spec claimed otherwise.** `ConnectsDialled` counts "the
+this spec claimed otherwise.** `ConnectsDialed` counts "the
 `p2p.ErrAlreadyConnected` short-circuit did not fire", and that short-circuit is
 **address-keyed rather than peer-keyed**. `s.peers.isConnected(info.ID,
 remoteAddr)` (`pkg/p2p/libp2p/libp2p.go:1068`) requires both the peer ID in
@@ -346,7 +364,7 @@ remoteAddr)` (`pkg/p2p/libp2p/libp2p.go:1068`) requires both the peer ID in
 **different underlay** therefore does not take that branch: execution falls
 through to `s.host.Connect` at `:1076-1078`, which returns nil when a connection
 to that peer ID is already open, and the closure runs on to `return nil` at
-`pkg/node/providers.go:114`. `ConnectsDialled` rises with no dial.
+`pkg/node/providers.go:114`. `ConnectsDialed` rises with no dial.
 
 That is not a remote possibility on this bench. `Options.Address`
 (`pkg/node/providers.go:76-92`) deliberately filters a record's underlays to
@@ -360,7 +378,7 @@ when the response completes, the counter rising during the interval, and the
 overlay's first appearance at or after the second the counter rose.
 
 **This is inference and not proof, and the spec says so rather than leaving a
-later reader to discover it.** `ConnectsDialled` means "the bee-level connect
+later reader to discover it.** `ConnectsDialed` means "the bee-level connect
 procedure ran to completion". Ordering it against `/peers` makes a dial by
 discovery much the most likely reading of an absent-then-present transition, and
 it does not exclude every alternative: the counter still cannot distinguish a
@@ -384,7 +402,7 @@ The registration block at `:1629-1636` is itself inside
 `if o.APIAddr != ""`. So the implementation hoists the variable above the block
 and registers the collectors only when providers are enabled.
 
-Seven counters is permanent surface area, which rule 8's reasoning about
+Eight counters is permanent surface area, which rule 8's reasoning about
 configuration applies to as well, so each row above names the arm it decides.
 `docs/DIFFERENCES.md:166` shows that metrics get a row there, and these will.
 
@@ -406,16 +424,25 @@ No run measures how long a dial to a provider takes; the only datum is a dial
 still running at about 3.5 seconds, which this spec lists as unexplained.
 
 **There is a better number to derive it from, and a consequence that is not a
-risk but a behaviour.** Each underlay dial carries its own
-`context.WithTimeout(ctx, 15*time.Second)` at `pkg/p2p/libp2p/libp2p.go:1076`,
-independent of `discoverTimeout`. `ConnectHints` dials up to `maxProviderHints`,
-which is 8, **serially** (`providers.go:348-360`), so the worst case is 8 times 15
-seconds, 120 seconds of work inside a 30-second bound: the loop is cut after
-roughly **two** overlays. A hint naming eight providers will therefore have at
-most two of them tried. That is a consequence of the constant rather than a
-possibility, it is not in the risk list because it is certain, and 15 seconds
-times the number of overlays worth trying is the quantity the constant should be
-derived from.
+risk but a behaviour.** The 15 second timeout at
+`pkg/p2p/libp2p/libp2p.go:1076` is taken **per underlay**, inside the loop over
+an address's underlays, not per overlay. A discovered provider's address carries
+up to `MaxUnderlays`, which is 4 (`pkg/providers/keys.go:31`), so a **single**
+`Connect` can consume up to 60 seconds, more than the whole bound. `ConnectHints`
+then dials up to `maxProviderHints`, which is 8, serially
+(`providers.go:348-360`).
+
+So the bound admits **at most about two overlays, and fewer where an address
+carries several underlays**, where it can cut off inside the first overlay's
+underlay list. An earlier version of this paragraph said "two overlays" flatly,
+reading the 15 seconds as per overlay; that holds only where every address has
+exactly one underlay. The bench precondition below, that the provider advertises
+a single public underlay, is what makes the two-overlay figure true **on the
+bench specifically**, which is the only place the arithmetic is load-bearing.
+
+That is a consequence of the constant rather than a possibility, it is not in the
+risk list because it is certain, and 15 seconds times the underlays worth trying
+is the quantity the constant should be derived from.
 
 What would justify making it configurable later: a measured dial that needs longer
 on a slow or NAT-bound peer, or measured goroutine accumulation. Neither exists.
@@ -571,7 +598,7 @@ Before every run of arms 1, 2, 5 and 6, and **not** between arm 2 and arm 3:
    curl, and the step was written as though it were curl.
 
    **The guard that actually catches a lookup finding nothing is post-hoc, and it
-   is already in acceptance 1**, which requires `ConnectsDialled` or
+   is already in acceptance 1**, which requires `ConnectsDialed` or
    `ConnectsAlreadyConnected` to rise. It is stronger than a pre-flight, which can
    pass and then have the chunk evicted before the run. It is therefore also an
    invalidation clause: a run where `LookupsCompleted` rose while all three
@@ -596,10 +623,21 @@ Read back before every arm: both versions from `/health`, that the requester
 holds none of the content, that `/blocklist` is empty, and `node/providers` set to
 debug, which is `bm9kZS9wcm92aWRlcnM%3D` on `/loggers`, **padded** base64url.
 
+**And make no operator lookup on the requester for the duration of a run.** The
+three `Lookups` counters are incremented in `Lookup`, which is also what
+`GET /wasp/providers/{reference}/lookup` calls
+(`pkg/api/providers.go:353`), so a single operator request during a run moves the
+same counters the arms decide on: arm 5 demands exact totals and arm 1 invalidates
+on `LookupsServedFromCache` rising. The counters are node-wide rather than scoped
+to discovery, which is the same fact this spec already records about the shared
+`s.cache`, and it is a precondition rather than a defect. `GET /chunks` is safe by
+contrast: it calls `withProviders` with a nil key, so `providerGetter` returns the
+bare getter and no discovery is triggered.
+
 **And read the provider's `/addresses` to confirm it advertises a single public
 underlay.** With more than one, a provider record's filtered underlay set can
 differ from the address kademlia dialled, the `ErrAlreadyConnected` branch is
-missed, and `ConnectsDialled` can rise with no dial, which is the confound arms 2
+missed, and `ConnectsDialed` can rise with no dial, which is the confound arms 2
 and 6 are built around. One underlay removes it at the source rather than
 reasoning about it. An arm run against a multi-underlay provider is reported with
 that noted, because the ordering requirement is then the only defence.
@@ -615,7 +653,7 @@ Three fresh 16 MiB uploads at the default level and three at level NONE, same
 bytes per pair, announced and network-held. Requester asks with
 `Swarm-Cache: false` and no hint. Alternating, disconnect before each.
 
-Observables: `LookupsCancelled` and `LookupsCompleted`, plus
+Observables: `LookupsCanceled` and `LookupsCompleted`, plus
 `LookupsServedFromCache` as a guard that no run was answered from cache.
 
 Before, measured: 3 of 3 cancelled at the default level, 0 of 3 at level NONE.
@@ -627,7 +665,7 @@ dial completed after the request ended:
 
 1. the provider's overlay is **absent** from the requester's `/peers` at the
    instant the response completes;
-2. `ConnectsDialled` rises in the interval between that instant and the end of the
+2. `ConnectsDialed` rises in the interval between that instant and the end of the
    poll, with `ConnectsAlreadyConnected` flat in that interval;
 3. the overlay is **present** in `/peers` at the end of the poll.
 
@@ -642,7 +680,7 @@ three legs must be ordered rather than merely all true.** Poll **both `/peers` a
 `/metrics` once a second** through the whole 45-second interval, which is longer
 than `discoverTimeout` so that "never dialled" is distinguishable from "dialled
 just after the poll stopped". Require that the overlay's **first appearance in
-`/peers` is at or after the second in which `ConnectsDialled` rose.**
+`/peers` is at or after the second in which `ConnectsDialed` rose.**
 
 **Without that ordering the conjunction is still satisfiable with no dial by
 discovery**, and a fourth version of this spec missed it. Kademlia re-dials the
@@ -650,7 +688,7 @@ provider from its address book, which the reset protocol below establishes it
 does, and it can do so **inside** the interval rather than before it. Then leg 1
 held, the overlay appeared, `Discover`'s `Connect` ran afterwards, missed the
 `ErrAlreadyConnected` branch on the underlay mismatch described under the
-counters, completed the handshake path and raised `ConnectsDialled`, and leg 3
+counters, completed the handshake path and raised `ConnectsDialed`, and leg 3
 held. All three legs, no dial. Ordering the first appearance against the counter
 is what separates the two cases: if the overlay appears first, kademlia got there
 and discovery only observed it.
@@ -733,7 +771,7 @@ no further request.
 
 Observable: the same three-leg conjunction as arm 2, over the interval between
 that request ending and the end of a 45-second poll: overlay absent from `/peers`
-at the request's end, `ConnectsDialled` rising and `ConnectsAlreadyConnected` flat
+at the request's end, `ConnectsDialed` rising and `ConnectsAlreadyConnected` flat
 in the interval, overlay present at the end of the poll.
 
 This is the sharpest form of the arm, because the request is short and is not
@@ -749,28 +787,28 @@ collection.
 
 Accepted when all of:
 
-1. **(arm 1)** at the default level, in all three runs: `LookupsCancelled` does
+1. **(arm 1)** at the default level, in all three runs: `LookupsCanceled` does
    not rise, `LookupsCompleted` rises by exactly one, `LookupsServedFromCache`
    does not rise, and **the lookup found the provider**, shown by
    **any of the three `Connects` counters** rising, since a lookup that completes
    having found nothing would otherwise satisfy this. All three prove records were
    returned, which is the only thing this leg is for. An earlier version accepted
-   only `ConnectsDialled` or `ConnectsAlreadyConnected`, which made arm 1
+   only `ConnectsDialed` or `ConnectsAlreadyConnected`, which made arm 1
    **unsatisfiable on a bench whose provider is undialable**: the lookup would work
    perfectly, only `ConnectsFailed` would rise, no invalidation clause would fire,
    and the arm would fail. That contradicted this spec's own statement that
    provider dialability is not its to guarantee, and the deliberate demotion of
    that case from a reject to a reported outcome; and at level NONE
-   `LookupsCancelled` stays flat **and `LookupsCompleted` rises by exactly one**,
+   `LookupsCanceled` stays flat **and `LookupsCompleted` rises by exactly one**,
    because a level-NONE run whose download never reached the 64-chunk trigger also
-   leaves `LookupsCancelled` flat and an earlier version of this condition would
+   leaves `LookupsCanceled` flat and an earlier version of this condition would
    have accepted it. Before at level NONE was 0 of 3 cancelled read from the log
    line and after is read from a counter, so that half is not a clean pair either;
 2. **(arm 2)** all three legs hold in all three level-NONE runs: the overlay is
-   absent from `/peers` when the response completes; `ConnectsDialled` rises
+   absent from `/peers` when the response completes; `ConnectsDialed` rises
    during the 45-second interval with `ConnectsAlreadyConnected` flat in it; and
    the overlay's **first appearance** in `/peers` is at or after the second in
-   which `ConnectsDialled` rose. **All three, in that order.** An earlier version
+   which `ConnectsDialed` rose. **All three, in that order.** An earlier version
    of this clause restated only the middle leg, which put the structural fix in the
    arm and left it out of the list that gets applied later by someone who will not
    re-derive the arm;
@@ -782,10 +820,14 @@ Accepted when all of:
 5. **(arm 6)** the same three ordered legs hold in all three runs, over the
    interval between the single hinted request ending and the end of the 45-second
    poll;
-6. **(unit)** a caller context cancelled before the call does not stop the work;
-   closing the service does stop it and `Close` returns within two seconds; the
-   timeout abandons a dial that never returns; and both counter pairs distinguish
-   the cases the arms assume.
+6. **(unit)** for **both** the discovery and the hinted path: a caller context
+   cancelled before the call does not stop the work; closing the service does
+   stop it and `Close` returns within two seconds; the timeout abandons a dial
+   that never returns; a run cut off before it dials calls `Connect` zero times
+   while still keeping what the lookup found; both counter pairs distinguish the
+   cases the arms assume; and **the started counters rise for a run that found
+   nothing**, which is the property that makes them denominators rather than
+   success counts.
 
 **A faster non-overlap is neither accepted nor rejected: it is reported and
 investigated.** Two versions of this spec have now left one of the three
@@ -807,7 +849,7 @@ Arm 3 is **reported, not required**, and its negative is uninterpretable.
 
 Rejected if any of:
 
-- `LookupsCancelled` still rises at the default level in any run, which means the
+- `LookupsCanceled` still rises at the default level in any run, which means the
   change did not reach the path;
 - `Close` does not return within two seconds in the unit test, which means the
   shutdown guarantee was weakened;
@@ -820,7 +862,7 @@ Rejected if any of:
   `/debug/pprof/goroutine?debug=2` filtered on `pkg/providers` frames. Without
   that observable named, this row could not have been checked.
 
-**Not a reject, but an outcome to report:** `ConnectsDialled` staying flat while
+**Not a reject, but an outcome to report:** `ConnectsDialed` staying flat while
 `ConnectsFailed` rises in every run. That means the dial now runs to completion
 and fails, so the change is correct and the feature still does not work. An
 earlier version made this a reject clause, which contradicted this spec's own
@@ -887,21 +929,42 @@ choosing between releases would want both.
 ## Files and test plan
 
 - `pkg/providers/providers.go`: four lines each in `Discover` and `ConnectHints`;
-  `discoverTimeout` added to the constant block (`:30-54`); counter increments.
-- `pkg/providers/metrics.go`, new: the seven counters in the house shape
+  `discoverTimeout` added to the constant block (`:30-54`) as the default for a
+  per-service `timeout` field; counter increments; a context check before each
+  dial in both loops.
+
+  **The timeout must not be a package variable that a test writes**, which the
+  first implementation made it. A test shortening a package variable races every
+  other parallel test's background goroutines reading it, and that data race
+  failed **every** test in the package under `-race`, including the ones that
+  existed before. A per-service field removes the shared state rather than
+  synchronizing it.
+- `pkg/providers/metrics.go`, new: the eight counters in the house shape
   (`pkg/retrieval/metrics.go:13` and `:162`), subsystem `providers`, namespace
   `bee`.
 - **`pkg/node/providers.go`: split the `Connect` closure's two nil returns**, so a
-  dial that opened a connection is distinguishable from a peer that was already
-  connected. This file was absent from an earlier version of this list, and
-  without it the arms cannot work: see the counters section.
-- `pkg/providers/export_test.go`: expose `discoverTimeout`, since an injected
-  clock cannot reach `context.WithTimeout`.
+  connect that dialed is distinguishable from one short-circuited because the
+  peer was already connected. This file was absent from an earlier version of
+  this list, and without it the arms cannot work: see the counters section.
+
+  **Carry the split in a `bool` return, not a sentinel error.** `Options.Connect`
+  is `func(ctx, addr) (alreadyConnected bool, err error)`. A first implementation
+  used a sentinel error for the already-connected case, which is a success
+  signalled by a non-nil error: it inverts the language convention, and the next
+  person writing the obvious `if err != nil { continue }` would silently turn a
+  usable provider into a skipped one with nothing in the type system to stop
+  them.
+- `pkg/providers/export_test.go`: expose a **per-service** setter for the bound,
+  not the package value, for the race reason given two entries above. An injected
+  clock cannot reach `context.WithTimeout`, which is why a setter is needed at
+  all.
 - `pkg/node/node.go`: hoist `providersService` out of the `if o.ProvidersEnable`
   block at `:1589-1597` so the registration at `:1629-1636` can reach it, and
   register only when providers are enabled. `providersAPI` will not serve: it is
   typed `api.Providers` (`pkg/api/providers.go:46-53`), which has no `Metrics()`.
-- `pkg/providers/providers_test.go`, `package providers_test`:
+- `pkg/providers/lifetime_test.go`, `package providers_test`, rather than adding
+  to `providers_test.go`: these tests share several stubs and read better beside
+  each other. The shared service helpers stay in `providers_test.go`.
   - `TestDiscoverSurvivesCallerCancel`: a caller context cancelled **before**
     `Discover` is called, with a stub `Connect` recording calls, asserting the
     overlay reaches the set and the connect still happens. Cancelling before the
@@ -912,21 +975,71 @@ choosing between releases would want both.
     reaches `goBackground`, which checks `s.closed` under `s.mu` (`:198-203`), so
     a `Close` racing the call makes the goroutine never start and the test pass
     vacuously. Signal from inside the stub that the goroutine is running first.
-  - `TestConnectHintsSurvivesCallerCancel`: the same two properties for the
-    hinted path.
-  - `TestDiscoverBoundedByTimeout`: with `discoverTimeout` shortened through
-    `export_test.go`, a `Connect` that never returns is abandoned and `Close`
-    still returns.
+  - `TestConnectHintsSurvivesCallerCancel` and `TestConnectHintsStopsOnClose`:
+    the same two properties for the hinted path, one test each.
+  - `TestDiscoverBoundedByTimeout` and `TestConnectHintsBoundedByTimeout`: with
+    the bound shortened through the per-service setter, a `Connect` that never
+    returns is abandoned and `Close` still returns. **Both paths need this.**
+    Leaving `ConnectHints` entirely unbounded passed the whole suite when only
+    the `Discover` variant existed, and that is the path that fires on every
+    request carrying the header with no cache in front of it.
+
+    **The `Discover` variant needs a bound of seconds, not milliseconds**, and
+    the hinted one does not. That bound has to cover the **lookup** as well as
+    the dial, and the lookup fans out to `Slots` goroutines plus one per
+    candidate; at 200 milliseconds under `-race` on one core it does not finish,
+    no dial is attempted, and the test fails blaming the timeout for something
+    the timeout did not do. Measured: three failures in five at
+    `-race -count=5 -cpu=1`. Both variants also wait for the dial to start
+    before asserting, so that never reaching it reports as itself.
   - `TestLookupCountersDistinguishCacheFromWork`: a cache hit raises
     `LookupsServedFromCache` and **not** `LookupsCompleted`; a real lookup raises
     `LookupsCompleted` and not the other; a short key raises neither. This is the
     pair arm 5 decides on, and an earlier version of this spec defined the two so
     that a cache hit raised both, which made arm 5's condition unsatisfiable.
+  - `TestLookupCanceledCounted`: a lookup on a cancelled context raises
+    `LookupsCanceled` and not `LookupsCompleted`. This is arm 1's primary
+    observable and drives its first reject clause, and it had no coverage at all
+    in a first implementation.
   - `TestConnectCountersDistinguishDialFromAlreadyConnected`: the split above,
-    which is what stops arms 2 and 6 passing without a dial.
+    which is what stops arms 2 and 6 passing without a dial. Its table also
+    covers `context.Canceled` and `context.DeadlineExceeded` raising **no**
+    counter, which is what stops one shutdown reading as many unreachable
+    providers.
+  - **The denominators need two tests, and the obvious one is not enough.**
+    `TestDiscoveriesStartedIsADenominator` is arm 5's shape as a unit test:
+    three discoveries of one key inside the cache window give
+    `DiscoveriesStarted` 3 against `LookupsCompleted` 1 and
+    `LookupsServedFromCache` 2, with the three calls **sequenced through the
+    dial**, since concurrent runs race the cache and give three real lookups.
+
+    That test alone does **not** hold the property, which was found by
+    reproduction rather than by reading. Moving `DiscoveriesStarted` so that it
+    counts only runs whose lookup returned records passes it, because every
+    lookup in it finds records, while destroying the denominator outright and
+    breaking acceptance condition 4. What catches that is
+    `TestDiscoveriesStartedCountsAFruitlessRun`: a discovery of a key nobody
+    announced, where the lookup runs, completes and finds nothing, and the
+    counter must still say a discovery happened. That is the distinction the
+    counter exists for, stated directly. Keep both.
+
+    `TestHintedConnectsStartedCounted` is the same denominator for the hinted
+    path, which has no cache in front of it, so counting once per call is the
+    whole property.
+  - `TestCancelledRunStopsDialingButKeepsTheSet` and
+    `TestCancelledHintedRunDoesNotDial`: a run cut off before it dials calls
+    `Connect` zero times, and the `Discover` one still adds every record it found
+    to the preferred set. **Without these the guards are unobservable**, because
+    a cancelled connect raises no counter, so either guard could be deleted and
+    the whole suite would still pass.
 - `docs/DIFFERENCES.md`: a row naming the exported counters and the lifetime
   change.
 - `make format`, `make build`, `make test`, `make lint`, `make protocol-freeze`.
+
+Fourteen test functions in all. The list above is kept level with the file
+deliberately: this spec is the durable record, and two of these tests encode a
+finding that is not obvious from reading them, that the cache-shaped denominator
+test is insufficient on its own.
 
 The unit tests cover the lifetime properties and that the counters mean what the
 arms assume. Nothing in them shows the defect is gone on real content, which is

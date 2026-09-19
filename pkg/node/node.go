@@ -50,6 +50,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/postage/snapshot/archive"
 	"github.com/ethersphere/bee/v2/pkg/pricer"
 	"github.com/ethersphere/bee/v2/pkg/pricing"
+	"github.com/ethersphere/bee/v2/pkg/providers"
 	"github.com/ethersphere/bee/v2/pkg/pss"
 	"github.com/ethersphere/bee/v2/pkg/puller"
 	"github.com/ethersphere/bee/v2/pkg/pullsync"
@@ -1586,11 +1587,17 @@ func NewBee(
 	steward := steward.New(localStore, retrieval, localStore.Cache())
 
 	var providersAPI api.Providers
+	// declared outside the block so its collectors can be registered below;
+	// api.Providers does not carry Metrics()
+	var providersService *providers.Service
 	if o.ProvidersEnable {
-		providersService, err := newProvidersService(logger, networkID, swarmAddress, nonce, signer, localStore, retrieval, post, batchStore, stamperStore, p2ps, kad, addressbook, stateStore)
-		if err != nil {
-			return nil, fmt.Errorf("content providers: %w", err)
+		// assigned through a local so this does not write NewBee's named
+		// return, which two deferred handlers act on
+		svc, svcErr := newProvidersService(logger, networkID, swarmAddress, nonce, signer, localStore, retrieval, post, batchStore, stamperStore, p2ps, kad, addressbook, stateStore)
+		if svcErr != nil {
+			return nil, fmt.Errorf("content providers: %w", svcErr)
 		}
+		providersService = svc
 		providersService.Start()
 		b.providersCloser = providersService
 		providersAPI = providersService
@@ -1634,6 +1641,10 @@ func NewBee(
 		apiService.MustRegisterMetrics(saludService.Metrics()...)
 		apiService.MustRegisterMetrics(stateStoreMetrics.Metrics()...)
 		apiService.MustRegisterMetrics(getMetrics(nodeMetrics)...)
+
+		if providersService != nil {
+			apiService.MustRegisterMetrics(providersService.Metrics()...)
+		}
 
 		if pullerService != nil {
 			apiService.MustRegisterMetrics(pullerService.Metrics()...)

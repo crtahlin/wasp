@@ -49,6 +49,23 @@ const (
 	preWrite = time.Hour
 	// tickInterval is how often announcements are checked.
 	tickInterval = time.Minute
+	// discoverTimeout bounds one discovery or hinted-connect run, so a hung
+	// lookup or dial cannot hold a goroutine for the life of the node. It is
+	// the default for Service.timeout, which a test can shorten per service;
+	// it must not be a package variable, because a test writing one races
+	// every other test's background goroutines reading it.
+	//
+	// It bounds the whole run, and the work inside it is not bounded per
+	// overlay. p2p takes its own 15 second timeout per UNDERLAY, inside its
+	// loop over an address's underlays, and a discovered provider's address
+	// carries up to MaxUnderlays of them, so a single Connect can consume up
+	// to 4 times 15 seconds on its own. The hinted path then dials up to
+	// maxProviderHints overlays serially, that constant living in pkg/api. So
+	// this bound admits at most about two overlays where each address has one
+	// underlay, and can cut off inside the first overlay's underlay list where
+	// an address has several. A consequence of the value, not a risk; see the
+	// spec.
+	discoverTimeout = 30 * time.Second
 
 	announcedPrefix = "providers_announced_"
 )
@@ -94,7 +111,14 @@ type Options struct {
 	Address func() (*bzz.Address, error)
 	// Connect connects to a provider found by a lookup, without forcing past
 	// a full bin. It may be nil.
-	Connect func(ctx context.Context, addr *bzz.Address) error
+	//
+	// alreadyConnected reports that no dial was needed because the node was
+	// already connected to that peer. It is carried in its own return value
+	// rather than as a sentinel error, so that a caller writing the obvious
+	// error check cannot silently turn a usable provider into a skipped one.
+	// Only the implementation can tell the two apart, and the measurement for
+	// issue #369 has to.
+	Connect func(ctx context.Context, addr *bzz.Address) (alreadyConnected bool, err error)
 	// Resolve returns a peer's address from the address book, for dialing
 	// an overlay named in a download hint. It may be nil.
 	Resolve func(overlay swarm.Address) (*bzz.Address, error)
@@ -112,20 +136,22 @@ type Announcement struct {
 // Service announces the content this node provides and looks up providers of
 // content for downloads.
 type Service struct {
-	opts   Options
-	logger log.Logger
-	owner  []byte
+	opts    Options
+	logger  log.Logger
+	metrics metrics
+	owner   []byte
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu     sync.Mutex
-	now    func() time.Time
-	cache  map[string]cacheEntry
-	checks []readBack
-	warned map[string]uint64
-	closed bool
+	mu      sync.Mutex
+	now     func() time.Time
+	timeout time.Duration
+	cache   map[string]cacheEntry
+	checks  []readBack
+	warned  map[string]uint64
+	closed  bool
 
 	// annMu keeps a withdrawal from racing the loop's save of the same key.
 	annMu sync.Mutex
@@ -153,14 +179,16 @@ func New(o Options) (*Service, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
-		opts:   o,
-		logger: o.Logger.WithName(loggerName).Register(),
-		owner:  owner.Bytes(),
-		ctx:    ctx,
-		cancel: cancel,
-		now:    time.Now,
-		cache:  make(map[string]cacheEntry),
-		warned: make(map[string]uint64),
+		opts:    o,
+		logger:  o.Logger.WithName(loggerName).Register(),
+		metrics: newMetrics(),
+		owner:   owner.Bytes(),
+		ctx:     ctx,
+		cancel:  cancel,
+		timeout: discoverTimeout,
+		now:     time.Now,
+		cache:   make(map[string]cacheEntry),
+		warned:  make(map[string]uint64),
 	}, nil
 }
 
@@ -270,6 +298,7 @@ func (s *Service) Lookup(ctx context.Context, k []byte) ([]*Record, error) {
 	now := s.now()
 	if e, ok := s.cache[key]; ok && now.Before(e.expires) {
 		s.mu.Unlock()
+		s.metrics.LookupsServedFromCache.Inc()
 		return e.records, nil
 	}
 	s.mu.Unlock()
@@ -278,8 +307,10 @@ func (s *Service) Lookup(ctx context.Context, k []byte) ([]*Record, error) {
 	records := s.verify(ctx, k, w, s.candidates(ctx, k, w))
 	if err := ctx.Err(); err != nil {
 		// an interrupted lookup is not cached
+		s.metrics.LookupsCanceled.Inc()
 		return records, err
 	}
+	s.metrics.LookupsCompleted.Inc()
 
 	s.mu.Lock()
 	if len(s.cache) >= lookupCacheMax {
@@ -307,10 +338,20 @@ func (s *Service) Lookup(ctx context.Context, k []byte) ([]*Record, error) {
 // or the service closes.
 func (s *Service) Discover(ctx context.Context, k []byte, set Adder) {
 	s.goBackground(func() {
-		ctx, cancel := context.WithCancel(ctx)
+		// Discovery is node-scoped: a provider, once connected, is useful to
+		// later downloads and to none of the request that found it, because a
+		// lookup takes longer than that request has left. Deriving from the
+		// caller means the work dies with whichever chunk fetch happened to be
+		// the 64th, which on erasure-coded content is a prefetch fetch
+		// cancelled within milliseconds. WithoutCancel keeps the caller's
+		// values and drops its cancellation; the service context still ends
+		// the work and the timeout bounds it. See issue #369.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.discoverBound())
 		defer cancel()
 		stop := context.AfterFunc(s.ctx, cancel)
 		defer stop()
+
+		s.metrics.DiscoveriesStarted.Inc()
 
 		records, err := s.Lookup(ctx, k)
 		if err != nil {
@@ -323,13 +364,43 @@ func (s *Service) Discover(ctx context.Context, k []byte, set Adder) {
 			// add first: the preferred set only uses connected peers, so a
 			// provider that is already connected is useful at once
 			set.Add(r.Address.Overlay)
-			if s.opts.Connect != nil {
-				if err := s.opts.Connect(ctx, r.Address); err != nil {
-					s.logger.Debug("connect to provider failed", "peer_address", r.Address.Overlay, "error", err)
-				}
+			// The set is worth keeping even when the run is cut off, so the add
+			// above happens first and unconditionally. Only the dialing stops:
+			// calling Connect once the context is done would return a context
+			// error for every remaining record, which is not a provider that
+			// cannot be reached and must not be counted as one.
+			if s.opts.Connect == nil || ctx.Err() != nil {
+				continue
 			}
+			already, err := s.opts.Connect(ctx, r.Address)
+			s.countConnect(already, err, r.Address.Overlay, "provider")
 		}
 	})
+}
+
+// countConnect records the outcome of one connect and logs a failure. The
+// three outcomes are kept apart because a bare success does not mean a dial
+// happened: libp2p short-circuits an already-connected peer, and that
+// short-circuit is keyed on the remote address rather than the peer, so it can
+// be missed for a peer connected on another underlay. See issue #369 and the
+// note on ConnectsDialed.
+func (s *Service) countConnect(alreadyConnected bool, err error, overlay swarm.Address, what string) {
+	switch {
+	case err == nil && alreadyConnected:
+		s.metrics.ConnectsAlreadyConnected.Inc()
+	case err == nil:
+		s.metrics.ConnectsDialed.Inc()
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// The run was cut off, by shutdown or by the timeout. Counting this as
+		// a failed connect would put up to lookupCandidates failures on a
+		// single shutdown and make ConnectsFailed unusable as evidence that
+		// providers are undialable, which is what the measurement reads it
+		// for.
+		s.logger.Debug("connect to "+what+" abandoned", "peer_address", overlay, "error", err)
+	default:
+		s.metrics.ConnectsFailed.Inc()
+		s.logger.Debug("connect to "+what+" failed", "peer_address", overlay, "error", err)
+	}
 }
 
 // ConnectHints connects, in the background, to the overlays named in a
@@ -340,12 +411,24 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
 		return
 	}
 	s.goBackground(func() {
-		ctx, cancel := context.WithCancel(ctx)
+		// Same reason as Discover: a hinted dial is worth having after the
+		// request that named it has gone, and deriving from that request
+		// cancels the dial when the response ends. See issue #369.
+		//
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.discoverBound())
 		defer cancel()
 		stop := context.AfterFunc(s.ctx, cancel)
 		defer stop()
 
+		s.metrics.HintedConnectsStarted.Inc()
+
 		for _, o := range overlays {
+			// Unlike Discover, this returns rather than continuing: there is
+			// no preferred set to fill here, so once the run is cut off there
+			// is nothing left worth doing.
+			if ctx.Err() != nil {
+				return
+			}
 			if o.Equal(s.opts.Overlay) {
 				continue
 			}
@@ -354,9 +437,8 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
 				s.logger.Debug("hinted provider not in the address book", "peer_address", o, "error", err)
 				continue
 			}
-			if err := s.opts.Connect(ctx, addr); err != nil {
-				s.logger.Debug("connect to hinted provider failed", "peer_address", o, "error", err)
-			}
+			already, err := s.opts.Connect(ctx, addr)
+			s.countConnect(already, err, o, "hinted provider")
 		}
 	})
 }
@@ -633,6 +715,14 @@ func (s *Service) warnOnce(k []byte, w uint64, err error) {
 	if !ok || last != w {
 		s.logger.Warning("provider announcement not written", "key", hex.EncodeToString(k), "window", w, "error", err)
 	}
+}
+
+// discoverBound is how long one discovery or hinted-connect run may take. Read
+// under the lock, as clock does for now, because a test can change it.
+func (s *Service) discoverBound() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.timeout
 }
 
 func (s *Service) clock() time.Time {
