@@ -5,8 +5,12 @@
 package api
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"sync"
 
@@ -60,10 +64,46 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 	headers := struct {
 		Encrypt bool              `map:"Swarm-Encrypt"`
 		RLevel  *redundancy.Level `map:"Swarm-Redundancy-Level" validate:"omitempty,rLevel"`
+		IsDir   bool              `map:"Swarm-Collection"`
 	}{}
 	if response := s.mapStructure(r.Header, &headers); response != nil {
 		response("invalid header params", logger, w)
 		return
+	}
+
+	// A directory is selected by the header alone, deliberately not by the
+	// content type the way /bzz also does it. Dispatching on a multipart or tar
+	// content type would silently change what an existing request means: a tar
+	// posted here today is stored as a blob, and would become its contents.
+	// See docs/experiments/content-providers/directory-ingest.md.
+	var dReader dirReader
+	if headers.IsDir {
+		if r.Body == http.NoBody {
+			logger.Error(nil, "local ingest: request has no body")
+			jsonhttp.BadRequest(w, errInvalidRequest)
+			return
+		}
+		// The parse error is ignored; an unsupported type falls to the default.
+		mediaType, params, _ := mime.ParseMediaType(r.Header.Get(ContentTypeHeader))
+		switch mediaType {
+		case contentTypeTar:
+			dReader = &tarReader{r: tar.NewReader(r.Body), logger: logger}
+		case multiPartFormData:
+			dReader = &multipartReader{r: multipart.NewReader(r.Body, params["boundary"])}
+		default:
+			logger.Error(nil, "local ingest: invalid content-type for a collection")
+			jsonhttp.BadRequest(w, errInvalidContentType)
+			return
+		}
+		defer r.Body.Close()
+
+		// Without a root index document GET /bzz/{ref}/ answers 404 even with
+		// every chunk held locally, so a site ingested without one is reachable
+		// only by full path. Worth a warning rather than a refusal: serving by
+		// full path is a legitimate use.
+		if r.Header.Get(SwarmIndexDocumentHeader) == "" {
+			logger.Warning("local ingest: collection has no index document, its bare root will not be servable")
+		}
 	}
 
 	// DefaultUploadLevel, not DefaultDownloadLevel. Pinning uses the download
@@ -79,7 +119,14 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 	// A refusal on a declared length saves reading a body that cannot fit.
 	// It is a convenience and not the enforcement: Content-Length is absent
 	// under chunked transfer encoding and is client-supplied in any case.
-	if limit > 0 && r.ContentLength > 0 {
+	//
+	// Skipped entirely for a collection. CalculateNumberOfChunks models a flat
+	// blob, so for an archive it knows nothing about tar or multipart framing
+	// and nothing about the manifest node chunks, which for many small files
+	// outweigh the file chunks themselves. A check that returns a confident
+	// wrong answer is worse than no check; the mid-stream claim is the real
+	// enforcement either way.
+	if !headers.IsDir && limit > 0 && r.ContentLength > 0 {
 		want := uint64(CalculateNumberOfChunks(r.ContentLength, headers.Encrypt))
 		if committed+reserved+want > limit {
 			logger.Warning("local ingest refused, declared length does not fit under the limit", "limit", limit, "held_chunks", committed, "wanted", want)
@@ -107,9 +154,29 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	counted := newCountingPutter(session)
-	p := requestPipelineFn(counted, headers.Encrypt, rLevel)
 
-	reference, err := p(r.Context(), r.Body)
+	// One session for everything. The file chunks, every manifest node chunk
+	// and the root all go through the same counting putter, so manifest chunks
+	// count against the limit as they must: they are chunks on the same disk.
+	// storeDir takes a bare Putter and a bare Getter and no stamper, which is
+	// what makes the directory path work here unchanged.
+	var reference swarm.Address
+	if headers.IsDir {
+		reference, err = storeDir(
+			r.Context(),
+			headers.Encrypt,
+			dReader,
+			logger,
+			counted,
+			s.storer.ChunkStore(),
+			r.Header.Get(SwarmIndexDocumentHeader),
+			r.Header.Get(SwarmErrorDocumentHeader),
+			rLevel,
+		)
+	} else {
+		p := requestPipelineFn(counted, headers.Encrypt, rLevel)
+		reference, err = p(r.Context(), r.Body)
+	}
 	if err != nil {
 		// The limit is reported out of band rather than by errors.Is,
 		// because hashtrie.Sum formats the dispersed-replica failure with
@@ -122,6 +189,28 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 			held, _, limit := s.storer.LocalIngestUsage()
 			logger.Warning("local ingest refused, limit reached", "limit", limit, "held_chunks", held)
 			respondLocalIngestFull(ow, held, limit)
+			return
+		}
+		// A malformed archive is the caller's fault, not this node's. Both
+		// answer through ow, like every other failure here, so the collection
+		// is released rather than left on disk until the next restart.
+		switch {
+		case errors.Is(err, errEmptyDir):
+			logger.Debug("local ingest: collection has no files", "error", err)
+			jsonhttp.BadRequest(ow, errEmptyDir)
+			return
+		case errors.Is(err, tar.ErrHeader):
+			logger.Debug("local ingest: invalid tar header", "error", err)
+			jsonhttp.BadRequest(ow, "invalid tar archive")
+			return
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			// A body that stops mid-archive, which includes anything shorter
+			// than one 512-byte tar header block. archive/tar reports the two
+			// cases differently and both are the caller's fault, so both are
+			// 400. The stamped route answers 500 for this one; it is unmodified
+			// upstream code and out of scope here.
+			logger.Debug("local ingest: archive ends early", "error", err)
+			jsonhttp.BadRequest(ow, "archive ends before it is complete")
 			return
 		}
 		logger.Debug("local ingest: split write all failed", "error", err)

@@ -1343,7 +1343,7 @@ paths:
   "/wasp/ingest":
     post:
       summary: "Store content locally without postage (wasp)"
-      description: "Splits the request body into chunks and stores them in this node's own store, with no postage and without pushing anything to the network. The reference is identical to the one a stamped POST /bytes of the same bytes at the same redundancy level returns. This is not an upload: no other node holds the content, so it is reachable only by a requester that names this node with the Wasp-Providers header, and it is not replicated, so losing this node loses the content. The content is stored as an ordinary pinning collection and is removed with DELETE /pins/{reference}. An encrypted ingest cannot be announced through /wasp/providers, which refuses encrypted references. Answers 403 unless the node runs with local-ingest-enable, and 507 at local-ingest-limit."
+      description: "Stores content in this node's own store, with no postage and without pushing anything to the network. By default the request body is split into chunks as POST /bytes does, and the reference is identical to the one a stamped POST /bytes of the same bytes at the same redundancy level returns. With Swarm-Collection set the body is a tar or multipart archive and is stored as a collection with its manifest, so a directory or website can be hosted without postage, and the manifest root equals the one a stamped POST /bzz of the same archive returns on the same node. Unlike POST /bzz, a collection is selected by that header alone and never by the content type, so an archive posted without it is stored as a single blob. Manifest chunks count against local-ingest-limit, and for many small files they are most of the cost. This is not an upload: no other node holds the content, so it is reachable only by a requester that names this node with the Wasp-Providers header, and it is not replicated, so losing this node loses the content. The content is stored as an ordinary pinning collection and is removed with DELETE /pins/{reference}. An encrypted ingest cannot be announced through /wasp/providers, which refuses encrypted references. Answers 403 unless the node runs with local-ingest-enable, and 507 at local-ingest-limit."
       tags:
         - Local ingest
       parameters:
@@ -1358,13 +1358,23 @@ paths:
           name: swarm-redundancy-level
           required: false
           description: "Redundancy level. Defaults to the upload default, as POST /bytes does, not the download default that pinning uses."
+        - $ref: "SwarmCommon.yaml#/components/parameters/SwarmCollection"
+        - $ref: "SwarmCommon.yaml#/components/parameters/SwarmIndexDocumentParameter"
+        - $ref: "SwarmCommon.yaml#/components/parameters/SwarmErrorDocumentParameter"
       requestBody:
-        description: Content to store
+        description: "Content to store. A single blob by default, or a tar or multipart archive when Swarm-Collection is set."
         content:
           application/octet-stream:
             schema:
               type: string
               format: binary
+          application/x-tar:
+            schema:
+              type: string
+              format: binary
+          multipart/form-data:
+            schema:
+              type: object
       responses:
         "201":
           description: Stored
@@ -1411,7 +1421,7 @@ paths:
                 properties:
                   message:
                     type: string
-                  chunks:
+                  held:
                     type: integer
                     format: int64
                     description: Chunks currently held from local ingests
