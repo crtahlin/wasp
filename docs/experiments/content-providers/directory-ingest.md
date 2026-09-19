@@ -335,12 +335,20 @@ Arms:
    document with a matching SHA-256.
 3. **Serving every path.** `GET /bzz/{root}/{path}` for each file, SHA-256
    matched against the local original.
-4. **Unreachable without a hint.** A second node with no hint asks for the root
-   and for one inner path. Both 404. **Three runs**: this is a network
+4. **Unreachable without a hint, on an archive that has NEVER been stamped.** A
+   second node with no hint asks for the root and for one inner path. Both 404.
+   **Three runs**: this is a network
    retrieval whose answer arrives on a timeout and whose outcome depends on
    whether any forwarding peer has cached the content, so it is not a
    deterministic comparison. #326 ran the equivalent arm three times and
    recorded the times.
+
+   **It must not use arm 1's archive, and a first version of this spec did not
+   say so.** Arm 1 requires a stamped upload of the same archive, and the roots
+   are identical, which is arm 1's own result. So that upload publishes the
+   content to the network under the exact reference this arm needs to be
+   unreachable, and the arm returns 200 on a node behaving correctly. It did.
+   Arms 4 and 4b take a separate archive that is ingested and never stamped.
 
 4b. **Served to a second node that names the holder.** The requester asks with
    `Wasp-Providers` naming the holder, for the bare root and for every inner
@@ -465,8 +473,8 @@ what invalidates a run.
    in all three runs;
 4. **(arm 4b)** a second node naming the holder serves the bare root and every
    inner path with matching SHA-256, in all three runs;
-5. **(arm 5)** the reported chunk count equals the `TotalChunks` rise, within
-   the drift the paired control window shows, on content the node had not held;
+5. **(arm 5)** the reported chunk count equals the **`ReferenceCount`** rise
+   exactly, on content the node had not held and with a flat control window;
 6. **(arm 6)** an over-limit directory answers 507 and leaves `TotalChunks` flat
    against its control window.
 
@@ -474,13 +482,19 @@ what invalidates a run.
 
 - the roots differ **on one node**, which would mean the ingest path and the
   stamped path disagree and the claim this rests on is false;
-- the reported count differs from the `TotalChunks` rise in **either** direction
-  on a run that qualifies, meaning fresh content and a flat control window.
-  Short means chunks are held and not counted, so the limit can be bypassed;
-  over means the node reports holding more than it stored. A run where
-  `SharedSlots` or `ReferenceCount` moved is **not** rejected, because that is
-  deduplication rather than a miscount; it is discarded under what invalidates a
-  run, since its content was not new to the node after all;
+- the reported count differs from the **`ReferenceCount`** rise in either
+  direction on a run that qualifies, meaning fresh content and a flat control
+  window. Short means chunks are held and not counted, so the limit can be
+  bypassed; over means the node reports holding more than it stored;
+- **`TotalChunks` is not the counter to compare against, and a first version of
+  this spec said it was.** Measured, the reported count is short against
+  `TotalChunks` by a constant 3 for any collection and by 0 for a blob, the same
+  3 whether the collection is 26 chunks or 206. Every unencrypted manifest shares
+  a few canonical node chunks with every other one, so a node that has ingested
+  anything before already holds them, and `TotalChunks` cannot rise for a chunk
+  already stored. Demanding equality there would reject a correct
+  implementation, which it did. Record the `TotalChunks` rise and `SharedSlots`
+  as the evidence that explains the difference, and decide on `ReferenceCount`;
 - any error path leaves a pinned collection behind, or leaves `TotalChunks`
   raised after the collection is gone;
 - **any Accept condition fails for a reason not listed under what invalidates a
@@ -506,12 +520,17 @@ what invalidates a run.
   database-wide counter, so a run whose control window drifts is discarded
   rather than read as a result. Without this, ordinary counter noise would trip
   a reject clause;
-- **a run of arm 5 whose `SharedSlots` or `ReferenceCount` moved**, which means
-  the node already held part of the archive, so the comparison the arm makes is
-  not the one it intends. Deduplication invalidates a run; it never rejects the
-  design;
+- **a run of arm 5 whose `SharedSlots` moved by more than the constant a
+  collection always shares**, which means the node already held part of the
+  archive itself, so the comparison is not the one the arm intends.
+  Deduplication invalidates a run; it never rejects the design. **Not
+  `ReferenceCount`**: it rises by one per chunk stored on every ingest ever made,
+  so a first version of this clause would have discarded every run;
 - arm 4 running **after** arm 4b, since the network fetch caches the content on
   forwarding peers and the 404 can no longer be expected;
+- **arms 4 or 4b using an archive that was also uploaded with a stamp**, arm 1's
+  included. The stamped upload puts the content on the network under the same
+  reference, so neither arm is testing what it claims;
 - the two sides of arm 1 running on **different hosts**, since the MIME table
   and the path handling are host-derived. Different operating systems, or hosts
   with different MIME databases, invalidate that comparison rather than refuting
