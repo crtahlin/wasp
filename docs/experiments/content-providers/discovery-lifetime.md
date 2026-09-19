@@ -820,10 +820,14 @@ Accepted when all of:
 5. **(arm 6)** the same three ordered legs hold in all three runs, over the
    interval between the single hinted request ending and the end of the 45-second
    poll;
-6. **(unit)** a caller context cancelled before the call does not stop the work;
-   closing the service does stop it and `Close` returns within two seconds; the
-   timeout abandons a dial that never returns; and both counter pairs distinguish
-   the cases the arms assume.
+6. **(unit)** for **both** the discovery and the hinted path: a caller context
+   cancelled before the call does not stop the work; closing the service does
+   stop it and `Close` returns within two seconds; the timeout abandons a dial
+   that never returns; a run cut off before it dials calls `Connect` zero times
+   while still keeping what the lookup found; both counter pairs distinguish the
+   cases the arms assume; and **the started counters rise for a run that found
+   nothing**, which is the property that makes them denominators rather than
+   success counts.
 
 **A faster non-overlap is neither accepted nor rejected: it is reported and
 investigated.** Two versions of this spec have now left one of the three
@@ -971,21 +975,71 @@ choosing between releases would want both.
     reaches `goBackground`, which checks `s.closed` under `s.mu` (`:198-203`), so
     a `Close` racing the call makes the goroutine never start and the test pass
     vacuously. Signal from inside the stub that the goroutine is running first.
-  - `TestConnectHintsSurvivesCallerCancel`: the same two properties for the
-    hinted path.
-  - `TestDiscoverBoundedByTimeout`: with `discoverTimeout` shortened through
-    `export_test.go`, a `Connect` that never returns is abandoned and `Close`
-    still returns.
+  - `TestConnectHintsSurvivesCallerCancel` and `TestConnectHintsStopsOnClose`:
+    the same two properties for the hinted path, one test each.
+  - `TestDiscoverBoundedByTimeout` and `TestConnectHintsBoundedByTimeout`: with
+    the bound shortened through the per-service setter, a `Connect` that never
+    returns is abandoned and `Close` still returns. **Both paths need this.**
+    Leaving `ConnectHints` entirely unbounded passed the whole suite when only
+    the `Discover` variant existed, and that is the path that fires on every
+    request carrying the header with no cache in front of it.
+
+    **The `Discover` variant needs a bound of seconds, not milliseconds**, and
+    the hinted one does not. That bound has to cover the **lookup** as well as
+    the dial, and the lookup fans out to `Slots` goroutines plus one per
+    candidate; at 200 milliseconds under `-race` on one core it does not finish,
+    no dial is attempted, and the test fails blaming the timeout for something
+    the timeout did not do. Measured: three failures in five at
+    `-race -count=5 -cpu=1`. Both variants also wait for the dial to start
+    before asserting, so that never reaching it reports as itself.
   - `TestLookupCountersDistinguishCacheFromWork`: a cache hit raises
     `LookupsServedFromCache` and **not** `LookupsCompleted`; a real lookup raises
     `LookupsCompleted` and not the other; a short key raises neither. This is the
     pair arm 5 decides on, and an earlier version of this spec defined the two so
     that a cache hit raised both, which made arm 5's condition unsatisfiable.
+  - `TestLookupCanceledCounted`: a lookup on a cancelled context raises
+    `LookupsCanceled` and not `LookupsCompleted`. This is arm 1's primary
+    observable and drives its first reject clause, and it had no coverage at all
+    in a first implementation.
   - `TestConnectCountersDistinguishDialFromAlreadyConnected`: the split above,
-    which is what stops arms 2 and 6 passing without a dial.
+    which is what stops arms 2 and 6 passing without a dial. Its table also
+    covers `context.Canceled` and `context.DeadlineExceeded` raising **no**
+    counter, which is what stops one shutdown reading as many unreachable
+    providers.
+  - **The denominators need two tests, and the obvious one is not enough.**
+    `TestDiscoveriesStartedIsADenominator` is arm 5's shape as a unit test:
+    three discoveries of one key inside the cache window give
+    `DiscoveriesStarted` 3 against `LookupsCompleted` 1 and
+    `LookupsServedFromCache` 2, with the three calls **sequenced through the
+    dial**, since concurrent runs race the cache and give three real lookups.
+
+    That test alone does **not** hold the property, which was found by
+    reproduction rather than by reading. Moving `DiscoveriesStarted` so that it
+    counts only runs whose lookup returned records passes it, because every
+    lookup in it finds records, while destroying the denominator outright and
+    breaking acceptance condition 4. What catches that is
+    `TestDiscoveriesStartedCountsAFruitlessRun`: a discovery of a key nobody
+    announced, where the lookup runs, completes and finds nothing, and the
+    counter must still say a discovery happened. That is the distinction the
+    counter exists for, stated directly. Keep both.
+
+    `TestHintedConnectsStartedCounted` is the same denominator for the hinted
+    path, which has no cache in front of it, so counting once per call is the
+    whole property.
+  - `TestCancelledRunStopsDialingButKeepsTheSet` and
+    `TestCancelledHintedRunDoesNotDial`: a run cut off before it dials calls
+    `Connect` zero times, and the `Discover` one still adds every record it found
+    to the preferred set. **Without these the guards are unobservable**, because
+    a cancelled connect raises no counter, so either guard could be deleted and
+    the whole suite would still pass.
 - `docs/DIFFERENCES.md`: a row naming the exported counters and the lifetime
   change.
 - `make format`, `make build`, `make test`, `make lint`, `make protocol-freeze`.
+
+Fourteen test functions in all. The list above is kept level with the file
+deliberately: this spec is the durable record, and two of these tests encode a
+finding that is not obvious from reading them, that the cache-shaped denominator
+test is insufficient on its own.
 
 The unit tests cover the lifetime properties and that the counters mean what the
 arms assume. Nothing in them shows the defect is gone on real content, which is

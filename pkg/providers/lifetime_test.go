@@ -465,6 +465,9 @@ func TestDiscoveriesStartedCountsAFruitlessRun(t *testing.T) {
 	if got.LookupsCompleted != 1 {
 		t.Fatalf("completed=%v, want 1", got.LookupsCompleted)
 	}
+	// These last two are corroboration, not the property: with no records there
+	// is nothing to dial or add either way. The guard itself is held by
+	// TestCancelledRunStopsDialingButKeepsTheSet.
 	if c := atomic.LoadInt64(&calls); c != 0 {
 		t.Fatalf("a fruitless run dialed %d times, want 0", c)
 	}
