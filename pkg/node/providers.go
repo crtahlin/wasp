@@ -99,7 +99,10 @@ func newProvidersService(
 		Connect: func(ctx context.Context, addr *bzz.Address) error {
 			got, err := p2ps.Connect(ctx, addr.Underlays)
 			if errors.Is(err, p2p.ErrAlreadyConnected) {
-				return nil
+				// Success, and deliberately not a bare nil: the caller counts
+				// a dial separately from a peer that was already connected,
+				// and only this branch can tell them apart. See issue #369.
+				return providers.ErrAlreadyConnected
 			}
 			if err != nil {
 				return err
