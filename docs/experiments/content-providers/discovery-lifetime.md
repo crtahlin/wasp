@@ -564,8 +564,15 @@ starting recovery` and rebuilds before `/readiness` reports ready or a single pe
 reconnects. Measured on a store of about 2.5 million chunks: still `notReady` with
 **zero peers after five and a half minutes**, then ready with 79 peers about 47
 seconds after the rebuild finished. So a restart costs roughly six minutes, and
-six restarts in one run is not merely slow: it leaves the store dirty six times
-over, which is a risk to the data that this arm is not worth taking.
+six restarts in one run is about half an hour of recovery in a run that is otherwise
+a few minutes of work.
+
+**That is a cost, not a risk, and an earlier version of this paragraph said
+otherwise.** These are experiment nodes, not nodes playing the redistribution
+game, so a dirty store and a rebuild cost time and nothing else. Budget for it
+rather than avoid it: arm 4 needs the alternating design and is worth the half
+hour. Arm 1 does not, because its observable is structural rather than timing,
+which is the only reason it is exempt.
 
 So arm 1 takes its before state from the run recorded on
 [#369](https://github.com/crtahlin/wasp/issues/369#issuecomment-5739263845) and

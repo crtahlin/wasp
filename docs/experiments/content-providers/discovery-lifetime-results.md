@@ -11,10 +11,10 @@ Measured 2026-09-19 on the two-node bench, `bench-1` as the provider and
 in `cp290/t20b-discovery-lookup-after.txt`, all outside this repository per rule
 10.
 
-**Only arm 1 was run.** Arms 2, 3, 4, 5 and 6 were not, and the reason for
-stopping there is itself a measured constraint on the bench, set out below. This
-document is scoped to what arm 1 establishes and is explicit about what it does
-not.
+**Only arm 1 was run.** Arms 2, 3, 4, 5 and 6 were not. This document is scoped
+to what arm 1 establishes and is explicit about what it does not, which is most
+of the spec: arm 1 does **not** test the lifetime claim, and arms 2 and 6 are
+what do.
 
 ## The result
 
@@ -61,8 +61,9 @@ control holds in all three of its own.
   it equally, and at the default level the spec predicts exactly that, since the
   lookup finishes about 1.7 seconds into a download lasting several seconds.
 - **Nothing about the pre-registered negative**, that the triggering download
-  does not get faster. That is arm 4 and it needs before and after in one
-  session, which the constraint below forbids for now.
+  does not get faster. That is arm 4, which needs before and after in one
+  session and therefore the alternating build design. Affordable, at about half
+  an hour of recovery per run, and not yet run.
 - **Nothing about a later download using the provider**, arm 3, which is where
   any value would be and which the spec allows to come back negative.
 - **Nothing about the cache warming**, arm 5.
@@ -95,12 +96,20 @@ starting recovery` and rebuilds before `/readiness` reports ready or a single
 peer reconnects. Measured on a store of about 2.5 million chunks: still
 `notReady` with **zero peers after five and a half minutes**, then ready with 79
 peers about 47 seconds after the rebuild finished. So a restart costs roughly six
-minutes, and the design needed six of them per run. That is not merely slow: it
-leaves the store dirty six times over, which is a risk to the data that this arm
-is not worth taking.
+minutes, and the design needed six of them per run, about half an hour of
+recovery in a run that is otherwise a few minutes of work.
 
-The spec now records this, so that the next person does not rediscover it by
-doing it.
+**An earlier version of this section called that a risk to the data and stopped
+on those grounds. That premise was wrong and is withdrawn.** These are experiment
+nodes: they are not playing the redistribution game and their stores are not
+precious, so a dirty store and a rebuild cost time and nothing else. The
+constraint is cost, not risk, which means the alternating design is affordable
+where it is actually needed rather than ruled out. It is still not needed for arm
+1, whose observable is structural, so this arm's result stands as it is; it is
+needed for arm 4, and that arm is worth the half hour.
+
+The spec records the cost so that the next person budgets for it rather than
+discovering it mid-run.
 
 ## Three harness faults, all caught by gates, none of which existed at first
 
