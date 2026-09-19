@@ -335,12 +335,20 @@ Arms:
    document with a matching SHA-256.
 3. **Serving every path.** `GET /bzz/{root}/{path}` for each file, SHA-256
    matched against the local original.
-4. **Unreachable without a hint.** A second node with no hint asks for the root
-   and for one inner path. Both 404. **Three runs**: this is a network
+4. **Unreachable without a hint, on an archive that has NEVER been stamped.** A
+   second node with no hint asks for the root and for one inner path. Both 404.
+   **Three runs**: this is a network
    retrieval whose answer arrives on a timeout and whose outcome depends on
    whether any forwarding peer has cached the content, so it is not a
    deterministic comparison. #326 ran the equivalent arm three times and
    recorded the times.
+
+   **It must not use arm 1's archive, and a first version of this spec did not
+   say so.** Arm 1 requires a stamped upload of the same archive, and the roots
+   are identical, which is arm 1's own result. So that upload publishes the
+   content to the network under the exact reference this arm needs to be
+   unreachable, and the arm returns 200 on a node behaving correctly. It did.
+   Arms 4 and 4b take a separate archive that is ingested and never stamped.
 
 4b. **Served to a second node that names the holder.** The requester asks with
    `Wasp-Providers` naming the holder, for the bare root and for every inner
@@ -380,13 +388,28 @@ Arms:
    at least 64 chunks or the announced path with no header, and this spec does
    not claim it.
 5. **The count covers the manifest.** Record the chunk count the ingest reports,
-   and compare it against the rise in `ChunkStore.TotalChunks` read from
+   and compare it against the rise in **`ChunkStore.ReferenceCount`** read from
    `/debugstore` (`pkg/storer/debug.go:43`), across the ingest, with a paired
-   control window. **Three runs, on three archives of fresh random bytes**, for
+   control window **on that same counter**. Record the `TotalChunks` rise and
+   `SharedSlots` beside it as the evidence that explains any difference, and
+   decide on `ReferenceCount`. **Three runs, on three archives of fresh random
+   bytes**, for
    the reason under rule 7 above. The upload level is already MEDIUM by default
    (`localingest.go:69-75`), so the replicas are included without arranging
    anything. This is the arm that catches manifest chunks stored but not
    counted.
+
+   **The archive must contain no repeated chunk address, and random bytes are
+   what guarantees it.** `ReferenceCount` rises once per `Put`, incremented
+   unconditionally at
+   `pkg/storer/internal/chunkstore/chunkstore.go:92`, while the reported count
+   rises only for an address the session has not already seen, in
+   `countingPutter.admit` in `pkg/api/localingest.go`, and `Put` is called either
+   way. So an archive holding the same bytes twice, two identical files or one
+   file repeated, makes `ReferenceCount` rise by **more** than the reported count
+   **on a correct node**, and exact equality then fails for a reason that is not a
+   defect. The first measurement of this arm satisfied the condition by using
+   random bytes, which is luck rather than a rule, so it is a rule now.
 
    **Every run needs content the node has never held, and that is not a
    detail.** `TotalChunks` counts distinct addresses in the whole database; a
@@ -405,10 +428,15 @@ Arms:
    Arm 1 deliberately writes its archive to the holder twice, once ingested and
    once stamped, so arm 5 must not reuse it either.
 
-   **The control window must be flat, not merely measured.** Record
-   `SharedSlots` and `ReferenceCount` beside `TotalChunks` so that any
-   deduplication is visible rather than inferred, and discard a run whose
-   control window is not flat. That is the standard #341 reached, and it is what
+   **The control window must be flat, not merely measured, and it must be read
+   on the counter that decides.** `ReferenceCount` is database-wide and rises for
+   a chunk the node already holds, which `TotalChunks` cannot, so it moves under
+   ordinary cache and reserve traffic that leaves `TotalChunks` still. A window
+   flat on `TotalChunks` is therefore **not** evidence that `ReferenceCount` is
+   quiet, and an earlier version of this arm controlled the former while deciding
+   on the latter. Read the window on `ReferenceCount`, record `TotalChunks` and
+   `SharedSlots` beside it so that any deduplication is visible rather than
+   inferred, and discard a run whose `ReferenceCount` window is not flat. That is the standard #341 reached, and it is what
    makes exact equality the right test rather than an unfair one: with fresh
    content and a quiet node the two numbers have no legitimate reason to differ.
    An earlier draft of this spec instead allowed a tolerance drawn from
@@ -426,9 +454,30 @@ Arms:
    it. `TotalChunks` is arrived at independently of anything the code under test
    reports, which is the whole point.
 6. **Limit enforcement mid-stream.** A directory ingest against a limit it
-   crosses answers 507 and leaves no residue, measured on
-   `ChunkStore.TotalChunks` against a paired control window, as #341 did for the
-   blob path.
+   crosses answers 507 and leaves no residue, measured on **both
+   `ChunkStore.TotalChunks` and `ReferenceCount`** against a paired control
+   window, as #341 did for the blob path.
+
+   **Every run needs a never-ingested archive, for a reason a first pass here
+   missed entirely.** The residue check has no power against an archive the node
+   already holds: none of its chunks would be new, so `TotalChunks` reads flat on
+   a leak exactly as it does on a clean refusal. A first pass at this arm ingested
+   its 20 MB archive **successfully** on the run meant to be refused, and then
+   reported later refusals of what may have been that same archive as "leaving the
+   counter flat", which measured nothing at all. Three requirements follow. Give
+   every run its own archive of fresh random bytes. Read `ReferenceCount` as well,
+   because it rises for an already-held chunk where `TotalChunks` cannot, so it
+   detects a re-Put that `TotalChunks` hides. And run one **sensitivity control**:
+   a small fresh archive that fits, which must move both counters. A flat reading
+   is evidence of no residue only if a real ingest would not have read flat too.
+
+**Every attempt is recorded, with the reason it was discarded, including attempts
+that never became runs.** Invalidation is unbounded where the repeat allowance is
+not, so without this the number of attempts behind a reported run is invisible to
+a reader. That is not hypothetical: the first pass of arm 4b was set aside and its
+rows were never written down, which is how an unsupported count of bare-root
+failures reached a review round and why it took three of them to settle at one in
+twelve.
 
 Recorded per run: the reported chunk count; reported usage before and after;
 `ChunkStore.TotalChunks`, `SharedSlots` and `ReferenceCount` from `/debugstore`,
@@ -437,8 +486,8 @@ body.
 
 For the arms that get three runs, the quantity the spread is taken over differs
 and each arm names its own: **elapsed time, bytes returned and body SHA-256**
-for arms 4 and 4b, and **the `TotalChunks` delta against the control window**
-for arms 5 and 6. An earlier draft asked for a spread and then named only
+for arms 4 and 4b, and **the `ReferenceCount` delta against the control window,
+with the `TotalChunks` delta recorded beside it,** for arms 5 and 6. An earlier draft asked for a spread and then named only
 quantities the ingest arms do not produce.
 
 ## Acceptance
@@ -465,30 +514,79 @@ what invalidates a run.
    in all three runs;
 4. **(arm 4b)** a second node naming the holder serves the bare root and every
    inner path with matching SHA-256, in all three runs;
-5. **(arm 5)** the reported chunk count equals the `TotalChunks` rise, within
-   the drift the paired control window shows, on content the node had not held;
-6. **(arm 6)** an over-limit directory answers 507 and leaves `TotalChunks` flat
-   against its control window.
+5. **(arm 5)** the reported chunk count equals the **`ReferenceCount`** rise
+   exactly, on content the node had not held, **on a run whose paired
+   `ReferenceCount` control window reads zero and whose measurement window
+   contains no deliberate delay.** Exactness is safe only under those two
+   conditions, and "The measurement window is what drifts" below says why;
+6. **(arm 6)** an over-limit directory answers 507 and leaves **both
+   `TotalChunks` and `ReferenceCount`** flat against their control windows, on an
+   archive the node has never ingested, with the sensitivity control showing that
+   a fitting archive moves both.
 
 **Reject**, meaning the change does not land as written, if any of:
 
 - the roots differ **on one node**, which would mean the ingest path and the
   stamped path disagree and the claim this rests on is false;
-- the reported count differs from the `TotalChunks` rise in **either** direction
-  on a run that qualifies, meaning fresh content and a flat control window.
-  Short means chunks are held and not counted, so the limit can be bypassed;
-  over means the node reports holding more than it stored. A run where
-  `SharedSlots` or `ReferenceCount` moved is **not** rejected, because that is
-  deduplication rather than a miscount; it is discarded under what invalidates a
-  run, since its content was not new to the node after all;
-- any error path leaves a pinned collection behind, or leaves `TotalChunks`
-  raised after the collection is gone;
+- the reported count differs from the **`ReferenceCount`** rise in either
+  direction on a qualifying run, once the single repeat allowed under what
+  invalidates a run has been made. Short means chunks are held and not counted,
+  so the limit can be bypassed; over means the node reports holding more than it
+  stored;
+- any error path leaves a pinned collection behind, or leaves `TotalChunks` or
+  `ReferenceCount` raised after the collection is gone;
 - **any Accept condition fails for a reason not listed under what invalidates a
   run.** This clause is here because an earlier draft set five Accept conditions
   against three Reject clauses, leaving at least four outcomes that satisfied
   neither: residue without a leaked collection, an inner path answering 404 on
   the holder, the no-hint node answering 200, and usage moving by more than the
   reported count.
+
+**The measurement window is what drifts, not the ingest, and an earlier version
+of this spec got that wrong twice.** The quantity at risk is not how long the
+archive takes to store. It is the span between the two `/debugstore` reads that
+bracket the ingest, because every chunk any other part of the node stores inside
+that span is counted as though the ingest had stored it. So make that span as
+short as the measurement allows: read `/debugstore` immediately before the
+ingest and immediately after it returns, with **no sleep in between**.
+
+Measured, that is the entire difference between two passes of this arm, on the
+same node, with the same 1 MB archive, minutes apart. One harness slept five
+seconds between the ingest and the second read and gave reported 303 against a
+`ReferenceCount` rise of **309**. The other read immediately and gave 303 against
+**303**, three times over. The ingest itself took 0.11 seconds in both. At the
+drift rate separately measured on this node, 13 chunks in 20 seconds, a window
+about nine seconds long buys about six chunks, which is the excess observed.
+
+Two consequences, and they are why the conditions above are worded as they are.
+**Exact equality is a property of a tight window, not of a quiet node**, so
+demanding it without requiring the tight window rejects a correct node measured
+by a looser harness. A previous version of this spec did exactly that. And **a
+flat control window does not prove a flat measurement window**: the five-second
+pass had a control window reading zero and still drifted by six, so drift on this
+node arrives in bursts rather than at a steady rate. That is why a single
+differing run is repeated rather than treated as a result.
+
+**A note on the counter, which is not a reject condition.** `TotalChunks` is not
+the counter to compare against, and a first version of this spec said it was.
+Every unencrypted manifest shares a few canonical node chunks with every other
+one, so a node that has ingested anything before already holds them, and
+`TotalChunks` cannot rise for a chunk already stored. The reported count is
+therefore short against it for a collection and exact for a blob, and demanding
+equality there rejects a correct implementation, which it did.
+
+**Do not predict the shortfall, and do not build a rule on it.** It reads **3**
+on every collection measured directly, at 26, 206 and 303 chunks, six runs in
+all, and **0** for a blob. The blob's zero is not a fourth data point but a
+prediction of the mechanism: a blob has no manifest, so there are no shared
+manifest nodes for it to hold already, and zero is the only value consistent with
+the explanation.
+
+Three is nonetheless a property of these archives rather than a constant of the
+design. A shallow manifest trie shares few canonical nodes with every other
+manifest; a deeper one shares more, so the shortfall is a function of manifest
+shape and the only safe general statement is that it is small, positive for a
+collection and zero for a blob. Record it per run.
 
 **What invalidates a run** rather than deciding it:
 
@@ -502,16 +600,73 @@ what invalidates a run.
   does change the reference;
 - an encrypted arm used for the equivalence comparison, which cannot hold by
   construction;
-- **a paired control window that is not flat.** Arms 5 and 6 read a
-  database-wide counter, so a run whose control window drifts is discarded
-  rather than read as a result. Without this, ordinary counter noise would trip
-  a reject clause;
-- **a run of arm 5 whose `SharedSlots` or `ReferenceCount` moved**, which means
-  the node already held part of the archive, so the comparison the arm makes is
-  not the one it intends. Deduplication invalidates a run; it never rejects the
-  design;
+- **a paired control window that is not flat, read on `ReferenceCount` for arm 5
+  and on both counters for arm 6.** Both arms read database-wide counters, so a
+  run whose control window drifts is discarded rather than read as a result.
+  Without this, ordinary counter noise would trip a reject clause;
+- **a run whose measurement window contains a deliberate delay**, or whose
+  control window was not read over a span comparable to it. The measurement
+  window is the two `/debugstore` reads bracketing the ingest, and anything
+  waiting inside it is drift the ingest gets blamed for;
+- **a differing run with anything between its two `/debugstore` reads other than
+  the ingest itself.** Discard it and repeat once, with the reads immediately
+  around the ingest, because drift is bursty and a control window reading zero
+  does not prove the next window was quiet.
+
+  The criterion is deliberately **what is between the two reads**, not "the
+  tightest window the harness allows". The second is a property of the harness
+  rather than of the row, cannot be decided from the row at all, and is always
+  arguable since a harness can in principle be tightened further, so it would put
+  back the after-the-fact judgement this clause exists to remove. What is between
+  the reads is settled by reading five lines of shell, which is how the two passes
+  of arm 5 were separated.
+
+  This clause overlaps the deliberate-delay clause above and only ever bites on
+  looseness that was **not** deliberate, since a deliberate delay invalidates a
+  run whether or not it differs. Said so that the next reader does not have to
+  choose between two clauses for the same row.
+
+  **The repeat is made once and once only**, so this cannot be used to retry a
+  failing measurement until it passes; a difference surviving the repeat is a
+  reject under the clause above. **The limit counts repeats that produced a
+  readable result.** A repeat invalidated under any other clause, its own control
+  window drifting for instance, is replaced in the ordinary way and does not
+  consume the allowance, because otherwise that run slot would have no readable
+  observation and no clause permitting one to be obtained.
+
+  This clause exists because an earlier version of the reject clause said a single
+  differing run "is not a reject", which contradicted the rule above that a single
+  failing run **is** one, and left one or two differing runs satisfying neither
+  Accept nor Reject: exactly the gap the catch-all clause was written to close;
+- **a run of arm 5 whose archive the node had already ingested**, because the
+  root is then an existing pin collection, the ingest answers as a duplicate, and
+  it reports nothing against a rise of nothing. That is the vacuity the arm's own
+  fresh-content rule exists to prevent, and it is the only freshness requirement
+  arm 5 actually needs;
+- an earlier version of the clause above discarded a run whose `SharedSlots` had
+  moved "by more than the constant a collection always shares", and **both halves
+  of it were wrong**. There is no such constant, as the note above records. And
+  deduplication does not break the `ReferenceCount` comparison at all: a `Put` of
+  an address the node already holds still raises that chunk's reference count, and
+  the session still counts the address once, so equality holds for already-held
+  content just as it does for new content. Only a repeated address **within one
+  archive** breaks it, which arm 5 now forbids directly. The clause was both
+  unusable and unnecessary;
+- **a run of arm 4b that did not read the provider as connected before its first
+  request.** `Wasp-Providers` connects in the background, and
+  `preferredCandidates` filters the preferred set to peers that are **already**
+  connected, so a request made before that connection completes exercises the
+  unconnected path rather than the hinted one the arm is about. Read
+  `provider_connected` back as 1 on the requester before the run's first request.
+  A first pass at arm 4b had no such gate and its rows had to be set aside after
+  the fact, which is the judgement this clause exists to make in advance. This
+  applies to arm 4b only: arm 4 sends no hint, so connectivity to the holder
+  cannot change its outcome;
 - arm 4 running **after** arm 4b, since the network fetch caches the content on
   forwarding peers and the 404 can no longer be expected;
+- **arms 4 or 4b using an archive that was also uploaded with a stamp**, arm 1's
+  included. The stamped upload puts the content on the network under the same
+  reference, so neither arm is testing what it claims;
 - the two sides of arm 1 running on **different hosts**, since the MIME table
   and the path handling are host-derived. Different operating systems, or hosts
   with different MIME databases, invalidate that comparison rather than refuting
