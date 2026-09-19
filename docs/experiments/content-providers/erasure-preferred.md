@@ -347,9 +347,18 @@ triggered from whichever chunk fetch is counted 64th
 goroutine from that fetch's context (`pkg/providers/providers.go:308-311`). On
 erasure-coded content that fetch is almost always a prefetch fetch, whose
 per-shard context is cancelled as soon as that one shard returns
-(`getter.go:130-131`), while a lookup takes 1.54 to 1.67 s. So discovery is
-cancelled roughly two orders of magnitude too early, and only at level NONE,
-where the reader's context is in play, does it work.
+(`getter.go:130-131`), while a lookup takes 1.54 to 1.67 s.
+
+**This is now measured, and it is wider than "an erasure-coding problem".** Two
+arms of the same 16,777,216 bytes, announced and network-held, differing only in
+redundancy level, three runs each: at the default level the lookup was cancelled
+**3 of 3**, and at level NONE it completed **3 of 3** and then had its **dial**
+cancelled instead, 3 of 3, when the response ended. So discovery is cancelled by
+the download's lifetime in both cases, and erasure coding changes only when it
+happens, from the end of the download to within milliseconds. Either way the
+provider it finds is unusable for the download that triggered it, because
+`preferredCandidates` filters to connected peers. An earlier sentence here said that
+discovery works at level NONE, which the cancelled dial makes too generous.
 
 Filed as [#369](https://github.com/crtahlin/wasp/issues/369) rather than fixed
 here, because the two want settling together and neither should be fixed twice.

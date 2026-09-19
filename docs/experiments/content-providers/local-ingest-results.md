@@ -381,11 +381,19 @@ different scripts, from different sources, to different paths, under different
 service units and different configuration files: the provider carries a
 prebuilt binary from the #326 branch, the requester a binary built from this
 repository for #353. No deployment step has ever installed one binary on both.
-What cannot be said is **which** two builds were running when this arm ran,
-because `t17.sh` reads only `reference` and `chunks` out of each response and
-never asks either node for its version. So the equality holds across two builds
-that are known to differ and whose exact identities are not on the record, and a
-future run of this arm should record both.
+The harness did not record which two builds those were: `t17.sh` reads only
+`reference` and `chunks` out of each response and never asked either node for its
+version.
+
+**The pair is now on the record**, read from each node on 2026-09-19 and
+reported here rather than left open: the provider runs `0.1.3-f005605d`, the
+requester `0.1.3-353-5e527a22`. Three things make that a statement about the run
+and not only about today. No deployment has happened on either node since the
+arm ran. The requester's build is independently attested at 12:53Z on 2026-09-18
+in the console log of the instrumented run, before this arm ran at 18:17Z. And
+the provider's `f005605d` is the build section 1 of this document already names
+as the one the bench ran. The harness now reads both versions into its own
+header, so a future run does not need the reconstruction.
 
 **The elapsed time is recorded and not accounted for.** The console log puts the
 whole sequence between 18:17:45Z and 18:17:48Z: three seconds for three rounds
