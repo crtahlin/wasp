@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/ethersphere/bee/v2/pkg/api"
@@ -473,9 +474,15 @@ func TestLocalIngestDirServesIndexDocument(t *testing.T) {
 func TestLocalIngestDirWithoutIndexDocument(t *testing.T) {
 	t.Parallel()
 
+	// The warning is asserted, not just the 404. It is the only thing that tells
+	// an operator their site will not answer at its own root, so a handler that
+	// stopped emitting it would leave them to find out from a browser.
+	sink := &syncBuffer{}
+	logger := log.NewLogger("localingest_dir_noindex", log.WithSink(sink), log.WithVerbosity(log.VerbosityDebug)).Build()
+
 	client, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             mockstorer.New(),
-		Logger:             log.Noop,
+		Logger:             logger,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),
 		LocalIngestEnabled: true,
 	})
@@ -496,6 +503,10 @@ func TestLocalIngestDirWithoutIndexDocument(t *testing.T) {
 	jsonhttptest.Request(t, client, http.MethodGet, "/bzz/"+root+"/css/style.css", http.StatusOK,
 		jsonhttptest.WithExpectedResponse([]byte("body{}")),
 	)
+
+	if !strings.Contains(sink.String(), "no index document") {
+		t.Fatalf("a collection ingested without an index document logged no warning about it; the log was:\n%s", sink.String())
+	}
 }
 
 // tarThenGarbage is a tar whose first entry is valid and which then stops being
