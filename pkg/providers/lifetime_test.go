@@ -521,10 +521,13 @@ func TestCancelledRunStopsDialingButKeepsTheSet(t *testing.T) {
 	})
 	k := announceOne(t, pa)
 
-	// cancel the run before it can dial by closing the service, then discover
-	// against the already-closed service context
+	// A NEGATIVE bound, not a tiny positive one. context.WithDeadline cancels
+	// synchronously when the deadline has already passed, so the run's context
+	// is dead before the loop can look at it, on every platform. With 1ns it
+	// schedules a timer instead and whether that fires before the check is a
+	// race, which failed on Windows where the timer granularity is coarse.
 	found := &adder{}
-	reader.SetDiscoverTimeout(time.Nanosecond)
+	reader.SetDiscoverTimeout(-time.Second)
 	reader.Discover(context.Background(), k, found)
 	_ = reader.Close()
 
@@ -551,7 +554,9 @@ func TestCancelledHintedRunDoesNotDial(t *testing.T) {
 		return false, nil
 	}, resolve)
 
-	reader.SetDiscoverTimeout(time.Nanosecond)
+	// negative for the reason in TestCancelledRunStopsDialingButKeepsTheSet:
+	// an already-passed deadline cancels synchronously, a 1ns one races a timer
+	reader.SetDiscoverTimeout(-time.Second)
 	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
 	_ = reader.Close()
 
