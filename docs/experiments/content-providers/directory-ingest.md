@@ -507,7 +507,10 @@ what invalidates a run.
 4. **(arm 4b)** a second node naming the holder serves the bare root and every
    inner path with matching SHA-256, in all three runs;
 5. **(arm 5)** the reported chunk count equals the **`ReferenceCount`** rise
-   exactly, on content the node had not held and with a flat control window;
+   exactly, on content the node had not held, **on a run whose paired
+   `ReferenceCount` control window reads zero and whose measurement window
+   contains no deliberate delay.** Exactness is safe only under those two
+   conditions, and "The measurement window is what drifts" below says why;
 6. **(arm 6)** an over-limit directory answers 507 and leaves **both
    `TotalChunks` and `ReferenceCount`** flat against their control windows, on an
    archive the node has never ingested, with the sensitivity control showing that
@@ -518,9 +521,12 @@ what invalidates a run.
 - the roots differ **on one node**, which would mean the ingest path and the
   stamped path disagree and the claim this rests on is false;
 - the reported count differs from the **`ReferenceCount`** rise in either
-  direction on a run that qualifies, meaning fresh content and a flat control
-  window. Short means chunks are held and not counted, so the limit can be
-  bypassed; over means the node reports holding more than it stored;
+  direction **in all three qualifying runs**. Short means chunks are held and not
+  counted, so the limit can be bypassed; over means the node reports holding more
+  than it stored. **A single differing run is not a reject.** It is repeated with
+  a tighter measurement window first, because drift is bursty and a control
+  window that read zero does not prove the next window was quiet. That is
+  measured, not supposed: see the note below;
 - any error path leaves a pinned collection behind, or leaves `TotalChunks` or
   `ReferenceCount` raised after the collection is gone;
 - **any Accept condition fails for a reason not listed under what invalidates a
@@ -530,6 +536,31 @@ what invalidates a run.
   the holder, the no-hint node answering 200, and usage moving by more than the
   reported count.
 
+**The measurement window is what drifts, not the ingest, and an earlier version
+of this spec got that wrong twice.** The quantity at risk is not how long the
+archive takes to store. It is the span between the two `/debugstore` reads that
+bracket the ingest, because every chunk any other part of the node stores inside
+that span is counted as though the ingest had stored it. So make that span as
+short as the measurement allows: read `/debugstore` immediately before the
+ingest and immediately after it returns, with **no sleep in between**.
+
+Measured, that is the entire difference between two passes of this arm, on the
+same node, with the same 1 MB archive, minutes apart. One harness slept five
+seconds between the ingest and the second read and gave reported 303 against a
+`ReferenceCount` rise of **309**. The other read immediately and gave 303 against
+**303**, three times over. The ingest itself took 0.11 seconds in both. At the
+drift rate separately measured on this node, 13 chunks in 20 seconds, a window
+about nine seconds long buys about six chunks, which is the excess observed.
+
+Two consequences, and they are why the conditions above are worded as they are.
+**Exact equality is a property of a tight window, not of a quiet node**, so
+demanding it without requiring the tight window rejects a correct node measured
+by a looser harness. A previous version of this spec did exactly that. And **a
+flat control window does not prove a flat measurement window**: the five-second
+pass had a control window reading zero and still drifted by six, so drift on this
+node arrives in bursts rather than at a steady rate. That is why a single
+differing run is repeated rather than treated as a result.
+
 **A note on the counter, which is not a reject condition.** `TotalChunks` is not
 the counter to compare against, and a first version of this spec said it was.
 Every unencrypted manifest shares a few canonical node chunks with every other
@@ -538,14 +569,18 @@ one, so a node that has ingested anything before already holds them, and
 therefore short against it for a collection and exact for a blob, and demanding
 equality there rejects a correct implementation, which it did.
 
-**The shortfall is not a constant, and an earlier version of this note claimed it
-was.** It read **3** on two collections of 26 and 206 chunks, which is all the
-claim ever rested on, and **9** on a collection of about 5,841 chunks, derived
-from arm 6's own rows after the fact. Three shared chunks is what a shallow
-manifest trie shares; a deeper trie shares more. So the shortfall is a function
-of manifest shape, and the only honest general statement is that it is small,
-positive for a collection and zero for a blob. Record it per run. Do not predict
-it, and do not build a rule on it.
+**Do not predict the shortfall, and do not build a rule on it.** It reads **3**
+on every collection measured directly, at 26, 206 and 303 chunks, six runs in
+all, and **0** for a blob. The blob's zero is not a fourth data point but a
+prediction of the mechanism: a blob has no manifest, so there are no shared
+manifest nodes for it to hold already, and zero is the only value consistent with
+the explanation.
+
+Three is nonetheless a property of these archives rather than a constant of the
+design. A shallow manifest trie shares few canonical nodes with every other
+manifest; a deeper one shares more, so the shortfall is a function of manifest
+shape and the only safe general statement is that it is small, positive for a
+collection and zero for a blob. Record it per run.
 
 **What invalidates a run** rather than deciding it:
 
@@ -559,10 +594,14 @@ it, and do not build a rule on it.
   does change the reference;
 - an encrypted arm used for the equivalence comparison, which cannot hold by
   construction;
-- **a paired control window that is not flat.** Arms 5 and 6 read a
-  database-wide counter, so a run whose control window drifts is discarded
-  rather than read as a result. Without this, ordinary counter noise would trip
-  a reject clause;
+- **a paired control window that is not flat, read on `ReferenceCount` for arm 5
+  and on both counters for arm 6.** Both arms read database-wide counters, so a
+  run whose control window drifts is discarded rather than read as a result.
+  Without this, ordinary counter noise would trip a reject clause;
+- **a run whose measurement window contains a deliberate delay**, or whose
+  control window was not read over a span comparable to it. The measurement
+  window is the two `/debugstore` reads bracketing the ingest, and anything
+  waiting inside it is drift the ingest gets blamed for;
 - **a run of arm 5 whose archive the node had already ingested**, because the
   root is then an existing pin collection, the ingest answers as a duplicate, and
   it reports nothing against a rise of nothing. That is the vacuity the arm's own

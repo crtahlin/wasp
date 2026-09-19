@@ -36,8 +36,8 @@ not that.
 What passes: a directory ingested with no postage produces the same manifest
 root as a stamped upload of the same archive, the holder serves every path in it,
 a node with no hint cannot reach it, the reported chunk count is exact once
-background drift is subtracted, and an over-limit archive is refused without
-residue.
+the measurement window is kept tight, and an over-limit archive is refused
+without residue.
 
 What does not: arm 4b asks that a node naming the holder be served every inner
 path with a matching hash **in all three runs**. It was not. The one multi-chunk
@@ -72,14 +72,21 @@ as established. The consequence for this experiment is that **hosting a
 multi-chunk file for a remote reader is not yet shown to work reliably**,
 whatever the manifest does correctly.
 
-**Four of the spec's own rules were found wrong**, every one of them only by
-running it, and **two of the four are defects in the corrections made here**
-rather than in the spec as merged. One rule would have rejected correct code; one
-made an arm test something other than what it claimed; one measured nothing at
-all; and one, written to fix the first, was stricter than the node's own
-background drift allows. They have their own section below, as do the two faults
-found in the measuring script, one of which had already reported arm 4b as a
-pass.
+**Four of the spec's rules were found wrong, every one of them only by running
+it.** Three were in the spec as merged: one would have rejected correct code, one
+made an arm test something other than what it claimed, and one measured nothing
+at all. The fourth was written **here**, to fix the first, and was stricter than
+the node allows.
+
+**This document then made two further errors of its own, reporting those fixes.**
+It announced a correction to the spec that had not actually been made, and it
+withdrew a claim on evidence that does not support the withdrawal. Both are set
+out below rather than quietly repaired, because the pattern in every one of them
+is the same: each error made a rule or a finding look sharper than the evidence
+allowed.
+
+Two faults in the measuring script have their own section too, one of which had
+already reported arm 4b as a pass.
 
 ## The provider was running the wrong build, and the first arm failed against it
 
@@ -272,31 +279,43 @@ held, and `TotalChunks` cannot rise for a chunk that is already stored.
 `SharedSlots` rising by 3 on the first such ingest and by 0 afterwards is those
 slots going from one reference to two, and then to three.
 
-**It is not a constant, and an earlier version of this document said it was.**
-Arm 6 run 1 of the first pass ingested a collection of about 5,841 chunks, and
-its shortfall works out at **9**. That figure is **derived and was never
-recorded**: the run's reported count was not written down, so it is reconstructed
-from the headroom before it (11,228, giving held = 119,844) and the held figure
-the later refusals report (125,685), against a `TotalChunks` rise of 5,832. A
-number derived from rows that were not collected for the purpose is weaker than
-six direct measurements, and it is reported here rather than relied on. What can
-be said is that **3 is what was measured between 26 and 303 chunks and must not
-be projected past that**: a deeper manifest trie shares more nodes with every
-other manifest, so the shortfall is a function of manifest shape. The spec now
-records it per run instead of predicting it, and the invalidation clause that
-depended on a constant has been removed.
+**The blob's zero is a prediction, not a fourth measurement.** A blob has no
+manifest, so there are no shared manifest nodes for the node to already hold, and
+0 is the only value consistent with the explanation. That is what moves this off
+correlation: the mechanism forbids the blob from behaving like the collections,
+and it does not.
 
-### The rule must allow drift, which corrects the correction
+**An earlier version of this document said the shortfall was a constant 3, and
+withdrew it on evidence that does not actually support the withdrawal.** Arm 6
+run 1 of the first pass ingested about 5,841 chunks with a shortfall that works
+out at **9**, derived rather than recorded: the run's reported count was never
+written down, so it is reconstructed from the headroom before it (11,228, giving
+held = 119,844) and the held figure the later refusals report (125,685), against
+a `TotalChunks` rise of 5,832.
 
-A seventh run, the first attempt at the second pass, measured a 303-chunk
-collection whose ingest took about 25 seconds against a 20-second control window
-that read 0. It gave reported 303, `TotalChunks` **306** and `ReferenceCount`
-**309**.
+**That 9 is uninformative, and saying otherwise was a second error.** The
+shortfall measured this way is `reported - TotalChunks rise`, which the model
+below makes `S - d`, so a reading of 9 is equally what S = 3 gives when drift is
+**minus 6**, and a cache eviction inside the window is exactly that. The figure
+is neutral between "S grows with collection size" and "S is 3 and the window
+drifted downwards", and it cannot decide between them.
 
-`TotalChunks` cannot rise by more than the reported count on its own, so the
-excess has to be background drift. Solving the three readings together, with N
-the archive's distinct addresses, S the ones the node already held and d the
-drift:
+What stands without it is the reason not to predict the shortfall at all: a
+shallow manifest trie shares few canonical nodes with every other manifest and a
+deeper one shares more, so 3 is a property of these archives rather than a
+constant of the design. The spec records it per run instead of predicting it, and
+the invalidation clause that depended on a constant is removed.
+
+### What drifts is the measurement window, and an earlier version of this document blamed the ingest
+
+A seventh run, the first attempt at the second pass, gave reported **303**,
+`TotalChunks` **306** and `ReferenceCount` **309**, against a control window that
+read 0.
+
+`TotalChunks` cannot rise by more than the reported count on its own, because the
+ingest can create at most one new entry per distinct address it reports. So the
+excess is background traffic. Writing N for the archive's distinct addresses, S
+for the ones the node already held and d for that traffic:
 
 ```
 reported            = N         = 303
@@ -304,17 +323,43 @@ TotalChunks rise    = N - S + d = 306
 ReferenceCount rise = N + d     = 309
 ```
 
-gives **d = 6 and S = 3**, and S = 3 is what every other row in this section
-shows. So `ReferenceCount` equality holds once drift is subtracted. The three
-runs above hold **exactly** because their ingests take 0.11 seconds, which leaves
-no room for drift, not because the node never drifts.
+**d is read, not fitted.** The ingest contributes exactly N to `ReferenceCount`,
+one increment per distinct address, so `d = 309 - 303 = 6` follows from the
+`ReferenceCount` row alone with no model at all. S = 3 then follows **only if the
+same d applies to `TotalChunks`**, which is an assumption about what background
+traffic does and not a reading: a Put of a chunk the node already holds moves
+`ReferenceCount` and leaves `TotalChunks` still, which would break it.
 
-That matters for the spec. The merged rule allowed the drift the paired control
-window shows; the first correction in this change tightened it to *exactly*, and
-that tightening would reject a correct node on a busy one. It is corrected again,
-back to equality within the observed drift, with the control window read on
-`ReferenceCount` rather than on `TotalChunks`, since those are different counters
-and only one of them decides.
+That assumption is measured five separate times in the two re-run files, and
+every one supports it: control windows of 13/13, 7/7 and 1/1, plus two windows in
+which nothing was ingested at all and the counters moved 1/1 and 2/2. Background
+traffic on this node moves both counters equally. Across the four collection rows
+that leaves eight readings against five unknowns, one shared S and a drift per
+row, and S comes out 3 every time.
+
+**The cause was a five-second sleep, not a slow ingest.** An earlier version of
+this section said the run's ingest "took about 25 seconds". That was invented and
+the harness timestamps exclude it: that pass ran four ingests, sixteen
+`/debugstore` reads and four connections inside 122 seconds, of which 100 seconds
+were its own sleeps. The ingest took **0.11 seconds**, the same as the three runs
+that came out exact.
+
+What differed is the **measurement window**, the span between the two
+`/debugstore` reads that bracket the ingest. The first harness slept five seconds
+inside that span before the second read; the second harness read immediately.
+Every chunk anything else on the node stored during that sleep is counted as
+though the ingest had stored it. At the drift rate this node shows elsewhere, 13
+chunks in 20 seconds, a window of about nine seconds buys about six, which is the
+excess seen.
+
+Two consequences for the spec, and both are now in it. **Exact equality is a
+property of a tight window rather than of a quiet node**, so demanding it without
+requiring the tight window would reject a correct node measured by a looser
+harness, which is what the first correction in this change did. And **a flat
+control window does not prove a flat measurement window**: this run's control
+read zero and its measurement drifted by six, so drift here arrives in bursts. A
+single differing run is therefore repeated with a tighter window rather than
+treated as a result.
 
 ### 6. An over-limit collection
 
@@ -331,6 +376,22 @@ and with `ReferenceCount` read as well, because it rises for an already-held
 chunk where `TotalChunks` cannot, so it detects a re-Put that `TotalChunks`
 hides.
 
+Two passes, **eight refusal runs**. The second is the better harness, because it
+reads the control window over a span matched to the measurement window instead of
+a fixed twenty seconds, which is the distinction the arm 5 section turns on. Both
+are reported; dropping the first pass silently would be the selection this
+document refuses elsewhere.
+
+First pass, `t19b-arm6-rerun.txt`, rows `run1` to `run3`:
+
+| Run | Control drift, both counters | HTTP | `TotalChunks` rise | `ReferenceCount` rise | `held` |
+|---|---|---|---|---|---|
+| 1 | **+13** | 507 | +1 | +1 | 126,060 |
+| 2 | +7 | 507 | 0 | 0 | 126,060 |
+| 3 | 0 | 507 | 0 | 0 | 126,060 |
+
+Second pass, `t19c-arm56-drift.txt`, rows `arm6-refusal1` to `arm6-refusal5`:
+
 | Run | Control drift, both counters | HTTP | `TotalChunks` rise | `ReferenceCount` rise | `held` |
 |---|---|---|---|---|---|
 | 1 | 0 | 507 | 0 | 0 | 127,878 |
@@ -339,22 +400,51 @@ hides.
 | 4 | 0 | 507 | 0 | 0 | 127,878 |
 | 5 | 0 | 507 | 0 | 0 | 127,878 |
 
-**Four runs with an exactly flat control window and an exactly zero rise on both
-counters**, which is the arm passing with one run to spare. Run 3's +2 sits
-against a control window of +1, is the only nonzero reading, and is reported
-rather than averaged away; the result does not need it.
+**Five of the eight qualify fully**, with an exactly flat control window and an
+exactly zero rise on both counters, which is the arm passing with two runs to
+spare. Six of the eight have a zero rise; the sixth, first-pass run 2, has a
+control window of +7, so its rise is zero but its window is not flat.
 
-**`held` is unchanged at 127,878 across all five refusals**, and across the five
-timing posts that preceded them, so ten refusals left the committed count
-untouched. That is the **counted** residue check. The two `ChunkStore` counters
-are the **uncounted** one, and both are needed: `held` is reported by the code
-under test, so a leak that stored chunks without counting them would not move it.
-That is exactly why the spec reads a database-wide counter as well, and it is the
-reason `held` is not a substitute for it.
+**First-pass run 1 is the strongest single reading in the set** and is easy to
+misread as the weakest. Its rise of +1 sits against a control window of **+13**,
+so during the refusal the counters moved thirteen times less than they moved with
+the node left alone.
 
-**The check has power, which is shown rather than assumed.** Three sensitivity
-runs on the same node minutes earlier ingested a small fresh archive that fits,
-and both counters moved by about the reported count every time, 303 and 300. A
+**Second-pass run 3 is invalidated, not excused.** Its control window is +1, and
+the spec's own clause discards a run whose paired control window is not flat. It
+is discarded under that clause rather than argued away, which is the point in a
+document whose case is that a written rule beats a judgement made afterwards.
+
+**`held` is unchanged throughout, and it is a narrower check than it looks.** It
+reads 126,060 across the first pass and 127,878 across the second, covering all
+eight refusals and the eight timing posts beside them. But `committed`, which
+`held` reports, is raised in exactly one place, `add` at
+`pkg/storer/localingest.go:143`, reached only from the `done` path at `:299`. A
+refusal moves `reserved`, a separate field, and the limit check at `:116` reads
+`committed + reserved + n`. So a refusal **cannot** move `held` however much it
+leaks. What the reading
+establishes is that `Done` did not run. That is worth having and it is **not**
+comparable to the chunk counters, which an earlier version of this section
+implied by calling it the counted half of a pair. The residue question is settled
+by `TotalChunks` and `ReferenceCount`, because those are arrived at independently
+of anything the code under test reports.
+
+**A zero rise here is a stronger result than a zero rise usually is.** With
+`held` at 127,878 against a limit of 131,072, a refused run admits and stores
+about **3,194 chunks** before the limit binds, and the cleanup path then removes
+them. So both counters reading exactly 0 across the bracketing reads is evidence
+that a cleanup of roughly three thousand chunks completed, not that little
+happened. It also sets the scale the sensitivity control has to beat, and shows
+it is beaten comfortably: 303 is an order of magnitude below the leak the arm
+exists to catch.
+
+**The check has power, which is shown rather than assumed.** Three runs on the
+same node minutes earlier ingested a small fresh archive that fits, and both
+counters moved every time, by 303 and 300. Those are the rows labelled
+`arm5-drift1` to `arm5-drift3` in `t19c-arm56-drift.txt`. The row labelled
+`sensitivity` in `t19b-arm6-rerun.txt` is **not** one of them: that is the
+five-second-window run discussed under arm 5, and the labels crossing between the
+two files is worth stating so a reader following the citation is not misled. A
 flat reading is evidence of no residue only if a real ingest would not have read
 flat too. These say it would not.
 
@@ -391,11 +481,14 @@ exactly 0, so nothing has to be argued.
 
 ## The spec defects, every one found by running it
 
-Four, not the two an earlier version of this document claimed, and two of the
-four are defects in this document's **own corrections**. That is worth stating
-plainly: the first attempt to fix a measurement rule was wrong twice, and both
-times the error was in the direction of making the rule look sharper than the
-evidence allowed.
+Four, not the two an earlier version of this document claimed. Three are in the
+spec as merged and the fourth was written here while fixing the first. Two
+further errors, in this document rather than in the spec, are recorded with the
+defect they belong to.
+
+Every one of the six leaned the same way, towards a rule or a finding that looked
+sharper than the evidence allowed. That is the useful generalisation, and it is
+why each is kept here rather than silently repaired.
 
 ### One: arm 5 compared against the wrong counter, and would have rejected correct code
 
@@ -424,22 +517,32 @@ The replacement rule demanded the reported count equal the `ReferenceCount` rise
 clause referring to "the constant a collection always shares". All three are
 wrong, and a review found them before they could reject a correct node.
 
-- **Exactness is not supportable.** A measured run with 25 seconds of ingest time
-  gave reported 303 against a `ReferenceCount` rise of 309, purely from
-  background drift, as the arithmetic in arm 5 above shows. The rule is back to
-  equality within the drift the paired control window shows.
+- **Exactness was demanded without requiring what makes it hold.** One run gave
+  reported 303 against a `ReferenceCount` rise of 309, on a node this document
+  calls correct, and under the rule as first corrected that run had fresh content
+  and a flat control window, so it qualified, it differed, and it was a **reject**.
+  The rule now requires the tight measurement window that makes exactness true,
+  and treats a single differing run as one to repeat rather than as a result.
 - **The control window was on the wrong counter.** `ReferenceCount` is
   database-wide and rises for a chunk the node already holds, which `TotalChunks`
   cannot. So a window flat on `TotalChunks` is no evidence that `ReferenceCount`
   is quiet, and the rule decided on one counter while controlling the other.
-- **There is no such constant.** 3 was measured between 26 and 303 chunks and a
-  derived 9 appears at about 5,841. A clause naming a constant that does not
-  exist cannot be applied, and it was also unnecessary: deduplication does not
-  break the `ReferenceCount` comparison at all, since a `Put` of an already-held
-  address still raises that chunk's reference count and the session still counts
-  the address once. Only a repeated address **within one archive** breaks
-  equality, and the spec now forbids that directly, which is a rule the original
-  measurement satisfied by luck in using random bytes.
+- **There is no such constant.** 3 was measured on every collection from 26 to
+  303 chunks. A clause naming a constant without writing its value down cannot be
+  applied at all, and it was also unnecessary: deduplication does not break the
+  `ReferenceCount` comparison, since a `Put` of an already-held address still
+  raises that chunk's reference count and the session still counts the address
+  once. Only a repeated address **within one archive** breaks equality, and the
+  spec now forbids that directly, which is a rule the original measurement
+  satisfied by luck in using random bytes.
+
+**A third error, found in the same review and made while fixing the second.**
+This document claimed the rule had been corrected "back to equality within the
+observed drift" when the spec had not in fact been changed at all, and the ledger
+row repeated the claim. Applying the spec as it actually stood to the 309 run
+still produced a reject. Announcing a correction is not making one, and the only
+reason it was caught is that the reviewer applied the rule to the run rather than
+reading the sentence that described it.
 
 ### Three: arm 1 destroys arm 4's precondition
 
@@ -557,6 +660,16 @@ all.** Posted there as a comment rather than filed as a new issue.
 - **Nothing about where the size threshold for that failure is.** The fixture has
   exactly one multi-chunk file, at four chunks. Whether the rate rises with size,
   and whether a one-chunk file can fail at all, are unmeasured.
+- **Nothing that makes a flat control window a guarantee.** One run had a control
+  window reading zero and a measurement window that drifted by six, so drift on
+  this node arrives in bursts and a quiet window does not predict the next one.
+  Arm 5's exact equality holds because the measurement window was 0.11 seconds
+  long, not because the node was quiet, and no run here establishes a drift rate
+  that could be relied on as a tolerance.
+- **Nothing about the arm 6 counters at a larger headroom.** Every refusal
+  measured here admits about 3,194 chunks before the limit binds. A node with far
+  more headroom would admit far more before refusing, and whether cleanup still
+  returns both counters to exactly zero at that scale is untested.
 - **Nothing about a directory large enough to cross a trie shape boundary.** The
   largest collection measured is 5,832 chunks and the sites are small.
 - **Nothing about disk actually consumed**, as distinct from chunks counted. The
