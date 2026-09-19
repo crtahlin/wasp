@@ -521,12 +521,10 @@ what invalidates a run.
 - the roots differ **on one node**, which would mean the ingest path and the
   stamped path disagree and the claim this rests on is false;
 - the reported count differs from the **`ReferenceCount`** rise in either
-  direction **in all three qualifying runs**. Short means chunks are held and not
-  counted, so the limit can be bypassed; over means the node reports holding more
-  than it stored. **A single differing run is not a reject.** It is repeated with
-  a tighter measurement window first, because drift is bursty and a control
-  window that read zero does not prove the next window was quiet. That is
-  measured, not supposed: see the note below;
+  direction on a qualifying run, once the single repeat allowed under what
+  invalidates a run has been made. Short means chunks are held and not counted,
+  so the limit can be bypassed; over means the node reports holding more than it
+  stored;
 - any error path leaves a pinned collection behind, or leaves `TotalChunks` or
   `ReferenceCount` raised after the collection is gone;
 - **any Accept condition fails for a reason not listed under what invalidates a
@@ -602,6 +600,16 @@ collection and zero for a blob. Record it per run.
   control window was not read over a span comparable to it. The measurement
   window is the two `/debugstore` reads bracketing the ingest, and anything
   waiting inside it is drift the ingest gets blamed for;
+- **a differing run whose measurement window was not the tightest the harness
+  allows.** Discard it and repeat once, with the two `/debugstore` reads as close
+  around the ingest as they can be, because drift is bursty and a control window
+  reading zero does not prove the next window was quiet. **The repeat is made
+  once and once only.** A difference that survives it is a reject under the clause
+  above, so this cannot be used to retry a failing measurement until it passes.
+  This clause exists because an earlier version of the reject clause said a single
+  differing run "is not a reject", which contradicted the rule above that a single
+  failing run **is** one, and left one or two differing runs satisfying neither
+  Accept nor Reject: exactly the gap the catch-all clause was written to close;
 - **a run of arm 5 whose archive the node had already ingested**, because the
   root is then an existing pin collection, the ingest answers as a duplicate, and
   it reports nothing against a rise of nothing. That is the vacuity the arm's own

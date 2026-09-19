@@ -78,12 +78,18 @@ made an arm test something other than what it claimed, and one measured nothing
 at all. The fourth was written **here**, to fix the first, and was stricter than
 the node allows.
 
-**This document then made two further errors of its own, reporting those fixes.**
-It announced a correction to the spec that had not actually been made, and it
-withdrew a claim on evidence that does not support the withdrawal. Both are set
-out below rather than quietly repaired, because the pattern in every one of them
-is the same: each error made a rule or a finding look sharper than the evidence
-allowed.
+**This document then made three further errors of its own, reporting those
+fixes.** It announced a correction to the spec that had not actually been made; it
+withdrew a claim on evidence that does not support the withdrawal; and it fitted a
+drift rate to the number it was explaining rather than checking it. All three are
+set out below rather than quietly repaired, because the pattern in every one of
+them is the same: **each error made a rule or a finding look sharper than the
+evidence allowed.**
+
+That count went from two to four to seven across three review rounds, and every
+addition was found by someone applying a rule to a row rather than reading the
+sentence describing it. That is the transferable lesson of this experiment, more
+than anything it establishes about directories.
 
 Two faults in the measuring script have their own section too, one of which had
 already reported arm 4b as a pass.
@@ -346,11 +352,27 @@ that came out exact.
 
 What differed is the **measurement window**, the span between the two
 `/debugstore` reads that bracket the ingest. The first harness slept five seconds
-inside that span before the second read; the second harness read immediately.
-Every chunk anything else on the node stored during that sleep is counted as
-though the ingest had stored it. At the drift rate this node shows elsewhere, 13
-chunks in 20 seconds, a window of about nine seconds buys about six, which is the
-excess seen.
+inside that span before the second read; the second read immediately. Every chunk
+anything else on the node stored during that sleep is counted as though the ingest
+had stored it.
+
+**The size of the excess is consistent with that, and an earlier version of this
+paragraph fitted it rather than checking it.** This node's three 20-second control
+windows read 13, 7 and 0, so between about 0.35 and 0.65 chunks a second, and an
+excess of six needs somewhere between nine and eighteen seconds of window at
+those rates. **The window's length was never recorded**, so the product cannot be
+checked at all. The earlier version quoted the highest of the three rates against
+an unrecorded nine-second window, which made the arithmetic land exactly on the
+six it was explaining. That is the seventh instance of the pattern this document
+names above and it is withdrawn. The claim that needs no arithmetic is the one
+carrying the point: the sleep is the only difference inside the window, and
+removing it gave 303 against 303 three times.
+
+**Both ends of the window are fuzzy by the cost of reading them.** `/debugstore`
+walks a retrieval index of about 2.5 million entries, so each bracketing read
+takes time that is itself inside the window and was not measured. That is a
+further reason exactness here is a property of the harness rather than of the
+node.
 
 Two consequences for the spec, and both are now in it. **Exact equality is a
 property of a tight window rather than of a quiet node**, so demanding it without
@@ -406,23 +428,27 @@ spare. Six of the eight have a zero rise; the sixth, first-pass run 2, has a
 control window of +7, so its rise is zero but its window is not flat.
 
 **First-pass run 1 is the strongest single reading in the set** and is easy to
-misread as the weakest. Its rise of +1 sits against a control window of **+13**,
-so during the refusal the counters moved thirteen times less than they moved with
-the node left alone.
+misread as the weakest. Its rise of **+1** sits against a control window of
+**+13**, so the refusal moved the counters far less than the node moved them when
+left alone. **No ratio is claimed.** The +13 is counted over a fixed twenty-second
+control window and the +1 over a measurement window that was never timed, so the
+spans are not equal and dividing one by the other would treat them as though they
+were. An earlier version said "thirteen times less".
 
 **Second-pass run 3 is invalidated, not excused.** Its control window is +1, and
 the spec's own clause discards a run whose paired control window is not flat. It
 is discarded under that clause rather than argued away, which is the point in a
 document whose case is that a written rule beats a judgement made afterwards.
 
-**`held` is unchanged throughout, and it is a narrower check than it looks.** It
-reads 126,060 across the first pass and 127,878 across the second, covering all
-eight refusals and the eight timing posts beside them. But `committed`, which
-`held` reports, is raised in exactly one place, `add` at
-`pkg/storer/localingest.go:143`, reached only from the `done` path at `:299`. A
-refusal moves `reserved`, a separate field, and the limit check at `:116` reads
-`committed + reserved + n`. So a refusal **cannot** move `held` however much it
-leaks. What the reading
+**`held` is unchanged within each pass, and it is a narrower check than it
+looks.** It reads 126,060 through the first pass and 127,878 through the second,
+across **eight refusals and the five timing posts** the second harness makes
+before its measured ones, thirteen readings in all. But `committed`, which `held`
+reports, is raised in exactly one place, `s.committed += chunks` inside `commit`
+(`pkg/storer/localingest.go:135-145`, the increment at `:143`), and `commit` has
+a single call site, `:247` inside `Done`. A refusal moves `reserved`, a separate
+field, and the limit check at `:116` reads `committed + reserved + n`. So a
+refusal **cannot** move `held` however much it leaks. What the reading
 establishes is that `Done` did not run. That is worth having and it is **not**
 comparable to the chunk counters, which an earlier version of this section
 implied by calling it the counted half of a pair. The residue question is settled
@@ -486,9 +512,9 @@ spec as merged and the fourth was written here while fixing the first. Two
 further errors, in this document rather than in the spec, are recorded with the
 defect they belong to.
 
-Every one of the six leaned the same way, towards a rule or a finding that looked
-sharper than the evidence allowed. That is the useful generalisation, and it is
-why each is kept here rather than silently repaired.
+Every one of the seven leaned the same way, towards a rule or a finding that
+looked sharper than the evidence allowed. That is the useful generalisation, and
+it is why each is kept here rather than silently repaired.
 
 ### One: arm 5 compared against the wrong counter, and would have rejected correct code
 
