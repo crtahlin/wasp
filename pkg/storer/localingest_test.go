@@ -636,3 +636,55 @@ func TestLocalIngestGaugeTracksEveryPath(t *testing.T) {
 		t.Fatalf("after unpinning everything the gauge reports %d, want 0; the figure would only ever rise", got)
 	}
 }
+
+// TestLocalIngestShadowedByOrdinaryPin is the case an operator hits and neither
+// layer covered: a pin that already exists at that root, whatever created it,
+// makes an ingest of the same content answer as a duplicate.
+//
+// The realistic way in is a stamped upload that was pinned. The site is then on
+// disk twice over as far as the operator is concerned, but only the ordinary pin
+// holds it, and the ingest contributes nothing to the local ingest total, so
+// unpinning the ordinary pin removes the content and the ingest figure never
+// showed it. Both existing duplicate tests ingest the same content twice, which
+// does not reach this path, and the one ordinary-pin test uses a different root.
+func TestLocalIngestShadowedByOrdinaryPin(t *testing.T) {
+	t.Parallel()
+
+	lstore, err := newStorer(t, "", localIngestOpts(t, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := chunktesting.GenerateTestRandomChunks(4)
+	root := chunks[0].Address()
+
+	// An ordinary pinning collection at root, the kind POST /pins/{reference}
+	// leaves behind after a stamped upload.
+	session, err := lstore.NewCollection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range chunks {
+		if err := session.Put(context.Background(), ch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := session.Done(root); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing has been ingested, so the local ingest total is zero.
+	assertUsage(t, lstore, 0, 0)
+
+	// Ingesting the same content now collides with that pin.
+	err = ingest(t, lstore, root, chunks)
+	if !errors.Is(err, storer.ErrLocalIngestDuplicate) {
+		t.Fatalf("ingest over an ordinary pin: got %v, want ErrLocalIngestDuplicate", err)
+	}
+
+	// And it contributed nothing, neither committed nor stranded as a claim.
+	// A claim left behind here would be the worst version of this: the operator
+	// would hold the content under a pin they can remove, while the ingest total
+	// counted capacity against them for content it does not hold.
+	assertUsage(t, lstore, 0, 0)
+}

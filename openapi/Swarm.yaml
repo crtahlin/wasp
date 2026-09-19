@@ -1358,24 +1358,9 @@ paths:
           name: swarm-redundancy-level
           required: false
           description: "Redundancy level. Defaults to the upload default, as POST /bytes does, not the download default that pinning uses."
-        - in: header
-          schema:
-            $ref: "SwarmCommon.yaml#/components/parameters/SwarmCollection"
-          name: swarm-collection
-          required: false
-          description: "Store the body as a collection with a manifest rather than as a single blob. Requires a Content-Type of application/x-tar or multipart/form-data; any other value is refused with 400."
-        - in: header
-          schema:
-            $ref: "SwarmCommon.yaml#/components/parameters/SwarmIndexDocumentParameter"
-          name: swarm-index-document
-          required: false
-          description: "Collections only. Without it GET /bzz/{reference}/ answers 404 even with every chunk held locally, so the site is reachable only by full path."
-        - in: header
-          schema:
-            $ref: "SwarmCommon.yaml#/components/parameters/SwarmErrorDocumentParameter"
-          name: swarm-error-document
-          required: false
-          description: "Collections only."
+        - $ref: "SwarmCommon.yaml#/components/parameters/SwarmCollection"
+        - $ref: "SwarmCommon.yaml#/components/parameters/SwarmIndexDocumentParameter"
+        - $ref: "SwarmCommon.yaml#/components/parameters/SwarmErrorDocumentParameter"
       requestBody:
         description: "Content to store. A single blob by default, or a tar or multipart archive when Swarm-Collection is set."
         content:

@@ -8,6 +8,7 @@ import (
 	"archive/tar"
 	"context"
 	"errors"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -86,7 +87,7 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 		mediaType, params, _ := mime.ParseMediaType(r.Header.Get(ContentTypeHeader))
 		switch mediaType {
 		case contentTypeTar:
-			dReader = &tarReader{r: tar.NewReader(r.Body), logger: s.logger}
+			dReader = &tarReader{r: tar.NewReader(r.Body), logger: logger}
 		case multiPartFormData:
 			dReader = &multipartReader{r: multipart.NewReader(r.Body, params["boundary"])}
 		default:
@@ -200,7 +201,16 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		case errors.Is(err, tar.ErrHeader):
 			logger.Debug("local ingest: invalid tar header", "error", err)
-			jsonhttp.BadRequest(ow, "invalid filename in tar archive")
+			jsonhttp.BadRequest(ow, "invalid tar archive")
+			return
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			// A body that stops mid-archive, which includes anything shorter
+			// than one 512-byte tar header block. archive/tar reports the two
+			// cases differently and both are the caller's fault, so both are
+			// 400. The stamped route answers 500 for this one; it is unmodified
+			// upstream code and out of scope here.
+			logger.Debug("local ingest: archive ends early", "error", err)
+			jsonhttp.BadRequest(ow, "archive ends before it is complete")
 			return
 		}
 		logger.Debug("local ingest: split write all failed", "error", err)
