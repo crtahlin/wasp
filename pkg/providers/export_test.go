@@ -51,6 +51,11 @@ func (s *Service) SetDiscoverTimeout(d time.Duration) {
 	s.timeout = d
 }
 
+// DiscoverBound reports the current bound, so a test can assert it took effect.
+func (s *Service) DiscoverBound() time.Duration {
+	return s.discoverBound()
+}
+
 // Counts holds the discovery counters at one moment. Field names match the
 // metric fields so that a reader does not have to map between them.
 type Counts struct {

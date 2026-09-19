@@ -294,6 +294,13 @@ observability, not to write arms around its absence. This follows the shape #299
 argued for at `erasure-preferred.md:150-204` and for the same reason: no existing
 counter can answer the question, so the change adds one.
 
+**Identifiers are American, prose is left as the repository has it.** Metric
+names and Go identifiers use `canceled` and `dialed`, per the style rules in
+`AGENTS.md`, because a metric name is permanent surface that an operator's
+dashboards depend on. Surrounding prose in this repository is predominantly
+British and is not being normalised by this change. Stated so that the next
+person does not normalise it in one direction at random.
+
 New `pkg/providers/metrics.go`, house shape (exported fields, `newMetrics()`, a
 `Metrics() []prometheus.Collector` method, as `pkg/retrieval/metrics.go:13` and `:162`),
 namespace `bee`, subsystem `providers`:
@@ -395,7 +402,7 @@ The registration block at `:1629-1636` is itself inside
 `if o.APIAddr != ""`. So the implementation hoists the variable above the block
 and registers the collectors only when providers are enabled.
 
-Seven counters is permanent surface area, which rule 8's reasoning about
+Eight counters is permanent surface area, which rule 8's reasoning about
 configuration applies to as well, so each row above names the arm it decides.
 `docs/DIFFERENCES.md:166` shows that metrics get a row there, and these will.
 
@@ -417,16 +424,25 @@ No run measures how long a dial to a provider takes; the only datum is a dial
 still running at about 3.5 seconds, which this spec lists as unexplained.
 
 **There is a better number to derive it from, and a consequence that is not a
-risk but a behaviour.** Each underlay dial carries its own
-`context.WithTimeout(ctx, 15*time.Second)` at `pkg/p2p/libp2p/libp2p.go:1076`,
-independent of `discoverTimeout`. `ConnectHints` dials up to `maxProviderHints`,
-which is 8, **serially** (`providers.go:348-360`), so the worst case is 8 times 15
-seconds, 120 seconds of work inside a 30-second bound: the loop is cut after
-roughly **two** overlays. A hint naming eight providers will therefore have at
-most two of them tried. That is a consequence of the constant rather than a
-possibility, it is not in the risk list because it is certain, and 15 seconds
-times the number of overlays worth trying is the quantity the constant should be
-derived from.
+risk but a behaviour.** The 15 second timeout at
+`pkg/p2p/libp2p/libp2p.go:1076` is taken **per underlay**, inside the loop over
+an address's underlays, not per overlay. A discovered provider's address carries
+up to `MaxUnderlays`, which is 4 (`pkg/providers/keys.go:31`), so a **single**
+`Connect` can consume up to 60 seconds, more than the whole bound. `ConnectHints`
+then dials up to `maxProviderHints`, which is 8, serially
+(`providers.go:348-360`).
+
+So the bound admits **at most about two overlays, and fewer where an address
+carries several underlays**, where it can cut off inside the first overlay's
+underlay list. An earlier version of this paragraph said "two overlays" flatly,
+reading the 15 seconds as per overlay; that holds only where every address has
+exactly one underlay. The bench precondition below, that the provider advertises
+a single public underlay, is what makes the two-overlay figure true **on the
+bench specifically**, which is the only place the arithmetic is load-bearing.
+
+That is a consequence of the constant rather than a possibility, it is not in the
+risk list because it is certain, and 15 seconds times the underlays worth trying
+is the quantity the constant should be derived from.
 
 What would justify making it configurable later: a measured dial that needs longer
 on a slow or NAT-bound peer, or measured goroutine accumulation. Neither exists.
@@ -919,15 +935,25 @@ choosing between releases would want both.
   failed **every** test in the package under `-race`, including the ones that
   existed before. A per-service field removes the shared state rather than
   synchronizing it.
-- `pkg/providers/metrics.go`, new: the seven counters in the house shape
+- `pkg/providers/metrics.go`, new: the eight counters in the house shape
   (`pkg/retrieval/metrics.go:13` and `:162`), subsystem `providers`, namespace
   `bee`.
 - **`pkg/node/providers.go`: split the `Connect` closure's two nil returns**, so a
-  dial that opened a connection is distinguishable from a peer that was already
-  connected. This file was absent from an earlier version of this list, and
-  without it the arms cannot work: see the counters section.
-- `pkg/providers/export_test.go`: expose `discoverTimeout`, since an injected
-  clock cannot reach `context.WithTimeout`.
+  connect that dialed is distinguishable from one short-circuited because the
+  peer was already connected. This file was absent from an earlier version of
+  this list, and without it the arms cannot work: see the counters section.
+
+  **Carry the split in a `bool` return, not a sentinel error.** `Options.Connect`
+  is `func(ctx, addr) (alreadyConnected bool, err error)`. A first implementation
+  used a sentinel error for the already-connected case, which is a success
+  signalled by a non-nil error: it inverts the language convention, and the next
+  person writing the obvious `if err != nil { continue }` would silently turn a
+  usable provider into a skipped one with nothing in the type system to stop
+  them.
+- `pkg/providers/export_test.go`: expose a **per-service** setter for the bound,
+  not the package value, for the race reason given two entries above. An injected
+  clock cannot reach `context.WithTimeout`, which is why a setter is needed at
+  all.
 - `pkg/node/node.go`: hoist `providersService` out of the `if o.ProvidersEnable`
   block at `:1589-1597` so the registration at `:1629-1636` can reach it, and
   register only when providers are enabled. `providersAPI` will not serve: it is

@@ -55,10 +55,16 @@ const (
 	// it must not be a package variable, because a test writing one races
 	// every other test's background goroutines reading it.
 	//
-	// Each underlay dial inside p2p carries its own 15 second timeout and the
-	// hinted path dials up to maxProviderHints overlays serially, the constant
-	// in pkg/api, so this bound cuts that loop after roughly two overlays.
-	// That is a consequence of the value rather than a risk; see the spec.
+	// It bounds the whole run, and the work inside it is not bounded per
+	// overlay. p2p takes its own 15 second timeout per UNDERLAY, inside its
+	// loop over an address's underlays, and a discovered provider's address
+	// carries up to MaxUnderlays of them, so a single Connect can consume up
+	// to 4 times 15 seconds on its own. The hinted path then dials up to
+	// maxProviderHints overlays serially, that constant living in pkg/api. So
+	// this bound admits at most about two overlays where each address has one
+	// underlay, and can cut off inside the first overlay's underlay list where
+	// an address has several. A consequence of the value, not a risk; see the
+	// spec.
 	discoverTimeout = 30 * time.Second
 
 	announcedPrefix = "providers_announced_"
@@ -135,17 +141,17 @@ type Service struct {
 	metrics metrics
 	owner   []byte
 
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	timeout time.Duration
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 
-	mu     sync.Mutex
-	now    func() time.Time
-	cache  map[string]cacheEntry
-	checks []readBack
-	warned map[string]uint64
-	closed bool
+	mu      sync.Mutex
+	now     func() time.Time
+	timeout time.Duration
+	cache   map[string]cacheEntry
+	checks  []readBack
+	warned  map[string]uint64
+	closed  bool
 
 	// annMu keeps a withdrawal from racing the loop's save of the same key.
 	annMu sync.Mutex
@@ -340,7 +346,7 @@ func (s *Service) Discover(ctx context.Context, k []byte, set Adder) {
 		// cancelled within milliseconds. WithoutCancel keeps the caller's
 		// values and drops its cancellation; the service context still ends
 		// the work and the timeout bounds it. See issue #369.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.timeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.discoverBound())
 		defer cancel()
 		stop := context.AfterFunc(s.ctx, cancel)
 		defer stop()
@@ -409,7 +415,7 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
 		// request that named it has gone, and deriving from that request
 		// cancels the dial when the response ends. See issue #369.
 		//
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.timeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.discoverBound())
 		defer cancel()
 		stop := context.AfterFunc(s.ctx, cancel)
 		defer stop()
@@ -417,7 +423,9 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
 		s.metrics.HintedConnectsStarted.Inc()
 
 		for _, o := range overlays {
-			// as in Discover: stop rather than fail every remaining overlay
+			// Unlike Discover, this returns rather than continuing: there is
+			// no preferred set to fill here, so once the run is cut off there
+			// is nothing left worth doing.
 			if ctx.Err() != nil {
 				return
 			}
@@ -707,6 +715,14 @@ func (s *Service) warnOnce(k []byte, w uint64, err error) {
 	if !ok || last != w {
 		s.logger.Warning("provider announcement not written", "key", hex.EncodeToString(k), "window", w, "error", err)
 	}
+}
+
+// discoverBound is how long one discovery or hinted-connect run may take. Read
+// under the lock, as clock does for now, because a test can change it.
+func (s *Service) discoverBound() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.timeout
 }
 
 func (s *Service) clock() time.Time {

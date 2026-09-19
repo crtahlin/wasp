@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -228,13 +229,32 @@ func TestDiscoverBoundedByTimeout(t *testing.T) {
 	n, c := newNetwork(), &clock{t: midWindow(1000)}
 	a, b := newNode(t, 1), newNode(t, 1)
 
-	connect, _, canceled := blockingConnect()
+	connect, running, canceled := blockingConnect()
 	pa := newService(t, n, a, c, nilConnect)
 	reader := newService(t, n, b, c, connect)
-	reader.SetDiscoverTimeout(200 * time.Millisecond)
+	// Two seconds, not 200 milliseconds. This bound has to cover the LOOKUP as
+	// well as the dial, and the lookup fans out to Slots goroutines plus one
+	// per candidate; under -race on a single core with the rest of the package
+	// running in parallel it does not finish in 200 ms, the records come back
+	// empty, Connect is never called, and this test fails blaming the timeout
+	// for something the timeout did not do. Measured: three failures in five at
+	// -race -cpu=1. Two seconds is still 15x under the default, so it still
+	// proves the bound is the service's and not the default.
+	reader.SetDiscoverTimeout(2 * time.Second)
+	if got := reader.DiscoverBound(); got != 2*time.Second {
+		t.Fatalf("the bound did not take effect: %v", got)
+	}
 	k := announceOne(t, pa)
 
 	reader.Discover(context.Background(), k, &adder{})
+
+	// wait for the dial first, so "never reached the dial" reports as itself
+	// rather than as a timeout failure
+	select {
+	case <-running:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the discovery never reached the connect")
+	}
 	assertBoundedByTimeout(t, canceled)
 }
 
@@ -249,12 +269,21 @@ func TestConnectHintsBoundedByTimeout(t *testing.T) {
 	n, c := newNetwork(), &clock{t: midWindow(1000)}
 	a, b := newNode(t, 1), newNode(t, 1)
 
-	connect, _, canceled := blockingConnect()
+	// 200 ms is safe here, and this is the stronger half of the pair for the
+	// same reason: the hinted path performs no lookup, so the bound covers only
+	// the dial.
+	connect, running, canceled := blockingConnect()
 	resolve := func(swarm.Address) (*bzz.Address, error) { return a.addr, nil }
 	reader := newServiceResolving(t, n, b, c, connect, resolve)
 	reader.SetDiscoverTimeout(200 * time.Millisecond)
 
 	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+
+	select {
+	case <-running:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the hinted connect never reached the dial")
+	}
 	assertBoundedByTimeout(t, canceled)
 }
 
@@ -348,10 +377,106 @@ func TestLookupCanceledCounted(t *testing.T) {
 	}
 }
 
-// TestStartedCountersAreTheDenominators covers the two counters that separate
-// "the work ran and found nothing" from "the work never ran", which is the only
-// thing the measurement uses them for.
-func TestStartedCountersAreTheDenominators(t *testing.T) {
+// TestDiscoveriesStartedIsADenominator is the cache arm of the measurement
+// expressed as a unit test: three discoveries of the same key inside the cache
+// window perform one real lookup and two cache hits, and the started counter
+// must still read three.
+//
+// An earlier version of this test did one discovery and asserted each counter
+// was 1, which tests "it increments when everything works" and not the property
+// the counter exists for. Moving DiscoveriesStarted so that it counted only
+// runs whose lookup returned records passed that version, while destroying the
+// denominator outright.
+//
+// The three calls are sequenced through the dial rather than started together,
+// because concurrent runs race the cache and give three real lookups.
+func TestDiscoveriesStartedIsADenominator(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+
+	connect, dialed := recordingConnect()
+	pa := newService(t, n, a, c, nilConnect)
+	reader := newService(t, n, b, c, connect)
+	k := announceOne(t, pa)
+
+	for i := range 3 {
+		reader.Discover(context.Background(), k, &adder{})
+		select {
+		case <-dialed:
+		case <-time.After(20 * time.Second):
+			t.Fatalf("discovery %d never reached the dial", i+1)
+		}
+	}
+	_ = reader.Close()
+
+	got := reader.Counters(t)
+	if got.DiscoveriesStarted != 3 {
+		t.Fatalf("discoveries=%v, want 3", got.DiscoveriesStarted)
+	}
+	if got.LookupsCompleted != 1 {
+		t.Fatalf("completed=%v, want 1: only the first run should read the network", got.LookupsCompleted)
+	}
+	if got.LookupsServedFromCache != 2 {
+		t.Fatalf("cached=%v, want 2", got.LookupsServedFromCache)
+	}
+}
+
+// TestDiscoveriesStartedCountsAFruitlessRun is the denominator property itself,
+// and the one a three-run cache test does not reach. Every lookup in that test
+// finds records, so moving the increment to fire only when records came back
+// survives it. This one discovers a key nobody announced: the lookup runs,
+// completes, and finds nothing, and the counter must still say a discovery
+// happened. That is the whole distinction the counter exists to make, in the
+// spec's words, one completed lookup against no discovery having run at all.
+func TestDiscoveriesStartedCountsAFruitlessRun(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	b := newNode(t, 1)
+
+	var calls int64
+	reader := newService(t, n, b, c, func(context.Context, *bzz.Address) (bool, error) {
+		atomic.AddInt64(&calls, 1)
+		return false, nil
+	})
+
+	// nobody announced this key
+	found := &adder{}
+	reader.Discover(context.Background(), swarm.RandAddress(t).Bytes(), found)
+
+	// There is no dial to wait on here, so wait for the lookup to land. Closing
+	// first would cancel it and this would count a cancellation instead, which
+	// is not the property under test.
+	deadline := time.Now().Add(20 * time.Second)
+	for reader.Counters(t).LookupsCompleted == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the lookup never completed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_ = reader.Close()
+
+	got := reader.Counters(t)
+	if got.DiscoveriesStarted != 1 {
+		t.Fatalf("discoveries=%v, want 1: a run that found nothing still ran", got.DiscoveriesStarted)
+	}
+	if got.LookupsCompleted != 1 {
+		t.Fatalf("completed=%v, want 1", got.LookupsCompleted)
+	}
+	if c := atomic.LoadInt64(&calls); c != 0 {
+		t.Fatalf("a fruitless run dialed %d times, want 0", c)
+	}
+	if len(found.list()) != 0 {
+		t.Fatalf("a fruitless run added %v to the set", found.list())
+	}
+}
+
+// TestHintedConnectsStartedCounted is the same denominator for the hinted path,
+// which has no cache in front of it, so counting once per call is the whole
+// property.
+func TestHintedConnectsStartedCounted(t *testing.T) {
 	t.Parallel()
 
 	n, c := newNetwork(), &clock{t: midWindow(1000)}
@@ -359,22 +484,76 @@ func TestStartedCountersAreTheDenominators(t *testing.T) {
 
 	connect, dialed := recordingConnect()
 	resolve := func(swarm.Address) (*bzz.Address, error) { return a.addr, nil }
-	pa := newService(t, n, a, c, nilConnect)
 	reader := newServiceResolving(t, n, b, c, connect, resolve)
-	k := announceOne(t, pa)
 
-	reader.Discover(context.Background(), k, &adder{})
-	<-dialed
 	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
-	<-dialed
+	select {
+	case <-dialed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the hinted connect never reached the dial")
+	}
 	_ = reader.Close()
 
-	got := reader.Counters(t)
-	if got.DiscoveriesStarted != 1 {
-		t.Fatalf("discoveries=%v, want 1", got.DiscoveriesStarted)
+	if got := reader.Counters(t).HintedConnectsStarted; got != 1 {
+		t.Fatalf("hinted connects=%v, want 1", got)
 	}
-	if got.HintedConnectsStarted != 1 {
-		t.Fatalf("hinted connects=%v, want 1", got.HintedConnectsStarted)
+}
+
+// TestCancelledRunStopsDialingButKeepsTheSet holds the guard the spec asserts:
+// a run cut off before it dials adds every overlay it found to the preferred
+// set, which outlives the request, and calls Connect for none of them. Without
+// this test both guards could be deleted and nothing would notice, because
+// countConnect no longer counts a cancelled connect.
+func TestCancelledRunStopsDialingButKeepsTheSet(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+
+	var calls int64
+	pa := newService(t, n, a, c, nilConnect)
+	reader := newService(t, n, b, c, func(context.Context, *bzz.Address) (bool, error) {
+		atomic.AddInt64(&calls, 1)
+		return false, nil
+	})
+	k := announceOne(t, pa)
+
+	// cancel the run before it can dial by closing the service, then discover
+	// against the already-closed service context
+	found := &adder{}
+	reader.SetDiscoverTimeout(time.Nanosecond)
+	reader.Discover(context.Background(), k, found)
+	_ = reader.Close()
+
+	if got := atomic.LoadInt64(&calls); got != 0 {
+		t.Fatalf("a run cut off before dialing called Connect %d times, want 0", got)
+	}
+	if got := found.list(); len(got) != 1 {
+		t.Fatalf("the cut-off run added %v to the set, want the provider kept", got)
+	}
+}
+
+// TestCancelledHintedRunDoesNotDial is the same guard on the hinted path. It
+// has no set to keep, so the whole property is that it stops.
+func TestCancelledHintedRunDoesNotDial(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+
+	var calls int64
+	resolve := func(swarm.Address) (*bzz.Address, error) { return a.addr, nil }
+	reader := newServiceResolving(t, n, b, c, func(context.Context, *bzz.Address) (bool, error) {
+		atomic.AddInt64(&calls, 1)
+		return false, nil
+	}, resolve)
+
+	reader.SetDiscoverTimeout(time.Nanosecond)
+	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+	_ = reader.Close()
+
+	if got := atomic.LoadInt64(&calls); got != 0 {
+		t.Fatalf("a hinted run cut off before dialing called Connect %d times, want 0", got)
 	}
 }
 

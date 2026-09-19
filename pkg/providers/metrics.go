@@ -53,9 +53,13 @@ type metrics struct {
 	// ConnectsAlreadyConnected counts connects short-circuited because this
 	// node was already connected to that peer on that address.
 	ConnectsAlreadyConnected prometheus.Counter
-	// ConnectsFailed counts connects that returned an error. The connection
-	// breaker behind it is node-wide, so a rise here can be caused by a
-	// failed dial to an unrelated peer.
+	// ConnectsFailed counts connects that returned an error other than one
+	// abandoned by shutdown or by the run's own timeout. Those are excluded
+	// deliberately: one shutdown would otherwise add a failure for every
+	// record left in the run, and this counter is read as evidence that
+	// providers cannot be reached. The connection breaker behind it is also
+	// node-wide, so a rise here can be caused by a failed dial to an
+	// unrelated peer.
 	ConnectsFailed prometheus.Counter
 }
 
@@ -109,7 +113,7 @@ func newMetrics() metrics {
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
 			Name:      "connects_failed",
-			Help:      "Number of connects to a provider that returned an error.",
+			Help:      "Number of connects to a provider that failed, excluding ones abandoned by shutdown or by the run's own timeout.",
 		}),
 	}
 }
