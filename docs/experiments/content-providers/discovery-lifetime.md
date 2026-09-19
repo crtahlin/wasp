@@ -550,12 +550,47 @@ stops, plus counters. `make protocol-freeze` is still run.
 
 ## Measurement
 
-Bench, `bench-1` as provider and `bench-2` as requester. **Before and after arms
-run in the same session**, alternating, because wall time is the most
-node-state-sensitive quantity here; rule 7 requires node state to be matched and
+Bench, `bench-1` as provider and `bench-2` as requester.
+
+**Before and after arms run in the same session where the observable is wall
+time.** Rule 7 requires node state to be matched, and
 `erasure-preferred.md:496-500` records a result this repository had to withdraw
-for exactly this. An earlier version proposed reusing #369's numbers across
-sessions.
+for exactly that reason. That applies to arm 4 without exception, and to arm 3.
+
+**It cannot apply to arm 1, and finding out why cost three attempts.** Alternating
+builds needs a restart per run, and **a restart of the requester is not cheap on
+this bench**: the node comes back with `localstore sharky .DIRTY file exists:
+starting recovery` and rebuilds before `/readiness` reports ready or a single peer
+reconnects. Measured on a store of about 2.5 million chunks: still `notReady` with
+**zero peers after five and a half minutes**, then ready with 79 peers about 47
+seconds after the rebuild finished. So a restart costs roughly six minutes, and
+six restarts in one run is about half an hour of recovery in a run that is otherwise
+a few minutes of work.
+
+**That is a cost, not a risk, and an earlier version of this paragraph said
+otherwise.** These are experiment nodes, not nodes playing the redistribution
+game, so a dirty store and a rebuild cost time and nothing else. Budget for it
+rather than avoid it: arm 4 needs the alternating design and is worth the half
+hour. Arm 1 does not, because its observable is structural rather than timing,
+which is the only reason it is exempt.
+
+So arm 1 takes its before state from the run recorded on
+[#369](https://github.com/crtahlin/wasp/issues/369#issuecomment-5739263845) and
+says so in the write-up. **The deviation is defensible only because arm 1's
+observable is not wall time**: whether a lookup was cancelled is a structural
+outcome of which context it inherited, not a timing measurement, and it does not
+vary with how warm the node is. Arms 4 and 3 keep the same-session rule, which
+means they cannot be run in the same pass as a build swap and need their own
+design.
+
+**Two things every arm here must wait for after any restart, and a first harness
+waited for neither.** `/health` answers long before the node can serve anything:
+it answered in four seconds while the node went on to spend minutes in recovery.
+Wait for `/readiness` to report `ready` **and** for the peer count to come back
+above a floor, and treat an HTTP 503 from a download as an invalid run rather
+than as a result. A harness that waited only on `/health` produced ten 503s in
+0.01 s across twelve downloads on both builds, and read the counters back empty
+for the same reason.
 
 ### The per-run reset, which the arms cannot do without
 
@@ -622,6 +657,18 @@ alternate. An earlier version of this note called the backoff per-peer.
 Read back before every arm: both versions from `/health`, that the requester
 holds none of the content, that `/blocklist` is empty, and `node/providers` set to
 debug, which is `bm9kZS9wcm92aWRlcnM%3D` on `/loggers`, **padded** base64url.
+
+**And read the postage batch from the provider rather than from a harness
+configuration file.** A first pass used a batch identifier from a stored
+configuration that the provider no longer had: every upload returned `batch with
+id not found`, every reference came back empty, every announcement answered 404,
+and all twelve downloads then answered 404 in 0.01 seconds. Twelve rows of
+nothing. It was obvious only because the times were instant; a stale but existing
+batch would have produced something that looked like a result. **Gate the run on
+one small upload returning a real reference before anything long starts**, and
+refuse to download unless every reference and every announcement came back good.
+Uploads also fail transiently, one in twelve on a first pass, so retry an upload
+before abandoning a run over it.
 
 **And make no operator lookup on the requester for the duration of a run.** The
 three `Lookups` counters are incremented in `Lookup`, which is also what
