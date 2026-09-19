@@ -358,9 +358,10 @@ had stored it.
 
 **The size of the excess is consistent with that, and an earlier version of this
 paragraph fitted it rather than checking it.** This node's three 20-second control
-windows read 13, 7 and 0, so between about 0.35 and 0.65 chunks a second, and an
-excess of six needs somewhere between nine and eighteen seconds of window at
-those rates. **The window's length was never recorded**, so the product cannot be
+windows read 13, 7 and 0; the two nonzero ones give between about 0.35 and 0.65
+chunks a second, at which an excess of six needs somewhere between nine and
+eighteen seconds of window. At the third, zero, no window length produces six at
+all. **The window's length was never recorded**, so the product cannot be
 checked at all. The earlier version quoted the highest of the three rates against
 an unrecorded nine-second window, which made the arithmetic land exactly on the
 six it was explaining. That is the seventh instance of the pattern this document

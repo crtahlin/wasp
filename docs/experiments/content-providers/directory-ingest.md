@@ -471,6 +471,14 @@ Arms:
    a small fresh archive that fits, which must move both counters. A flat reading
    is evidence of no residue only if a real ingest would not have read flat too.
 
+**Every attempt is recorded, with the reason it was discarded, including attempts
+that never became runs.** Invalidation is unbounded where the repeat allowance is
+not, so without this the number of attempts behind a reported run is invisible to
+a reader. That is not hypothetical: the first pass of arm 4b was set aside and its
+rows were never written down, which is how an unsupported count of bare-root
+failures reached a review round and why it took three of them to settle at one in
+twelve.
+
 Recorded per run: the reported chunk count; reported usage before and after;
 `ChunkStore.TotalChunks`, `SharedSlots` and `ReferenceCount` from `/debugstore`,
 with the paired control window beside them; and the HTTP status and the response
@@ -600,12 +608,32 @@ collection and zero for a blob. Record it per run.
   control window was not read over a span comparable to it. The measurement
   window is the two `/debugstore` reads bracketing the ingest, and anything
   waiting inside it is drift the ingest gets blamed for;
-- **a differing run whose measurement window was not the tightest the harness
-  allows.** Discard it and repeat once, with the two `/debugstore` reads as close
-  around the ingest as they can be, because drift is bursty and a control window
-  reading zero does not prove the next window was quiet. **The repeat is made
-  once and once only.** A difference that survives it is a reject under the clause
-  above, so this cannot be used to retry a failing measurement until it passes.
+- **a differing run with anything between its two `/debugstore` reads other than
+  the ingest itself.** Discard it and repeat once, with the reads immediately
+  around the ingest, because drift is bursty and a control window reading zero
+  does not prove the next window was quiet.
+
+  The criterion is deliberately **what is between the two reads**, not "the
+  tightest window the harness allows". The second is a property of the harness
+  rather than of the row, cannot be decided from the row at all, and is always
+  arguable since a harness can in principle be tightened further, so it would put
+  back the after-the-fact judgement this clause exists to remove. What is between
+  the reads is settled by reading five lines of shell, which is how the two passes
+  of arm 5 were separated.
+
+  This clause overlaps the deliberate-delay clause above and only ever bites on
+  looseness that was **not** deliberate, since a deliberate delay invalidates a
+  run whether or not it differs. Said so that the next reader does not have to
+  choose between two clauses for the same row.
+
+  **The repeat is made once and once only**, so this cannot be used to retry a
+  failing measurement until it passes; a difference surviving the repeat is a
+  reject under the clause above. **The limit counts repeats that produced a
+  readable result.** A repeat invalidated under any other clause, its own control
+  window drifting for instance, is replaced in the ordinary way and does not
+  consume the allowance, because otherwise that run slot would have no readable
+  observation and no clause permitting one to be obtained.
+
   This clause exists because an earlier version of the reject clause said a single
   differing run "is not a reject", which contradicted the rule above that a single
   failing run **is** one, and left one or two differing runs satisfying neither
