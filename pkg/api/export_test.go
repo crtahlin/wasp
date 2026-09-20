@@ -5,7 +5,11 @@
 package api
 
 import (
+	"context"
+
 	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/retrieval"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
@@ -146,4 +150,18 @@ func MapStructure(input, output any, hooks map[string]func(v string) (string, er
 
 func NewParseError(entry, value string, cause error) error {
 	return newParseError(entry, value, cause)
+}
+
+// NewProviderGetterForTest builds the hint the way withProviders does and
+// returns providerGetter's wrapper, so a test can assert on the context a fetch
+// arrives with. The wrapper is where issue #299's re-attach happens.
+//
+// It constructs a bare Service because providerGetter returns the getter
+// unwrapped when s.providers is nil, and newTestServer does not hand back the
+// Service.
+func NewProviderGetterForTest(p Providers, key []byte, set *retrieval.PreferredSet, g storage.Getter) storage.Getter {
+	s := &Service{providers: p}
+	hint := &providerHint{set: set, key: key}
+	ctx := context.WithValue(context.Background(), providerHintKey{}, hint)
+	return s.providerGetter(ctx, g)
 }

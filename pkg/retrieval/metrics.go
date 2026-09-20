@@ -36,6 +36,16 @@ type metrics struct {
 	// provider being refused; accounting_blocks_count is node-wide and cannot
 	// attribute a refusal to one peer.
 	PreferredOverdrafts prometheus.Counter
+	// PreferredCandidatesSelected counts flights that began with at least one
+	// preferred candidate, once per flight rather than per attempt.
+	//
+	// It exists because no other counter can answer whether the preferred set
+	// reached a fetch at all. PreferredAttempts increments only after
+	// prepareCredit succeeds, so it is capped by credit rather than by whether
+	// the set was present; and attempts plus overdrafts is inflated by the #324
+	// readmit path, which keeps a peer without consuming the candidate, so one
+	// refusal can be counted up to nine times. See issue #299.
+	PreferredCandidatesSelected prometheus.Counter
 	// PreferredReadmits counts preferred peers kept for a later attempt after
 	// an overdraft, rather than dropped for that chunk.
 	PreferredReadmits prometheus.Counter
@@ -137,6 +147,12 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "preferred_overdrafts",
 			Help:      "Preferred attempts refused because the peer could not be credited.",
+		}),
+		PreferredCandidatesSelected: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "preferred_candidates_selected",
+			Help:      "Flights that began with at least one preferred candidate, counted once per flight.",
 		}),
 		PreferredReadmits: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,

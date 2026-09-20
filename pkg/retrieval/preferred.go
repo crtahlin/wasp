@@ -150,6 +150,21 @@ func PreferredPeers(ctx context.Context) *PreferredSet {
 	return set
 }
 
+// HasPreferredPeers reports whether ctx carries a preferred set, including one
+// deliberately set to nil.
+//
+// It distinguishes "no set was ever attached" from "preference was switched off
+// on purpose", which PreferredPeers cannot: a typed nil stored under the key
+// satisfies the type assertion there, so the value is nil while the key is
+// present. Today no reachable path tells the two apart, and the spec for #299
+// says so rather than claiming a defect this prevents. It is kept because it
+// states the intent exactly and the suppressed context reaching a wrapper is
+// one refactor away.
+func HasPreferredPeers(ctx context.Context) bool {
+	_, ok := ctx.Value(preferredKey{}).(*PreferredSet)
+	return ok
+}
+
 // fingerprint returns a short digest of the peers that does not depend on
 // their order. It keeps retrievals of the same chunk with different preferred
 // peers apart in singleflight.
