@@ -104,18 +104,21 @@ That does not follow. The ordering in the code makes the same observation the
    `s.opts.Connect` has returned, and later still here because
    `pkg/node/providers.go:116` calls `kad.Connected` first.
 
-**The gap between those two points is several network round trips, not a
-moment.** An earlier version of this correction said "microseconds apart", which
-is wrong by orders of magnitude and is worth stating properly, because the size
-of the gap is exactly what makes the correct-dial explanation sufficient. In
-between lie `handshakeStream.FullClose` (`libp2p.go:1201`, which waits on the
-remote), a `putHandshakeAddress` statestore write (`:1210`), the whole
-`ConnectOut` notifier loop (`:1218-1226`) whose handlers include `pricing.init`
+**Real work separates those two points, rather than a moment.** An earlier
+version of this correction said "microseconds apart", which is wrong: in between
+lie `handshakeStream.FullClose` (`libp2p.go:1201`, which waits on the remote), a
+`putHandshakeAddress` statestore write (`:1211`), the whole `ConnectOut`
+notifier loop (`:1218-1226`) whose handlers include `pricing.init`
 (`pkg/pricing/pricing.go:115-126`) sending a payment threshold over a stream,
 and `pseudosettle.init` and `swapprotocol.init`; then, in the adapter,
-`kad.Connected` reaching `onConnected` and `Announce`, which blocks on
-`BroadcastPeers` (`kademlia.go:1221`). A 0.2 second separation between the two
-samples is entirely ordinary for that path.
+`kad.Connected` reaching `onConnected` and `Announce`, which broadcasts when it
+has addresses to send (`kademlia.go:1221`).
+
+**How long that takes has not been measured**, and saying it must exceed a
+sample would repeat the error rather than fix it. The claim needed here is only
+the weak one: a 0.2 second separation is unremarkable for that path, so the
+observation does not require the defect to explain it. The single observation
+available, run 1, separates the two by exactly one sample.
 
 **The ordering does not rule the defect out either, and saying it did was the
 same overreach in the opposite direction.** `addIfNotExists` has more than one
@@ -128,9 +131,14 @@ through and count a dial, which is the defect signature.
 
 So the correct conclusion is neither that the defect was observed nor that it
 was excluded: **the run is ambiguous, and those two observables cannot separate
-the cases.** The same table also records the provider's overlay as **absent**
-from `/peers` at the response instant for that run, which is the opposite of
-already connected, and that should have been noticed at the time.
+the cases.**
+
+An earlier version of this correction also offered the table's record of the
+overlay as **absent** from `/peers` at the response instant as evidence against
+already-connectedness. That is dropped, because it is the same kind of error:
+absence at the response instant says nothing about the state a second later,
+when the connect actually ran, and the defect reading has kademlia connecting
+during exactly that interval.
 
 ### The consequence for #369's own acceptance criterion
 
@@ -142,10 +150,10 @@ got there and discovery only observed it."
 
 Point 2 above says a genuine discovery dial writes the overlay **before** the
 counter rises, always, because one happens inside the call the other measures.
-So that criterion is satisfied only when the two land in the same sampling
-bucket, and fails whenever they do not. It is **systematically unsatisfiable by
-the behavior it exists to confirm**, and it was the reason run 1 was read as a
-failure at all. It is withdrawn in that document by this change.
+So that criterion **can be satisfied only when the two land in the same sampling
+bucket**, which is a coincidence of sampling rather than the evidence it was
+meant to be, and it fails whenever they do not. It was the reason run 1 was read
+as a failure at all. It is withdrawn in that document by this change.
 
 **What the defect actually rests on** is reading `isConnected`, which is
 deterministic and not in doubt, plus the unit reproduction below. Rule 11 asks
@@ -174,15 +182,21 @@ in the same bucket nothing can be ordered. Whether the peer was connected when
 
 The correct statement rests on reading the code rather than on those runs.
 `Discover`'s connect runs in a goroutine bounded by `discoverBound()` and not by
-the request (`providers.go:340`, `:413`), so it can and does complete before the
+the request (`providers.go:340`, `:349`), so it can and does complete before the
 response ends; when it does, the counters have already moved by the time any
 instant-of-response reading is taken, and no amount of later sampling recovers
 the order. That is independent of how already-connected is decided.
 
-So fixing the address keying is **necessary but not sufficient** for those arms.
-What they also need is a pair of nodes that do not reconnect to each other on
-their own, which the results document already says and which this bench cannot
-provide. Runs 2 and 3 are **unresolved**, not evidence for either side.
+So fixing the address keying **does not settle those arms**, and an earlier
+version of this paragraph called it "necessary but not sufficient", which claims
+more than holds. It is not necessary either: on a pair of nodes that never
+reconnect to each other on their own, which is what those arms actually need,
+the address mismatch cannot arise, so nothing about the keying is load bearing
+for them. That wording was carried over from the withdrawn draft.
+
+What blocks the arms is the fast dial above and the self-reconnection the
+results document records, neither of which this change touches. Runs 2 and 3 are
+**unresolved**, not evidence for either side.
 
 ## Hypothesis
 

@@ -755,16 +755,20 @@ and discovery only observed it.
 > `pkg/node/providers.go:116` calls `kad.Connected` first.
 >
 > So a genuine discovery dial **always** writes the overlay before the counter
-> rises. The requirement is met only when the two happen to land in the same
-> sampling bucket and fails whenever they straddle one, which the gap makes
-> likely: between the two points lie a `FullClose` that waits on the remote, a
-> statestore write, the `ConnectOut` notifier loop whose handlers send messages
-> over streams, and `Announce` blocking on `BroadcastPeers`. Several network
-> round trips, comfortably more than one 0.2 second sample.
+> rises. The requirement is therefore met only when the two land in the same
+> sampling bucket, and fails whenever they straddle one. Real work separates
+> them: a `FullClose` that waits on the remote (`libp2p.go:1201`), a statestore
+> write (`:1211`), the `ConnectOut` notifier loop (`:1218-1226`) whose handlers
+> send messages over streams, and `kad.Connected` reaching `Announce`. **How
+> long that takes has not been measured here**, and the single observation
+> available, run 1, separates the two by exactly one 0.2 second sample.
 >
 > This is why arm 2 run 1 was recorded as a failure in
-> [discovery-lifetime-results.md](discovery-lifetime-results.md). All three legs
-> held in that run; only this requirement did not, and it could not have.
+> [discovery-lifetime-results.md](discovery-lifetime-results.md). Legs 1 and 2
+> are recorded as holding in that run, and leg 3 follows from the overlay
+> appearing. Only this requirement did not hold, and it could only ever have
+> held by the two events landing in the same bucket, which is what happened in
+> runs 2 and 3.
 >
 > **What this does not rescue.** The confound the requirement was written
 > against is real: kademlia can re-dial inside the interval, all three legs then

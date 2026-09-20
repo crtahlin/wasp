@@ -211,19 +211,20 @@ overlay appeared **before** `connects_dialed` rose, by one sample, and
 > `/peers` is `s.p2p.Peers()` (`pkg/api/peer.go:100-103`), which reads the libp2p
 > peer registry. A new peer's registry entry is written by `addIfNotExists`
 > (`pkg/p2p/libp2p/peer.go:141-162`) from `libp2p.go:1191`, **inside** `Connect`
-> and a few lines before it returns. `ConnectsDialed.Inc()` then runs in
+> and before it returns. `ConnectsDialed.Inc()` then runs in
 > `countConnect` (`pkg/providers/providers.go:387-392`), called at `:376`,
 > **after** `Connect` has returned, and later still here because
 > `pkg/node/providers.go:116` calls `kad.Connected` first.
 >
 > So "the peer appears, then `connects_dialed` rises one sample later" is the
-> expected signature of **this node's own successful dial**. The gap between the
-> two is several network round trips, not a moment: `handshakeStream.FullClose`
-> waits on the remote (`libp2p.go:1201`), a statestore write follows (`:1210`),
-> then the whole `ConnectOut` notifier loop (`:1218-1226`) whose handlers send
-> messages over streams, and then `kad.Connected` reaching `Announce`, which
-> blocks on `BroadcastPeers` (`kademlia.go:1221`). A 0.2 second separation is
-> entirely ordinary for that path.
+> expected signature of **this node's own successful dial**. Real work separates
+> the two rather than a moment: `handshakeStream.FullClose` waits on the remote
+> (`libp2p.go:1201`), a statestore write follows (`:1211`), then the whole
+> `ConnectOut` notifier loop (`:1218-1226`) whose handlers send messages over
+> streams, and then `kad.Connected` reaching `Announce`, which broadcasts when
+> it has addresses to send (`kademlia.go:1221`). How long that takes has not
+> been measured, so the claim here is only that a 0.2 second separation is
+> unremarkable for that path, not that it is required.
 >
 > Nor does the ordering **exclude** the defect. `addIfNotExists` is also called
 > from `libp2p.go:661`, the inbound handshake handler, on a libp2p goroutine
@@ -232,10 +233,6 @@ overlay appeared **before** `connects_dialed` rose, by one sample, and
 > relation to the provider service. So this run is ambiguous between the defect
 > and correct behavior and cannot separate them, which is weaker than either
 > reading.
->
-> The row above also records the provider as **absent** from `/peers` at the
-> response instant, which is the opposite of already connected, and that should
-> have been noticed here at the time.
 >
 > The address-keyed defect is real and follows from reading `isConnected`
 > (`pkg/p2p/libp2p/peer.go:185-212`), which requires the remote address to match.
@@ -290,11 +287,15 @@ connected when `Connect` ran is what those runs cannot say. They are
 
 The conclusion stands on the code instead. `Discover`'s connect runs in a
 goroutine bounded by `discoverBound()` rather than by the request
-(`pkg/providers/providers.go:340`, `:413`), so it can complete before the
+(`pkg/providers/providers.go:340`, `:349`), so it can complete before the
 response ends; when it does, the counters have already moved before any
 instant-of-response reading is taken, and no later sampling recovers the order.
-That is true however already-connected is decided, so the first item is required
-whatever happens to the second. Tracked as
+That is true however already-connected is decided, and **it is also true
+whichever pair of nodes is used**, which is what arm 6's own section shows: the
+hinted dial completed in under a second there too. So neither item on its own
+settles arm 2, and the second item, the per-peer determination, is not even
+necessary for it, since on a pair that never reconnects the address mismatch
+cannot arise. Tracked as
 [#382](https://github.com/crtahlin/wasp/issues/382), which records the same
 correction and no longer claims to unblock these arms.
 
