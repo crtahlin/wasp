@@ -43,6 +43,11 @@ type peerConnector interface {
 
 // connectedOverlay reports whether the node currently holds a connection to
 // overlay.
+//
+// Peers() allocates and sorts, which peer.go calls too heavy for the dial hot
+// path, and p2p.Service exposes no per-overlay lookup to use instead. This is
+// not that path: it runs once per provider connect, bounded by
+// providers.lookupCandidates.
 func connectedOverlay(p peerConnector, overlay swarm.Address) bool {
 	for _, peer := range p.Peers() {
 		if peer.Address.Equal(overlay) {
@@ -66,10 +71,21 @@ func connectedOverlay(p peerConnector, overlay swarm.Address) bool {
 //
 // So the peer set is read here, immediately before the connect, and the
 // connect itself is left exactly as it was: every error path, the overlay
-// guard and the topology notification all still run. Kademlia can connect the
-// peer between the read and the connect, which miscounts that connect as a
-// dial; the window is two adjacent statements, and these counters are a
-// diagnostic rather than an accounting record.
+// guard and the topology notification all still run, in the same order.
+//
+// This over-reports dials, and by more than the gap between two statements.
+// Peers() lists peers whose bzz handshake has finished, because that is when
+// addIfNotExists writes the registry, while the connect short-circuits as soon
+// as a transport connection exists, which is earlier. A peer whose connection
+// is up but whose handshake is still running therefore reads as absent here
+// and needs no dial there, and is counted as a dial. The window is the length
+// of that concurrent setup, and it is likeliest exactly when both nodes learn
+// of each other at once, which is the discovery case. Closing it means
+// changing the address keying in pkg/p2p, which costs more than the counter is
+// worth; issue #382 records what.
+//
+// These counters are a diagnostic rather than an accounting record, and that
+// caveat belongs with them rather than only here: see ConnectsDialed.
 func providerConnect(
 	ctx context.Context,
 	p2ps peerConnector,
@@ -80,9 +96,16 @@ func providerConnect(
 
 	got, err := p2ps.Connect(ctx, addr.Underlays)
 	if errors.Is(err, p2p.ErrAlreadyConnected) {
-		// A success that needed no dial, reported by p2p itself. Kept because
-		// when this branch does fire it is correct, and returning early here
-		// is the behaviour that shipped.
+		// A success that needed no dial, reported by p2p itself. Returning
+		// early here is the behaviour that shipped and is kept unchanged.
+		//
+		// Note it does not check the overlay, unlike the path below: the
+		// address this branch returns carries whatever overlay we have
+		// registered for that peer id, which need not be the one the record
+		// names. Kademlia does guard that on the same error
+		// (kademlia.go:1099). Preserved rather than fixed here because it is
+		// pre-existing and reaches only the counter, since Discover adds the
+		// record's overlay to the set before connecting either way.
 		return true, nil
 	}
 	if err != nil {

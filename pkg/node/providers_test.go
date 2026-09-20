@@ -22,6 +22,7 @@ type fakeConnector struct {
 	peers       func() []p2p.Peer
 	connect     func(context.Context, []ma.Multiaddr) (*bzz.Address, error)
 	connects    int
+	dialled     []ma.Multiaddr
 	disconnects []swarm.Address
 }
 
@@ -34,6 +35,7 @@ func (f *fakeConnector) Peers() []p2p.Peer {
 
 func (f *fakeConnector) Connect(ctx context.Context, addrs []ma.Multiaddr) (*bzz.Address, error) {
 	f.connects++
+	f.dialled = addrs
 	return f.connect(ctx, addrs)
 }
 
@@ -59,16 +61,23 @@ var (
 	testOther    = swarm.MustParseHexAddress("bb00000000000000000000000000000000000000000000000000000000000000")
 )
 
+// testUnderlay is what a record carries and what the connect must be given.
+var testUnderlay = ma.StringCast("/ip4/127.0.0.1/tcp/1634")
+
 func testProviderAddr() *bzz.Address {
-	return &bzz.Address{Overlay: testProvider}
+	return &bzz.Address{Overlay: testProvider, Underlays: []ma.Multiaddr{testUnderlay}}
 }
 
 // Arm 2. Already connected on some underlay: the connect reports that it
 // needed no dial, AND it still runs the connect and the topology
-// notification. The last two assertions are the point of this test. Without
-// them a short circuit that returns early on an already-connected peer passes
-// every case here while skipping both, which is the behaviour change this
-// design exists to avoid. See issue #382.
+// notification.
+//
+// The last two assertions are what reject a short circuit returning early on
+// an already-connected peer, which would skip both and is the behaviour change
+// this design exists to avoid. Two other tests here happen to reject it as
+// well, because their peer sets also contain the provider; these assertions
+// are the ones that do it on purpose and would survive a change to those
+// fixtures. See issue #382.
 func TestProviderConnectAlreadyConnected(t *testing.T) {
 	t.Parallel()
 
@@ -119,6 +128,11 @@ func TestProviderConnectNotConnected(t *testing.T) {
 	}
 	if already {
 		t.Error("want a dial, got already connected")
+	}
+	// The record's underlays are what gets dialled. Nothing else here would
+	// notice them being dropped.
+	if len(f.dialled) != 1 || !f.dialled[0].Equal(testUnderlay) {
+		t.Errorf("want the record's underlays dialled, got %v", f.dialled)
 	}
 }
 
@@ -216,6 +230,52 @@ func TestProviderConnectErrAlreadyConnected(t *testing.T) {
 	}
 	if notified != 0 {
 		t.Error("the early return must not notify topology")
+	}
+}
+
+// A provider the topology refuses is disconnected again rather than left
+// holding a connection slot, and the error says where it came from.
+//
+// Nothing else here covers this path: without it, deleting the Disconnect or
+// returning the bare error both pass the whole file.
+func TestProviderConnectTopologyRefuses(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeConnector{
+		peers: staticPeers(testOther),
+		connect: func(context.Context, []ma.Multiaddr) (*bzz.Address, error) {
+			return &bzz.Address{Overlay: testProvider}, nil
+		},
+	}
+
+	refused := errors.New("bin full")
+	var gotPeer p2p.Peer
+	var gotForce bool
+	kad := func(_ context.Context, p p2p.Peer, force bool) error {
+		gotPeer, gotForce = p, force
+		return refused
+	}
+
+	already, err := providerConnect(t.Context(), f, kad, testProviderAddr())
+	if !errors.Is(err, refused) {
+		t.Fatalf("want the topology error wrapped, got %v", err)
+	}
+	if err.Error() == refused.Error() {
+		t.Error("want the error to say it came from topology")
+	}
+	if already {
+		t.Error("a refused provider must not report an already-connected peer")
+	}
+	if len(f.disconnects) != 1 || !f.disconnects[0].Equal(testProvider) {
+		t.Errorf("want the refused peer disconnected, got %v", f.disconnects)
+	}
+	// A provider is dialled as a full node and without forcing past a full
+	// bin, which is the whole reason the topology gets a say.
+	if !gotPeer.FullNode {
+		t.Error("want the provider offered to topology as a full node")
+	}
+	if gotForce {
+		t.Error("want the connection not forced past a full bin")
 	}
 }
 

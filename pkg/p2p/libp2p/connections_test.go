@@ -550,8 +550,11 @@ func TestDoubleConnectOnDifferentAddresses(t *testing.T) {
 		t.Fatalf("want a plain success on a second underlay, got %v", err)
 	}
 
-	// Still one peer: the second connect added no connection, it only ran the
-	// handshake again.
+	// Still one peer on each side. That is a statement about the registry's
+	// overlay map, not about how many transport connections are open:
+	// addIfNotExists deliberately records a second connection to a peer it
+	// already holds, so this assertion cannot tell the two apart and does not
+	// claim to.
 	expectPeers(t, s2, overlay1)
 	expectPeers(t, s1, overlay2)
 }
