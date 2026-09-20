@@ -740,6 +740,45 @@ held. All three legs, no dial. Ordering the first appearance against the counter
 is what separates the two cases: if the overlay appears first, kademlia got there
 and discovery only observed it.
 
+> **Correction, added later: the ordering requirement above is withdrawn. It is
+> not satisfiable by the behavior it exists to confirm.**
+>
+> The reasoning assumed that an overlay appearing in `/peers` before
+> `ConnectsDialed` rises means something other than discovery connected the
+> peer. The code says otherwise, and the order is fixed rather than incidental.
+> `/peers` is `s.p2p.Peers()` (`pkg/api/peer.go:100-103`), reading the libp2p
+> registry. On a discovery dial that registry entry is written by
+> `addIfNotExists` (`pkg/p2p/libp2p/peer.go:141-162`) from `libp2p.go:1191`,
+> **inside** `Connect` and before it returns. `ConnectsDialed.Inc()` runs in
+> `countConnect` (`pkg/providers/providers.go:387-392`) **after**
+> `s.opts.Connect` returns, and later still here because
+> `pkg/node/providers.go:116` calls `kad.Connected` first.
+>
+> So a genuine discovery dial **always** writes the overlay before the counter
+> rises. The requirement is therefore met only when the two land in the same
+> sampling bucket, and fails whenever they straddle one. Real work separates
+> them: a `FullClose` that waits on the remote (`libp2p.go:1201`), a statestore
+> write (`:1211`), the `ConnectOut` notifier loop (`:1218-1226`) whose handlers
+> send messages over streams, and `kad.Connected` reaching `Announce`. **How
+> long that takes has not been measured here**, and the single observation
+> available, run 1, separates the two by exactly one 0.2 second sample.
+>
+> This is why arm 2 run 1 was recorded as a failure in
+> [discovery-lifetime-results.md](discovery-lifetime-results.md). Legs 1 and 2
+> are recorded as holding in that run, and leg 3 follows from the overlay
+> appearing. Only this requirement did not hold, and it could only ever have
+> held by the two events landing in the same bucket, which is what happened in
+> runs 2 and 3.
+>
+> **What this does not rescue.** The confound the requirement was written
+> against is real: kademlia can re-dial inside the interval, all three legs then
+> hold, and no dial by discovery occurred. Withdrawing the requirement leaves
+> that case unexcluded, so **arm 2 is not settled by these runs in either
+> direction**. Separating the two needs a pair of nodes that do not reconnect to
+> each other on their own, which this bench cannot provide, as the results
+> document concludes. Found while writing
+> [#382](https://github.com/crtahlin/wasp/issues/382).
+
 Reading the counters at two instants only, as an earlier version did, cannot
 order anything and would also be satisfied by a dial that finished while the
 request was still open.
