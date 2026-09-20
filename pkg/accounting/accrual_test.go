@@ -5,6 +5,7 @@
 package accounting_test
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -112,6 +113,31 @@ func TestRefreshDueCapBindsBelowTolerance(t *testing.T) {
 
 	acc := newAccrualAccounting(t, accounting.AccrualContinuous, accrualTolerance)
 
+	// The crossover moves with the threshold: the cap is 25 per cent of it,
+	// and the allowance accrues at 4,500 per millisecond regardless, so a
+	// smaller threshold reaches its cap sooner. The spec asks for both.
+	for _, tc := range []struct {
+		threshold int64
+		// the first millisecond at which the cap binds
+		bindsAt int64
+	}{
+		{13_500_000, 750}, // cap 3,374,999; uncapped at 750 ms is 3,375,000
+		{9_000_000, 500},  // cap 2,249,999; uncapped at 500 ms is 2,250,000
+	} {
+		th := big.NewInt(tc.threshold)
+
+		below := acc.RefreshDueForTest(th, 0, tc.bindsAt-1)
+		if want := big.NewInt((tc.bindsAt - 1) * 4_500); below.Cmp(want) != 0 {
+			t.Errorf("threshold %d at %d ms: want the uncapped %s, got %s",
+				tc.threshold, tc.bindsAt-1, want, below)
+		}
+		at := acc.RefreshDueForTest(th, 0, tc.bindsAt)
+		if want := acc.SafeAccrualCapForTest(th); at.Cmp(want) != 0 {
+			t.Errorf("threshold %d at %d ms: want the cap %s, got %s",
+				tc.threshold, tc.bindsAt, want, at)
+		}
+	}
+
 	for _, threshold := range []int64{13_500_000, 9_000_000} {
 		th := big.NewInt(threshold)
 
@@ -195,34 +221,102 @@ func TestRefreshDueCapAbsentAboveEighteenMillion(t *testing.T) {
 	wantDue(t, acc.RefreshDueForTest(grown, 0, 999), 4_495_500, 999)
 }
 
-// A clock stepping back a second or more makes the raw term negative and would
-// put the limit BELOW the announced threshold. Clamped in both modes.
+// A clock stepping backwards must never produce a negative allowance, which
+// would put the overdraft limit BELOW the threshold the peer announced.
 //
-// The step must be at least 1,000 ms: integer division truncates toward zero,
-// so a smaller backwards step already yields zero without the clamp and would
-// pin nothing.
+// How far back it takes to matter differs by mode, and an earlier version of
+// this test and its comment got that wrong in both directions.
+//
+//   - step: only a full second or more. Integer division truncates toward
+//     zero, so a smaller step already yields zero. A test at 1 ms would pass
+//     against the unclamped code and pin nothing.
+//   - continuous: one millisecond is enough, because that path multiplies by
+//     the elapsed milliseconds before dividing, so any negative elapsed value
+//     produces a negative allowance directly. Measured: 1 ms back gives
+//     -4,500 without the clamp.
+//
+// Small backwards corrections are ordinary and full-second steps are not, so
+// the continuous case is the one that is likely to be reached.
 func TestRefreshDueBackwardsClockClamped(t *testing.T) {
 	t.Parallel()
 
-	for _, mode := range []struct {
+	for _, tc := range []struct {
 		name string
 		mode accounting.AccrualMode
+		// how far the clock stepped back, in milliseconds
+		back int64
 	}{
-		{"step", accounting.AccrualStep},
-		{"continuous", accounting.AccrualContinuous},
+		{"step needs a full second", accounting.AccrualStep, 1_500},
+		{"continuous needs only a millisecond", accounting.AccrualContinuous, 1},
+		{"continuous under a second", accounting.AccrualContinuous, 999},
+		{"continuous over a second", accounting.AccrualContinuous, 1_500},
 	} {
-		t.Run(mode.name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			acc := newAccrualAccounting(t, mode.mode, accrualTolerance)
+			acc := newAccrualAccounting(t, tc.mode, accrualTolerance)
 
-			// Refreshed at 10,000 ms, clock now reads 8,500 ms: 1,500 ms back.
-			due := acc.RefreshDueForTest(accrualThreshold, 10_000, 8_500)
+			const refreshedAt = 10_000
+			due := acc.RefreshDueForTest(accrualThreshold, refreshedAt, refreshedAt-tc.back)
 			if due.Sign() < 0 {
-				t.Errorf("negative allowance %s would put the limit below the threshold", due)
+				t.Errorf("%d ms back: negative allowance %s would put the limit below the threshold",
+					tc.back, due)
 			}
 			if due.Sign() != 0 {
-				t.Errorf("want no allowance for a backwards clock, got %s", due)
+				t.Errorf("%d ms back: want no allowance for a backwards clock, got %s", tc.back, due)
+			}
+		})
+	}
+}
+
+// The gate admits a credit inside the first second that the step mode refuses.
+//
+// This is the test the change exists for, and every other test in this file
+// reaches refreshDue through a helper or through the reporting path. Without
+// it, reverting the one line in PrepareCredit to upstream's expression makes
+// `continuous` a no-op at the gate and the whole package still passes. A
+// review found exactly that, after a commit message claiming every mutation
+// was caught.
+func TestPrepareCreditAdmitsInsideTheFirstSecond(t *testing.T) {
+	t.Parallel()
+
+	const nowMillis = 1_700_000_000_000
+
+	// A debt above the announced threshold of 13,500,000 and below the
+	// sub-second continuous limit. At 500 ms the allowance is 2,250,000, so
+	// the limit is 15,750,000. Step grants nothing before one second, so its
+	// limit is still 13,500,000.
+	price := uint64(14_000_000)
+
+	for _, tc := range []struct {
+		name       string
+		mode       accounting.AccrualMode
+		wantRefuse bool
+	}{
+		{"step refuses", accounting.AccrualStep, true},
+		{"continuous admits", accounting.AccrualContinuous, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			peer := swarm.MustParseHexAddress("00112233")
+			acc := newAccrualAccounting(t, tc.mode, accrualTolerance)
+			acc.SetTimeNow(func() time.Time { return time.UnixMilli(nowMillis) })
+			acc.Connect(peer, true)
+			if err := acc.NotifyPaymentThreshold(peer, accrualThreshold); err != nil {
+				t.Fatal(err)
+			}
+			acc.SetRefreshTimestampForTest(peer, nowMillis-500)
+
+			_, err := acc.PrepareCredit(t.Context(), peer, price, true)
+			if tc.wantRefuse {
+				if !errors.Is(err, accounting.ErrOverdraft) {
+					t.Fatalf("want the step mode to refuse %d, got %v", price, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("want the continuous mode to admit %d, got %v", price, err)
 			}
 		})
 	}

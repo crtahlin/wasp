@@ -357,7 +357,12 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 		}
 	}
 
-	refreshDue := a.refreshDue(accountingPeer, a.timeNow())
+	// wasp #359: one clock reading, used for both the allowance and the
+	// elapsed time logged beside it below. Two separate a.timeNow() calls can
+	// straddle the one second boundary that decides which branch ran, so the
+	// logged elapsed time would not always explain the logged allowance.
+	now := a.timeNow()
+	refreshDue := a.refreshDue(accountingPeer, now)
 	overdraftLimit := new(big.Int).Add(accountingPeer.paymentThreshold, refreshDue)
 
 	// if expectedDebt would still exceed the paymentThreshold at this point block this request
@@ -397,7 +402,7 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 				// seconds this logged before. Under continuous accrual the
 				// second is zero across the entire window the allowance is
 				// granted in, so it could no longer explain refresh_due.
-				"elapsed_ms", elapsedSinceRefresh(accountingPeer, a.timeNow()),
+				"elapsed_ms", elapsedSinceRefresh(accountingPeer, now),
 				"settled_balance", currentBalance,
 				"surplus_balance", surplusBalance,
 				"surplus_error", surplusErr,

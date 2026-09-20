@@ -1248,14 +1248,9 @@ func NewBee(
 	b.accountingCloser = acc
 
 	// wasp #359: how the refresh allowance is granted inside the first second
-	// after a refreshment. Default step, which is current behaviour.
-	accrual, err := accounting.ParseAccrualMode(o.RefreshAllowanceAccrual)
-	if err != nil {
+	// after a refreshment. Default step, which is current behavior.
+	if err := applyAccrualMode(acc, o.RefreshAllowanceAccrual, logger); err != nil {
 		return nil, err
-	}
-	acc.SetAccrualMode(accrual)
-	if accrual == accounting.AccrualContinuous {
-		logger.Info("refresh allowance accrues continuously inside the first second", "setting", o.RefreshAllowanceAccrual)
 	}
 
 	// wasp #327: a larger payment threshold announced to a peer downloading

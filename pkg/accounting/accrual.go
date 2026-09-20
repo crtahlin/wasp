@@ -52,7 +52,7 @@ func (a *Accounting) SetAccrualMode(m AccrualMode) {
 // Upstream computes this as min(elapsed/1000, 1) * refreshRate, integer
 // division, so the allowance is zero for 999 ms and then a whole refreshRate.
 // It is documented as a rate, "accounting units refreshed per second"
-// (pkg/node/node.go:237), and #353 measured that 94.5 per cent of refusals on
+// (pkg/node/node.go, the refreshRate constant), and #353 measured that 94.5 per cent of refusals on
 // the bench fall in the window where it reads zero. See #359.
 //
 // The step behaviour is the default and is unchanged. The continuous mode
@@ -96,13 +96,20 @@ func (a *Accounting) refreshDue(accountingPeer *accountingPeer, now time.Time) *
 // elapsedSinceRefresh is the time since this peer's last refreshment, in
 // milliseconds, never negative.
 //
-// The clamp is new behaviour rather than a restatement, and only past a full
-// second. Go truncates integer division toward zero, so a backwards clock step
-// of 1 to 999 ms already gives an elapsed term of zero upstream. Only a step of
-// a second or more makes the term negative and puts the overdraft limit BELOW
-// the threshold the peer announced, which is a defect on its own, so the clamp
-// applies in both accrual modes. A test for it must use a step of at least
-// 1,000 ms, or it passes against the unclamped code too and pins nothing.
+// The clamp is new behavior rather than a restatement, and how far the clock
+// must step back before it matters differs by mode.
+//
+// In the step mode, and in upstream, integer division truncates toward zero,
+// so a backwards step of 1 to 999 ms already gives zero; only a step of a
+// second or more makes the term negative and puts the overdraft limit BELOW
+// the threshold the peer announced. In the continuous mode a single
+// millisecond is enough, because that path multiplies by the elapsed
+// milliseconds before dividing.
+//
+// So a test for the step mode must use a step of at least 1,000 ms or it pins
+// nothing, while the continuous mode is exposed to the ordinary case of a
+// small clock correction. An earlier version of this comment claimed the
+// 1,000 ms floor for both, which understated the clamp.
 func elapsedSinceRefresh(accountingPeer *accountingPeer, now time.Time) int64 {
 	elapsed := now.UnixMilli() - accountingPeer.refreshTimestampMilliseconds
 	if elapsed < 0 {
