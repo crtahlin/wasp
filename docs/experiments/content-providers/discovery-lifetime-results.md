@@ -195,21 +195,47 @@ events landed in the same bucket twice out of three and nothing could be ordered
 arm 6.
 
 **Run 1 is the one run with a clean start, and it fails leg 3.** The provider's
-overlay appeared **before** `connects_dialed` rose, by one sample. And
-`connects_already_connected` stayed at **zero**, so discovery's connect was
-counted as a **dial** even though the node was already connected to that peer by
-then.
+overlay appeared **before** `connects_dialed` rose, by one sample, and
+`connects_already_connected` stayed at **zero**.
 
-That is the confound the spec predicts, observed rather than reasoned about.
-libp2p's already-connected short-circuit is keyed on the remote **address**
-rather than the peer, so a connect over a connection kademlia opened on a
-different underlay falls through, completes, and is counted as a dial.
-**`connects_dialed` does not mean a dial happened**, on this bench, in the one
-run that could have tested it.
+> **Correction, added later.** This paragraph originally continued: "so
+> discovery's connect was counted as a **dial** even though the node was already
+> connected to that peer by then", and concluded that the address-keyed
+> short-circuit had been "observed rather than reasoned about". **That inference
+> is withdrawn.** It does not follow from these two observables, and the ordering
+> in the code rules it out.
+>
+> `/peers` is `s.p2p.Peers()` (`pkg/api/peer.go:100-103`), which reads the libp2p
+> peer registry. A new peer's registry entry is written by `addIfNotExists`
+> (`pkg/p2p/libp2p/peer.go:141-162`) from `libp2p.go:1191`, **inside** `Connect`
+> and a few lines before it returns. `ConnectsDialed.Inc()` then runs in
+> `countConnect` (`pkg/providers/providers.go:387-392`), called at `:376`,
+> **after** `Connect` has returned, and later still here because
+> `pkg/node/providers.go:115` calls `kad.Connected` first.
+>
+> So "the peer appears, then `connects_dialed` rises one sample later" is the
+> expected signature of **this node's own successful dial**. The two events are
+> microseconds apart in the code and merely straddled the 0.2 second sampling
+> boundary. This run is ambiguous between the defect and entirely correct
+> behavior and cannot separate them.
+>
+> The row above also records the provider as **absent** from `/peers` at the
+> response instant, which is the opposite of already connected, and that should
+> have been noticed here at the time.
+>
+> The address-keyed defect is real and follows from reading `isConnected`
+> (`pkg/p2p/libp2p/peer.go:185-212`), which requires the remote address to match.
+> It is tracked as [#382](https://github.com/crtahlin/wasp/issues/382), where the
+> same "measured" claim is withdrawn and the reproduction is a unit test rather
+> than a bench run. What is corrected here is only the claim that this run
+> demonstrated it.
 
-The ordered three-leg conjunction was the spec's answer to exactly this, and it
-does not survive kademlia reconnecting first. The spec says the conjunction is
-inference rather than proof; this is the measurement agreeing with it.
+Leg 3 still fails, on the weaker and sufficient reading that
+`connects_already_connected` never moved while `connects_dialed` did.
+
+The ordered three-leg conjunction was the spec's answer to the reconnection
+confound, and it does not survive kademlia reconnecting first. The spec says the
+conjunction is inference rather than proof, and that remains the position.
 
 ## What would settle the rest
 
@@ -223,6 +249,15 @@ request can end. What would settle it is either
 - **the already-connected determination made per peer rather than per address**,
   in `pkg/p2p/libp2p`, which would make `connects_dialed` mean what its name
   says. That is outside #369's scope and is worth its own issue.
+
+**Correction, added later: these are not alternatives, and the second is not
+sufficient on its own.** The "either or" above is wrong. Runs 2 and 3 are
+inconclusive because the dial completed **inside the request**, which the address
+keying has nothing to do with, and a correct per-peer determination would still
+have counted a dial in them, because at the instant `Connect` ran the peer
+genuinely was not connected. So the first item is required whatever happens to
+the second. Tracked as [#382](https://github.com/crtahlin/wasp/issues/382), which
+records the same correction and no longer claims to unblock these arms.
 
 Sampling at 0.2 seconds rather than one second is necessary either way, and is
 what turned an unreadable result into a readable one here.

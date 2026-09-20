@@ -1,72 +1,82 @@
-# Deciding already-connected per peer rather than per address
+# Counting a provider connect that needed no dial
 
 Issue: [#382](https://github.com/crtahlin/wasp/issues/382).
-Type: fix. Labels include `affects-upstream`.
+Type: fix.
+
+**This spec does not change `pkg/p2p`.** An earlier draft did. Two reviews
+showed that the `pkg/p2p` change is three behavior changes rather than one, that
+it does not deliver the thing it was wanted for, and that the bench observation
+offered as evidence for it does not support it. All three are recorded below,
+because each one is a correction to something already written down and one of
+them is already merged on `main`.
 
 ## Problem
 
-`p2p.ErrAlreadyConnected` is decided by matching the **remote address** of an
-open connection, not by asking whether the peer is connected at all. A connect
-to a peer that is already connected on a different underlay therefore does not
-take that branch. It runs the dial path, the handshake, and the topology path,
-and returns success indistinguishable from a first connection.
+`bee_providers_connects_dialed` and `bee_providers_connects_already_connected`
+are supposed to separate a provider connect that opened a connection from one
+that found the peer already there. They do not. The second counter can only rise
+when `p2p.Service.Connect` returns `p2p.ErrAlreadyConnected`, and that error is
+decided by matching the **remote address** of an open connection, not by asking
+whether the peer is connected at all.
 
-The check is in `Connect`, `pkg/p2p/libp2p/libp2p.go:1066-1074`:
+`pkg/p2p/libp2p/libp2p.go:1066-1074`:
 
 ```go
 remoteAddr := addr.Decapsulate(hostAddr)
 
 if overlay, found := s.peers.isConnected(info.ID, remoteAddr); found {
-	address = &bzz.Address{Overlay: overlay, Underlays: []ma.Multiaddr{addr}}
+	address = &bzz.Address{
+		Overlay:   overlay,
+		Underlays: []ma.Multiaddr{addr},
+	}
 	return address, p2p.ErrAlreadyConnected
 }
 ```
 
-`isConnected` (`pkg/p2p/libp2p/peer.go:185`) requires **both** the peer ID in
-`r.overlays` **and** a connection in `r.connections[peerID]` whose
-`RemoteMultiaddr()` compares equal to `remoteAddr`. An open connection to the
-same peer on another underlay satisfies the first and fails the second, so the
-function returns `false` and execution falls through.
+`isConnected` (`pkg/p2p/libp2p/peer.go:185-212`) requires **both** the peer ID
+in `r.overlays` **and** a connection in `r.connections[peerID]` whose
+`RemoteMultiaddr()` compares equal to `remoteAddr`. A connection to the same
+peer on another underlay satisfies the first and fails the second, so the
+function returns false and `Connect` falls through to the dial path.
 
-### What the fall-through actually costs
+What follows is not a second transport connection. `s.host.Connect` returns
+`nil` without dialing when the peer is already connected, checked in the pinned
+dependency rather than recalled: `go-libp2p v0.48.0`,
+`p2p/host/basic/basic_host.go:538-546`, where addresses are absorbed into the
+peerstore and the early return is guarded only by `forceDirect`, which Bee never
+sets (`grep -rn ForceDirectDial pkg cmd` finds nothing). What does happen is a
+**new handshake stream** on the existing connection (`libp2p.go:1131`), a
+`peerMultiaddrs` exchange, and a full `handshakeService.Handshake` round trip
+(`:1156`). Only then does `addIfNotExists` (`peer.go:141`) notice the overlay is
+already registered and return `exists == true`, and the branch handling that,
+`libp2p.go:1191`, closes the handshake stream and returns `i.BzzAddress, nil`, a
+plain success with no error.
 
-The issue estimated the cost as "one `host.Connect` that returns immediately
-plus a handshake path". Reading the rest of `Connect` makes that more precise,
-and the second half is the larger part:
+So the provider adapter at `pkg/node/providers.go:100-106` sees a nil error, and
+reports a dial.
 
-1. `s.host.Connect` returns almost immediately. go-libp2p adds the addresses to
-   its peerstore and then returns `nil` when `Connectedness(peerID)` is already
-   `Connected`, without opening a transport connection. Checked in the pinned
-   dependency rather than recalled: `go-libp2p v0.48.0`,
-   `p2p/host/basic/basic_host.go:543-546`, where the early return is guarded
-   only by `forceDirect`, which Bee never sets. So there is no second TCP dial,
-   and what is wrong is the name of the counter that rises rather than the
-   connection being wasteful.
-2. `Connect` then opens a **new handshake stream** on the existing connection
-   (`libp2p.go:1131`), exchanges `peerMultiaddrs`, and runs the full
-   `handshakeService.Handshake` round trip (`:1156`). That is real work with the
-   peer, repeated every time this path is taken.
-3. Only at the end does `addIfNotExists` (`peer.go:141`) notice the overlay is
-   already registered and return `exists == true`. The branch that handles it,
-   `libp2p.go:1191`, closes the handshake stream and returns
-   **`i.BzzAddress, nil`**, a plain success with no error at all.
+### Why the addresses differ in the first place
 
-Point 3 was not in the issue and matters for the design below: there is already
-a place in `Connect` that knows the peer was a duplicate, and it deliberately
-reports success rather than `ErrAlreadyConnected`.
+Only on the **discovery** path. A provider record is built by `Options.Address`
+(`pkg/node/providers.go:76-96`), which filters this node's underlays to public
+ones and caps them at `providers.MaxUnderlays`, which is 4
+(`pkg/providers/keys.go:31`). Kademlia may hold a connection on a private
+address that no record ever carries.
 
-### Why this fork cares
+The **hinted** path is different and this matters, because an earlier draft of
+this spec proposed measuring the defect on it. `ConnectHints` resolves each
+overlay through `s.opts.Resolve` (`pkg/providers/providers.go:435`), which is
+`book.Get` (`pkg/node/providers.go:124-126`), the same address book kademlia
+dials from. The addresses therefore agree, `isConnected` matches, and the defect
+does not reproduce there at all.
 
-The provider service publishes `bee_providers_connects_dialed` and
-`bee_providers_connects_already_connected`, and two acceptance arms of
-[#369](https://github.com/crtahlin/wasp/issues/369) are built on the pair. The
-addresses in a provider record are liable to differ from the live connection by
-construction: `Options.Address` in `pkg/node/providers.go` filters the node's
-underlays to public ones and caps them at `providers.MaxUnderlays`, which is 4,
-while kademlia may hold a connection on a private address.
+## Correction: the bench run is not evidence of this
 
-Observed on the bench while measuring #369 arm 2, sampling `/peers` and
-`/metrics` every 0.2 seconds after a download completed:
+[#382](https://github.com/crtahlin/wasp/issues/382) carries a section headed
+"Measured, not reasoned about", and
+[discovery-lifetime-results.md](discovery-lifetime-results.md) draws the same
+conclusion in a document already merged on `main`. Both are **withdrawn**. The
+observation was:
 
 | | |
 |---|---|
@@ -74,210 +84,295 @@ Observed on the bench while measuring #369 arm 2, sampling `/peers` and
 | `bee_providers_connects_dialed` rises | 1.4 s after the response |
 | `bee_providers_connects_already_connected` | 0 |
 
-The peer was connected before the provider service's `Connect` ran, and the
-connect was still counted as a dial. One run, so it is an observation and not a
-measurement under rule 7. The fix is justified by reading the code; the bench
-arms below are what would measure it.
+and the conclusion drawn was that the peer was already connected when the
+provider service's `Connect` ran, so a connect over an open connection was
+counted as a dial.
 
-### Correction to the issue
+That does not follow, and the ordering in the code is what rules it out:
 
-[#382](https://github.com/crtahlin/wasp/issues/382) states that
-`pkg/p2p/libp2p/libp2p.go` and `pkg/p2p/libp2p/peer.go` are "unmodified here".
-That is too broad and is wrong as written. Both files carry fork changes:
-`peer.go` adds `count()`, and `libp2p.go` adds the zero-peer breaker bypass for
-[#74](https://github.com/crtahlin/wasp/issues/74) and the extended user agent.
+1. `/peers` is `s.p2p.Peers()` (`pkg/api/peer.go:100-103`), which reads the
+   libp2p peer registry.
+2. The registry entry for a new peer is created by `addIfNotExists`
+   (`peer.go:141-162`, writing `r.overlays[peerID]`), called from
+   `libp2p.go:1191`, **inside** `Connect` and a few lines before it returns.
+3. `ConnectsDialed.Inc()` runs in `countConnect`
+   (`pkg/providers/providers.go:387-392`), called at `:376`, **after**
+   `s.opts.Connect` has returned, and for the provider adapter later still,
+   because `pkg/node/providers.go:115` calls `kad.Connected` first.
 
-What is true, and is what rule 11 needs, is narrower and was checked with
-`git diff upstream/v2.8.2`: the three hunks this spec is about, `isConnected` in
-`peer.go`, the call site at `libp2p.go:1068`, and the duplicate branch at
-`libp2p.go:1191`, are byte-identical to `upstream/v2.8.2`. The fork's changes to
-those two files are elsewhere in them. The `affects-upstream` label is earned,
-but the sentence supporting it in the issue is being corrected rather than
-repeated.
+So "the peer appears, then `connects_dialed` rises one sample later" is the
+**expected signature of the provider service's own successful dial**. The two
+events are microseconds apart in the code and merely straddled a 0.2 second
+sampling boundary. The run is ambiguous between the defect and entirely correct
+behavior, and cannot distinguish them with those two observables.
+
+The same table records the provider's overlay as **absent** from `/peers` at the
+response instant for that run, which is the opposite of already connected. That
+should have been noticed at the time.
+
+**What the defect actually rests on** is reading `isConnected`, which is
+deterministic and not in doubt, plus the unit reproduction below. Rule 11 asks
+for measured or reproduced rather than reasoned, so the reproduction is the
+part that earns the claim, and it ships with this change rather than being
+promised.
+
+## Correction: fixing `pkg/p2p` would not have unblocked #369
+
+The stated reason for the `pkg/p2p` change was that
+[#369](https://github.com/crtahlin/wasp/issues/369) arms 2 and 6 cannot be
+settled while this holds. That is not right either.
+`discovery-lifetime-results.md` records arm 2's three runs, and in runs 2 and 3
+the dial completed **inside the request**, before the response ended. Those runs
+are inconclusive for a reason this defect has nothing to do with, and a correct
+fix would still show `connects_dialed` rising in them, because at the instant
+`Connect` ran the peer genuinely was not connected.
+
+Fixing the address keying is therefore **necessary but not sufficient** for
+those arms. What they also need is a pair of nodes that do not reconnect to each
+other on their own, which the results document already says and which this bench
+cannot provide.
 
 ## Hypothesis
 
-Matching on the remote address was chosen so the returned `bzz.Address` could
-name an underlay known to be carrying the connection, not to express a rule that
-a peer may be connected once per address. Deciding the case per peer, while
-still returning the requested address, keeps every caller's use of the result
-working and removes both the redundant handshake and the false dial count.
+The question the counters exist to answer, "did this provider connect open a
+connection", can be answered correctly in the adapter that owns those counters,
+without changing what any connect does. The `pkg/p2p` behavior is a separate
+defect with separate consequences and belongs in a separate change.
 
 ## Design
 
-### The change
-
-In `Connect`, replace the address-keyed pre-dial check with a peer-keyed one
-that is confirmed against go-libp2p's own view of the transport:
+In `pkg/node/providers.go`, read whether the provider's overlay is already
+connected **immediately before** calling `p2ps.Connect`, and use that to
+classify the outcome. Do not short-circuit the connect.
 
 ```go
-if overlay, found := s.peers.connected(info.ID); found &&
-	s.host.Network().Connectedness(info.ID) == network.Connected {
-	address = &bzz.Address{Overlay: overlay, Underlays: []ma.Multiaddr{addr}}
-	return address, p2p.ErrAlreadyConnected
-}
+Connect: func(ctx context.Context, addr *bzz.Address) (bool, error) {
+	// Whether this connect opened a connection cannot be read from
+	// p2p.Connect's result: ErrAlreadyConnected is decided per remote
+	// address, so a peer connected on another underlay returns a plain
+	// success. Classify from the peer set instead, and let the connect
+	// run exactly as it did before.
+	wasConnected := connectedOverlay(p2ps, addr.Overlay)
+
+	got, err := p2ps.Connect(ctx, addr.Underlays)
+	if errors.Is(err, p2p.ErrAlreadyConnected) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !got.Overlay.Equal(addr.Overlay) {
+		_ = p2ps.Disconnect(got.Overlay, "provider overlay mismatch")
+		return false, errProviderOverlay
+	}
+	if err := kad.Connected(ctx, p2p.Peer{Address: got.Overlay, FullNode: true}, false); err != nil {
+		_ = p2ps.Disconnect(got.Overlay, "provider not accepted by topology")
+		return false, fmt.Errorf("topology: %w", err)
+	}
+	return wasConnected, nil
+},
 ```
 
-`connected` is a new method on `peerRegistry` returning the overlay when
-`r.overlays[peerID]` is present and `r.connections[peerID]` is non-empty. It
-replaces `isConnected`, which has no other caller.
+`connectedOverlay` scans `p2ps.Peers()`, which is already on the `p2p.Service`
+interface (`pkg/p2p/p2p.go:67`), so no interface gains a method. It is linear in
+the peer count, a few hundred at most, and runs once per provider connect, which
+is bounded by `lookupCandidates` at 16 (`pkg/providers/providers.go:35`).
 
-The second condition is not redundant. The registry is updated by notification
-and can briefly hold a peer whose transport connection has already gone. Without
-the cross-check, a stale entry would suppress a legitimate re-dial, which is a
-worse failure than the one being fixed because it is silent and persists.
-Asking go-libp2p directly makes the suppression impossible: if the transport is
-gone, the dial proceeds as it does today.
+**What this changes:** the value of one boolean that feeds two counters.
+`p2ps.Connect` is called with the same arguments, in the same place, and every
+error path, the overlay guard and the `kad.Connected` call are untouched. The
+`ErrAlreadyConnected` branch stays, because when it does fire it is correct and
+returning early there is today's behavior.
 
-The returned `Underlays` is the address that was asked for. That is the same
-shape the code returns today, and worth stating plainly because the meaning
-changes: it is now the underlay the caller requested, not necessarily the one
-carrying the connection. No current caller reads it.
+**The race, stated rather than hidden.** Kademlia can connect the peer between
+the `Peers()` read and the moment `Connect` decides, and then a connection this
+node did not open is counted as a dial. The window is the few microseconds
+between two adjacent statements rather than the 0.2 second sampling interval an
+external before-and-after comparison would have, which is what the #369
+measurement tried. It is not zero, and the counter is a diagnostic rather than
+an accounting record, so a rare miscount is acceptable where a systematic one is
+not. No design here removes it without changing `pkg/p2p`.
 
-### What this changes for callers
+### Why not change `pkg/p2p`, which is where the defect is
 
-Three callers test for the error. Two are in kademlia and one is this fork's
-provider adapter.
+An earlier draft replaced the address-keyed check in `Connect` with a peer-keyed
+one. Review found three behavior changes rather than the one it claimed, and
+they are the reason that change is not made here:
 
-- `pkg/topology/kademlia/kademlia.go:953`, the bootnode path. Logs and returns.
-  No behavior change beyond the log line being reached more often.
-- `pkg/topology/kademlia/kademlia.go:1099`, the general connect path. On
-  `ErrAlreadyConnected` it checks the overlay matches and returns `nil`, and
-  that return is **before** `k.detector.Record()` and `k.Announce(ctx, peer,
-  true)` at the end of the function. So a kademlia dial to a peer already
-  connected on another underlay will, after this change, stop re-announcing that
-  peer and stop recording a reachability sample.
+1. **Kademlia stops announcing a peer it re-dials.** `kademlia.go:1099` returns
+   on `ErrAlreadyConnected` **before** `k.detector.Record()` (`:1149`) and
+   `k.Announce(ctx, peer, true)` (`:1151`). This one is near-unreachable in
+   practice, since `connectBalanced` and `connectNeighbours` skip peers already
+   held (`kademlia.go:344`, `:387`), so it needs a race between selection and
+   dial. The first draft gave it the most space of the three, which was the
+   wrong emphasis.
+2. **The provider adapter stops notifying topology.** Today the different
+   underlay case falls through to `kad.Connected` at `pkg/node/providers.go:115`
+   and so reaches `onConnected` (`kademlia.go:1326-1339`), running `Announce`,
+   `connectedPeers.Add`, `waitNext.Remove`, `recalcDepth` and
+   `detector.Record()`. Under the peer-keyed check the early return at `:106`
+   happens first and none of it runs. This is reachable on every provider
+   connect to an already-connected peer, which is the case the change is about.
+3. **`POST /connect/{multiaddr}` changes from 200 to 500.** `pkg/api/peer.go:34`
+   does not test for `ErrAlreadyConnected` and turns any non-nil error into an
+   HTTP 500. Connecting to a peer already connected on a different underlay
+   returns 200 today and would return 500, skipping the topology notification.
+   Nothing in `pkg/api` tests this: `grep -rn "AlreadyConnected" pkg/api/`
+   finds nothing, so the change would ship untested.
 
-  This is the one real behavior change and it is called out rather than
-  discovered later. It is judged acceptable because the peer was announced when
-  it first connected, inbound connections announce through `handleIncoming`, and
-  re-announcing a peer that was already connected is duplicated work rather than
-  a distinct signal. If measurement suggests otherwise the fix is to move
-  `detector.Record()` above the switch, which is a separate change and is not
-  made here.
-- `pkg/node/providers.go:101`, this fork's adapter, which returns
-  `(true, nil)` meaning "connected, no dial needed". This is the caller the
-  counters serve, and it starts being correct. The comment there describing the
-  address-keyed behavior is removed in the same change, since leaving a comment
-  that describes the old behavior is how a stale claim survives a fix.
+Against that, the benefit is removing one redundant handshake per occurrence.
+That may well be worth having, but it is a behavior change to shared connection
+handling that deserves its own issue, its own measurement of how often the path
+is actually taken, and tests for all three consequences. Rule 8's order applies
+by analogy: measure that the redundant handshakes matter, then change them.
 
-### Options considered and rejected
+#382 stays open and keeps `affects-upstream` as the marker for that later
+decision. Per rule 11 the label authorizes nothing further, and rule 1 governs
+contact with ethersphere without exception.
 
-**Return `ErrAlreadyConnected` from the duplicate branch at `libp2p.go:1191`
-instead of `nil`.** Rejected. It corrects the reported outcome but keeps the
-redundant handshake, which is the part that costs something, and it imposes the
-same kademlia change as the chosen design without the benefit.
+### Scope against upstream
 
-**Check connectedness in the caller, `pkg/node/providers.go`, and never touch
-`pkg/p2p`.** The adapter does have what it needs: `addr.Overlay` is in hand, and
-`p2p.Service.Peers()` is exported. Rejected as the primary fix for two reasons.
-It leaves the defect in place for every other caller, including kademlia, where
-it costs a handshake per occurrence. And the check would sit outside the lock
-that `Connect` takes, so a kademlia dial landing between the check and the call
-would still be counted as our dial. That race is narrower than the current
-defect but it is a race, whereas the chosen design has none: the decision is
-made inside `Connect` on the same registry the connection notification updates.
+Checked with `git diff upstream/v2.8.2`, not assumed. Both
+`pkg/p2p/libp2p/libp2p.go` and `pkg/p2p/libp2p/peer.go` **are** modified in this
+fork: `peer.go` adds `count()`, and `libp2p.go` adds the zero-peer breaker
+bypass for [#74](https://github.com/crtahlin/wasp/issues/74) and the extended
+user agent. The issue's claim that "neither is modified in this fork" is wrong
+as written and is corrected there. What is true is narrower: `isConnected`, the
+call site at `libp2p.go:1068`, and the duplicate branch at `libp2p.go:1191` are
+byte-identical to that tag, which is what the label needs.
 
-It is recorded here rather than left out because it is the rollback shape if the
-`pkg/p2p` change has to be reverted.
+`pkg/node/providers.go` is fork-authored and has no upstream counterpart, so the
+change this spec does make has no upstream scope at all.
 
 ## Protocol impact
 
-**None.** Nothing in `.github/protocol-freeze.lock` is touched: no stream name,
-no `protocolName` or `protocolVersion`, no handshake `ProtocolVersion` or field
-number, no chunk geometry, no `NetworkID`. The change decides whether this node
-opens a redundant handshake stream to a peer it is already connected to. It
-sends no new message, removes no message a peer expects, and changes no value a
-peer compares against.
-
-A stock Bee peer cannot observe the difference except as the absence of a second
-handshake it would have answered, which is a request it never required.
-`make protocol-freeze` is expected to pass unchanged, and the
-`protocol-change` label is not applied. Per rule 6 this spec is written after
-reading `docs/agent-playbooks/protocol-compatibility.md`.
+**None, and this draft does not touch `pkg/p2p` at all.** The change is confined
+to `pkg/node/providers.go`, which is fork-authored. Nothing in
+`.github/protocol-freeze.lock` is involved: no stream name, no protocol name or
+version, no handshake field number, no chunk geometry, no `NetworkID`. No
+message is sent, changed or withheld, so no peer can observe the difference.
+`make protocol-freeze` passes unchanged and the `protocol-change` label is not
+applied. `docs/agent-playbooks/protocol-compatibility.md` was read before the
+earlier draft, when the change was in `pkg/p2p`.
 
 ## Measurement
 
-The claim to be shown is narrow: **a connect to a peer already connected on a
-different underlay reports already-connected and opens no handshake stream.**
-It is a correctness and observability fix, so the arms are pass or fail rather
-than a before-and-after number.
+**This change cannot be settled on the bench, and no bench time is requested.**
+That is a conclusion from the evidence above rather than a convenience: the
+counters are node-wide and unlabelled, the provider connect runs in a background
+goroutine that outlives the request (`providers.go:340`, `:413`), the two nodes
+reconnect to each other faster than a request ends, and the dial completes
+inside the request in most runs. Four bench arms in the first draft of this spec
+were defeated by those four facts between them. The acceptance weight sits on
+unit tests, which is appropriate for a change whose whole claim is that one
+boolean takes the right value.
 
-**Arm 1, unit, deterministic.** Test hosts listen on `":0"`, so a test service
-has more than one underlay in `Addresses()`. Connect from A to B on the first
-underlay, then connect again on a second, distinct one. Passes when the second
-call returns `p2p.ErrAlreadyConnected` with the expected overlay. On unfixed
-code this returns a nil error, which is the mutation that must fail.
+Every arm below states the mutation it catches, and a mutation with no arm is
+listed as such rather than left out. That is the standing lesson from #299,
+where the counter's headline property had no test and the mutation table omitted
+exactly the two mutations that mattered.
 
-If a machine reports only one underlay the test would have nothing to drive, so
-it skips with a stated reason rather than passing empty. Because a skip that
-fires everywhere is a test that never runs, the implementation must confirm on
-each CI platform that it did not skip, and if it skips anywhere the fallback is
-to dial the same endpoint by a second multiaddr spelling, `/dns4/localhost/...`
-against `/ip4/127.0.0.1/...`, after confirming `filterSupportedAddresses` keeps
-`dns4`.
+**Arm 1, the defect reproduced.** In `pkg/p2p/libp2p/connections_test.go`,
+connect from A to B on one of B's underlays, then connect again on a **second,
+distinct** underlay. Assert the second call returns a **nil** error, with
+`expectPeers` showing a single peer.
 
-**Arm 2, unit.** Same setup, but close the connection from B's side and wait for
-A's registry to see the disconnect before the second connect. Passes when the
-second connect dials and succeeds. This is the sensitivity control for arm 1: it
-fails if the new check reports already-connected whenever it has ever seen the
-peer, which is the failure mode the `Connectedness` cross-check exists to
-prevent.
+This arm asserts current behavior, which is unusual and deliberate: it is the
+reproduction rule 11 asks for, it is what makes the `affects-upstream` claim
+something other than reading, and it pins the behavior so that a later
+`pkg/p2p` change has to update it and cannot land silently. The comment on the
+test says exactly that.
 
-**Arm 3, bench, three runs.** Re-run #369 arm 2: a requester downloads with a
-provider hint for a provider that kademlia already holds. Records the change in
-`bee_providers_connects_dialed` and
-`bee_providers_connects_already_connected` across the download.
+Two existing tests are the near neighbours and neither covers this:
+`TestDoubleConnect` (`connections_test.go:319`, asserting at `:338`) passes the
+full underlay slice twice, and `TestDoubleConnectOnAllAddresses` (`:458`,
+asserting at `:484`) builds a fresh dialer per address and reconnects on the
+**same** address. Both assert `ErrAlreadyConnected` and both are unaffected by
+this change.
 
-Passes when, on all three runs, `already_connected` rises by exactly 1 and
-`dialed` does not rise. The same measurement on the current build produced
-`dialed` 1 and `already_connected` 0.
+The number of underlays a test service has is a property of the host's network
+interfaces, not of the `":0"` listen address (`libp2p_test.go:58`), so the arm
+reads `s.Addresses()` and skips with a stated reason when it holds fewer than
+two. A skip that fires everywhere is a test that never runs, so the
+implementation reports which CI platforms skipped, and if all of them do, the
+fallback is a second multiaddr spelling of the same endpoint, `/dns4/localhost`
+against `/ip4/127.0.0.1`, which survives `filterSupportedAddresses` because
+`bzz.ClassifyTransport` (`pkg/bzz/transport.go:72-80`) keys on `/tcp` alone.
 
-**Arm 4, bench, three runs, sensitivity control for arm 3.** The same download
-against a provider the requester is **not** connected to, confirmed by reading
-`/peers` immediately before the request. Passes when `dialed` rises by 1 and
-`already_connected` does not. Without this arm, a fix that made
-`already_connected` rise unconditionally would pass arm 3.
+*Mutation:* none, this arm pins existing behavior.
 
-**What a negative result looks like.** Arm 3 showing `dialed` still rising means
-either the provider genuinely was not connected at that instant, which arm 4's
-`/peers` read is there to distinguish, or the connect is reaching a path this
-change does not cover. Either is reported as a negative result for the arm, not
-explained away. A single failing run in arms 3 or 4 is a reject for that arm.
+**Arm 2, the counter is right when the peer was already connected.** With a
+fake `p2p.Service` whose `Peers()` reports the provider's overlay and whose
+`Connect` returns success with a nil error, the adapter's `Connect` returns
+`true`.
 
-`make test-race` on `pkg/p2p/...` and `pkg/topology/...` is part of the same
-pass, since the change reads a registry that a notification goroutine writes.
+*Mutation:* return `false` unconditionally, or classify from `err` alone as
+today. Both fail this arm. Today's code fails it, which is the point.
+
+**Arm 3, the counter is right when the peer was not connected.** Same fake with
+`Peers()` empty. The adapter returns `false`.
+
+*Mutation:* return `true` unconditionally. This is the sensitivity control for
+arm 2: without it, a change that always reports already-connected passes arm 2.
+
+**Arm 4, the classification is read before the connect, not after.** The fake's
+`Connect` adds the overlay to what `Peers()` subsequently reports. The adapter
+must still return `false`, because the peer was not connected when it was asked.
+
+*Mutation:* move the `Peers()` read to after `p2ps.Connect` returns. Arms 2 and
+3 both pass under that mutation; only this one fails. It is the arm for the
+ordering the whole design rests on.
+
+**Arm 5, the overlay guard still fires.** The fake returns success with an
+overlay different from the record's. The adapter returns `errProviderOverlay`
+and calls `Disconnect`, and does **not** report a connect of either kind.
+
+*Mutation:* return `wasConnected` before the overlay check. This arm exists
+because the first draft's `pkg/p2p` change would have widened exactly this hole
+and no arm in that draft tested it.
+
+**Arm 6, the `ErrAlreadyConnected` branch is unchanged.** The fake returns that
+error; the adapter returns `true` with no error and does not call
+`kad.Connected`.
+
+*Mutation:* delete the branch. Catches a refactor that folds it into the new
+classification and changes the early-return behavior with it.
+
+**Known mutation with no arm.** Replacing `connectedOverlay`'s equality test
+with one that matches any peer would be caught by arm 3 only when the fake
+reports a non-empty peer set of other peers, so arm 3 is written that way,
+with one unrelated peer present. Stated because listing a mutation and not
+covering it is how the #299 table went wrong.
+
+`make test-race` covers `pkg/node` and `pkg/p2p/...` in the same pass.
+
+**What a negative result looks like.** There is no measured quantity here to
+come back negative. The arms pass or fail. What would falsify the premise is
+arm 1 returning `ErrAlreadyConnected` rather than nil, which would mean the
+defect does not exist as described and this change is unnecessary; in that case
+the counters were already right and the issue closes as not a defect.
 
 ## Rollout and rollback
 
-No configuration. This is a defect fix with one behavior, and rule 8 does not
-apply because no tuning constant is involved: there is no value an operator
-could reasonably want set either way.
+No configuration, and rule 8 does not apply because no tuning constant is
+involved. Nothing on disk, no migration, no peer state, no operator action. The
+only visible difference is that two counters that were already published take
+different values in a case where one of them was wrong.
 
-Rollback is `git revert` of the merge commit. It restores the address-keyed
-check exactly, because the change replaces `isConnected` rather than layering
-over it. If only the kademlia consequence needs undoing and the counter fix is
-to be kept, the rejected caller-side option above is the shape to fall back to,
-and it lives entirely in fork code.
-
-Nothing an operator has to do, nothing to migrate, no on-disk layout touched.
+Rollback is `git revert` of the merge commit.
 
 ## Upstream portability
 
-The defect is upstream's. The three hunks are byte-identical at
-`upstream/v2.8.2`, checked with `git diff` rather than assumed, and the patch
-applies to that tree without adaptation because it depends on nothing this fork
-added.
+The change is in fork-authored code with no upstream counterpart, so there is
+nothing for Ethersphere to adopt from it.
 
-What Ethersphere would need is the argument, not the diff: a reason the
-address-keyed check was written that way, and a judgment on whether losing the
-re-announce at `kademlia.go:1099` is acceptable. This spec states both, and
-that is the reusable part.
-
-Per rule 11 the `affects-upstream` label is a marker for a later human decision
-and nothing more. Nothing here authorizes contacting ethersphere, opening
-anything in their tracker, or sending a patch, and rule 1 governs that without
-exception.
+The **defect** is upstream's, and what would be portable is the argument rather
+than a diff: that `isConnected` decides per address while every caller reads the
+result as per peer, and that changing it costs a lost kademlia announce, a lost
+topology notification on any similar caller, and an HTTP status change on
+`POST /connect`. That analysis is in this spec and in #382, which keeps the
+`affects-upstream` label as a marker for a later human decision and nothing
+more.
 
 ## Configuration
 
@@ -285,14 +380,18 @@ None. See "Rollout and rollback".
 
 ## Files
 
-Implementation, on `fix/382-already-connected` after this spec merges:
+Implementation, on `fix/382-provider-connect-counted` after this spec merges:
 
-- `pkg/p2p/libp2p/peer.go`, `isConnected` replaced by `connected`.
-- `pkg/p2p/libp2p/libp2p.go`, the call site at `:1068`.
-- `pkg/node/providers.go`, the stale comment in the `ErrAlreadyConnected`
-  branch.
-- `pkg/p2p/libp2p/libp2p_test.go`, arms 1 and 2.
-- `docs/DIFFERENCES.md`, a row for the behavior change, per rule 13.
+- `pkg/node/providers.go`, the classification and the `connectedOverlay` helper,
+  and the stale comment in the `ErrAlreadyConnected` branch which describes the
+  behavior this change stops relying on.
+- `pkg/node/providers_test.go`, arms 2 to 6 against a fake `p2p.Service`.
+- `pkg/p2p/libp2p/connections_test.go`, arm 1. Not `libp2p_test.go`, which holds
+  only helpers.
+- `docs/experiments/content-providers/discovery-lifetime-results.md`, retracting
+  the causal reading of arm 2 run 1. It is merged on `main` and says the node
+  was already connected to the peer, which the ordering above rules out.
+- `docs/DIFFERENCES.md`, the counter's description, and the header commit line,
+  which still names `f5fd2b51` while `main` is further on.
 
-Bench harness for arms 3 and 4 lives outside the repository under `cp290/`,
-per rule 10.
+No bench harness, because there is no bench arm.
