@@ -628,6 +628,21 @@ change touches two files, not one.
   candidate list is not empty. Without it there is nothing to measure, for the
   reasons under the Hypothesis, so it is part of the change rather than of the
   harness.
+
+The files below are the plan as written. **What shipped differs, and the list
+is corrected here rather than left half true**: the counter tests went to a new
+`pkg/retrieval/candidates_selected_test.go` and the wrapper tests to a new
+`pkg/api/provider_getter_test.go`, both because they carry several shared stubs
+and read better beside each other, while
+`TestHasPreferredPeersDistinguishesAbsentFromNil` did go into
+`preferred_test.go` as planned. Two test-only helpers not in the original list
+were also needed: a counter reader in `pkg/retrieval/export_test.go` and a
+wrapper constructor in `pkg/api/export_test.go`, because `providerGetter` is
+unexported and returns its argument unwrapped when the service has no providers.
+The single counter test planned below also became three, one per property, after
+a review showed that one test driving one attempt in one flight cannot tell the
+three possible placements of the increment apart.
+
 - `pkg/retrieval/preferred_test.go`, `package retrieval_test`:
   - `TestPreferredCandidatesSelectedCountsOncePerFlight`, including a flight
     with an empty candidate list, which must not move it, and two deduplicated

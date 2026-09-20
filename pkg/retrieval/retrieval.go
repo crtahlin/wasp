@@ -210,6 +210,13 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		// normal peer selection, and the timer that starts the next attempt
 		// when a preferred attempt is slow
 		candidates := s.preferredCandidates(preferredPeers, chunkAddr, s.errSkip.ChunkPeers(chunkAddr))
+		// Once per flight whose candidate list is not empty, which is the only
+		// observable that answers #299: every existing counter is either
+		// credit-capped or inflated by the #324 readmit path. Here rather than
+		// in the loop, because a flight is what the question is about.
+		if len(candidates) > 0 {
+			s.metrics.PreferredCandidatesSelected.Inc()
+		}
 		// how many times each preferred peer has been kept after an overdraft,
 		// bounded by maxOverdraftReadmits so a peer that never regains credit
 		// cannot hold the request open (#324)

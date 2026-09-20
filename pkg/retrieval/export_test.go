@@ -6,7 +6,10 @@ package retrieval
 
 import (
 	"context"
+	"testing"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/ethersphere/bee/v2/pkg/p2p"
 	"github.com/ethersphere/bee/v2/pkg/ratelimit"
@@ -47,4 +50,29 @@ func (p *PreferredSet) SetNow(f func() time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.now = f
+}
+
+// PreferredCandidatesSelected reports the counter, so a test can assert it
+// moves once per flight rather than once per attempt. It fails the test rather
+// than returning zero on a read error, because a silent zero would make a
+// "this did not move" assertion vacuous. See issue #299.
+func (s *Service) PreferredCandidatesSelected(tb testing.TB) float64 {
+	tb.Helper()
+	var m dto.Metric
+	if err := s.metrics.PreferredCandidatesSelected.Write(&m); err != nil {
+		tb.Fatalf("reading the counter: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+// PreferredAttemptsForTest reports the preferred-attempt counter, so a test can
+// assert that a flight really made more than one attempt before asserting that
+// the per-flight counter still moved once.
+func (s *Service) PreferredAttemptsForTest(tb testing.TB) float64 {
+	tb.Helper()
+	var m dto.Metric
+	if err := s.metrics.PreferredAttempts.Write(&m); err != nil {
+		tb.Fatalf("reading the counter: %v", err)
+	}
+	return m.GetCounter().GetValue()
 }

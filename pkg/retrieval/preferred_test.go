@@ -580,3 +580,41 @@ func TestPreferredNonOverdraftNotRetried(t *testing.T) {
 		t.Fatalf("a refusal that cannot clear was retried %d times, want 1", n)
 	}
 }
+
+// TestHasPreferredPeersDistinguishesAbsentFromNil pins the Go semantics the
+// helper rests on: a typed nil stored under the key satisfies the type
+// assertion, so PreferredPeers returns nil for both "never attached" and
+// "deliberately switched off" while HasPreferredPeers tells them apart.
+//
+// It is NOT a discriminating test against the naive nil check in production
+// terms, because no reachable path today builds a suppressed context that
+// reaches the wrapper: the one at the Discover call is handed straight to
+// Discover. It records what the helper means, which is why #299 keeps it.
+func TestHasPreferredPeersDistinguishesAbsentFromNil(t *testing.T) {
+	t.Parallel()
+
+	bare := context.Background()
+	if retrieval.PreferredPeers(bare) != nil {
+		t.Fatal("a bare context carried a set")
+	}
+	if retrieval.HasPreferredPeers(bare) {
+		t.Fatal("a bare context reported carrying a set")
+	}
+
+	suppressed := retrieval.WithPreferredPeers(context.Background(), nil)
+	if retrieval.PreferredPeers(suppressed) != nil {
+		t.Fatal("a deliberately nil set did not read as nil")
+	}
+	if !retrieval.HasPreferredPeers(suppressed) {
+		t.Fatal("a deliberately nil set was indistinguishable from none at all")
+	}
+
+	set := retrieval.NewPreferredSet(swarm.RandAddress(t))
+	carrying := retrieval.WithPreferredPeers(context.Background(), set)
+	if retrieval.PreferredPeers(carrying) != set {
+		t.Fatal("a set did not come back")
+	}
+	if !retrieval.HasPreferredPeers(carrying) {
+		t.Fatal("a context carrying a set reported otherwise")
+	}
+}
