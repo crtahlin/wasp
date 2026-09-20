@@ -405,6 +405,7 @@ func buildBeeNode(ctx context.Context, c *command, cmd *cobra.Command, logger lo
 		PaymentEarly:                    c.config.GetInt64(optionNamePaymentEarly),
 		PaymentThreshold:                c.config.GetString(optionNamePaymentThreshold),
 		PaymentTolerance:                c.config.GetInt64(optionNamePaymentTolerance),
+		RefreshAllowanceAccrual:         c.config.GetString(optionNameRefreshAllowanceAccrual),
 		PostageContractAddress:          c.config.GetString(optionNamePostageContractAddress),
 		PostageContractStartBlock:       c.config.GetUint64(optionNamePostageContractStartBlock),
 		PriceOracleAddress:              c.config.GetString(optionNamePriceOracleAddress),

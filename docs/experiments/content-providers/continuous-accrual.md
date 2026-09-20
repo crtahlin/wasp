@@ -289,6 +289,28 @@ applied in **both** arms, and `step` is then a control that reproduces current
 behaviour in every case except that one. The test for it must use a step of at
 least 1,000 ms, or it passes against the old code as well and pins nothing.
 
+> **Correction, added during implementation: the "only past a full second"
+> claim is true of the `step` arm only, and it understates the clamp.**
+>
+> The continuous arm multiplies by the elapsed milliseconds **before** dividing
+> by 1,000, so any negative elapsed value produces a negative allowance
+> directly. Measured with the clamp removed: a backwards step of **1 ms** gives
+> -4,500, 10 ms gives -45,000, and 999 ms gives -4,495,500. The 1,000 ms floor
+> comes from integer division truncating toward zero, which only the step arm
+> relies on.
+>
+> That matters for which failure is reachable rather than only for the test.
+> Small backwards corrections, the ordinary result of an NTP adjustment, are
+> common; full-second steps are not. So the case this paragraph described as
+> harmless is the one the continuous arm is actually exposed to.
+>
+> The test requirement therefore splits: the **step** arm must use at least
+> 1,000 ms or it pins nothing, and the **continuous** arm should use 1 ms,
+> because that is both the tighter assertion and the realistic input. A further
+> consequence found at the same time: in the step arm the zero comes from the
+> sub-second branch rather than from the clamp, so a step-only test can never
+> fail for the clamp's absence at all.
+
 ### Considered and dropped
 
 **Not resetting the timestamp when a refreshment credits less than the allowance

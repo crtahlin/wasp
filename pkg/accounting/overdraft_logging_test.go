@@ -331,7 +331,10 @@ func TestAccountingOverdraftLineCarriesEveryField(t *testing.T) {
 	for _, key := range []string{
 		"peer_address", "price", "expected_debt", "overdraft_limit",
 		"payment_threshold", "refresh_due", "refresh_timestamp_ms",
-		"elapsed_seconds", "settled_balance", "surplus_balance",
+		// wasp #359 renamed elapsed_seconds to elapsed_ms: under continuous
+		// accrual the whole second is zero across the entire window in which
+		// the allowance is granted, so it could no longer explain refresh_due.
+		"elapsed_ms", "settled_balance", "surplus_balance",
 		"surplus_error", "reserved_balance", "shadow_reserved_balance",
 		"settle_called",
 	} {

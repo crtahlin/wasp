@@ -399,6 +399,24 @@
 ## docs/experiments/content-providers/spec.md
 # providers-enable: false
 
+## how the refresh allowance raises a peer's overdraft limit inside the first
+## second after a refreshment: step (default, grants nothing until a full
+## second has elapsed and then a whole refresh rate, which is Bee's behavior)
+## or continuous (accrues per millisecond, capped below what the peer
+## tolerates). Any other value is refused at startup.
+##
+## Raising it to continuous costs this node nothing directly and cannot make it
+## owe more than the ceiling it can already reach, but it costs other nodes a
+## larger unsecured debt outstanding inside the first second of each refresh
+## cycle, up to the tolerance they already permit, and it risks this node being
+## blocklisted where the cap is wrong for a peer. The cap assumes the peer runs
+## the same payment-tolerance-percent as this node, because a peer announces a
+## threshold but not its tolerance. Leaving it at step costs the refusals
+## measured in issue #353, if those refusals turn out to cost delivered bytes.
+##
+## Not yet measured. See docs/experiments/content-providers/continuous-accrual.md
+# refresh-allowance-accrual: step
+
 ## forces the node to resync postage contract data
 # resync: false
 

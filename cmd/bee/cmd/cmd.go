@@ -66,6 +66,7 @@ const (
 	optionNameVerbosity                    = "verbosity"
 	optionNamePaymentThreshold             = "payment-threshold"
 	optionNamePaymentTolerance             = "payment-tolerance-percent"
+	optionNameRefreshAllowanceAccrual      = "refresh-allowance-accrual"
 	optionNamePaymentEarly                 = "payment-early-percent"
 	optionNameResolverEndpoints            = "resolver-options"
 	optionNameBootnodeMode                 = "bootnode-mode"
@@ -388,6 +389,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(optionNameLogSinkBuffer, log.DefaultSinkBuffer, "log lines that may wait to be written before further lines are dropped; 0 writes synchronously, which lets a stalled log reader block the node")
 	cmd.Flags().String(optionNamePaymentThreshold, "13500000", "threshold in BZZ where you expect to get paid from your peers")
 	cmd.Flags().Int64(optionNamePaymentTolerance, 25, "excess debt above payment threshold in percentages where you disconnect from your peer")
+	cmd.Flags().String(optionNameRefreshAllowanceAccrual, "step", "how the refresh allowance raises a peer's overdraft limit inside the first second after a refreshment: step (default, grants nothing until a full second) or continuous (accrues per millisecond, capped below what the peer tolerates)")
 	cmd.Flags().Int64(optionNamePaymentEarly, 50, "percentage below the peers payment threshold when we initiate settlement")
 	cmd.Flags().StringSlice(optionNameResolverEndpoints, []string{}, "ENS compatible API endpoint for a TLD and with contract address, can be repeated, format [tld:][contract-addr@]url")
 	cmd.Flags().Bool(optionNameBootnodeMode, false, "cause the node to always accept incoming connections")

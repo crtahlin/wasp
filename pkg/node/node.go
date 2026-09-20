@@ -185,6 +185,7 @@ type Options struct {
 	PaymentEarly                    int64
 	PaymentThreshold                string
 	PaymentTolerance                int64
+	RefreshAllowanceAccrual         string
 	PostageContractAddress          string
 	PostageContractStartBlock       uint64
 	PriceOracleAddress              string
@@ -1245,6 +1246,12 @@ func NewBee(
 		return nil, fmt.Errorf("accounting: %w", err)
 	}
 	b.accountingCloser = acc
+
+	// wasp #359: how the refresh allowance is granted inside the first second
+	// after a refreshment. Default step, which is current behavior.
+	if err := applyAccrualMode(acc, o.RefreshAllowanceAccrual, logger); err != nil {
+		return nil, err
+	}
 
 	// wasp #327: a larger payment threshold announced to a peer downloading
 	// content this node announced. Off unless both settings are given, and

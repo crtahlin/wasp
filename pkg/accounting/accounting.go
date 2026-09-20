@@ -201,6 +201,10 @@ type Accounting struct {
 	lightDisconnectLimit     *big.Int
 	lightThresholdGrowStep   *big.Int
 	lightThresholdGrowChange *big.Int
+	// how the refresh allowance is granted inside the first second after a
+	// refreshment. Zero value is AccrualStep, which is current behaviour.
+	// See accrual.go and issue #359.
+	accrual AccrualMode
 }
 
 var (
@@ -353,9 +357,12 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 		}
 	}
 
-	timeElapsedInSeconds := min((a.timeNow().UnixMilli()-accountingPeer.refreshTimestampMilliseconds)/1000, 1)
-
-	refreshDue := new(big.Int).Mul(big.NewInt(timeElapsedInSeconds), a.refreshRate)
+	// wasp #359: one clock reading, used for both the allowance and the
+	// elapsed time logged beside it below. Two separate a.timeNow() calls can
+	// straddle the one second boundary that decides which branch ran, so the
+	// logged elapsed time would not always explain the logged allowance.
+	now := a.timeNow()
+	refreshDue := a.refreshDue(accountingPeer, now)
 	overdraftLimit := new(big.Int).Add(accountingPeer.paymentThreshold, refreshDue)
 
 	// if expectedDebt would still exceed the paymentThreshold at this point block this request
@@ -391,7 +398,11 @@ func (a *Accounting) PrepareCredit(ctx context.Context, peer swarm.Address, pric
 				"payment_threshold", accountingPeer.paymentThreshold,
 				"refresh_due", refreshDue,
 				"refresh_timestamp_ms", accountingPeer.refreshTimestampMilliseconds,
-				"elapsed_seconds", timeElapsedInSeconds,
+				// wasp #359: milliseconds rather than the capped whole
+				// seconds this logged before. Under continuous accrual the
+				// second is zero across the entire window the allowance is
+				// granted in, so it could no longer explain refresh_due.
+				"elapsed_ms", elapsedSinceRefresh(accountingPeer, now),
 				"settled_balance", currentBalance,
 				"surplus_balance", surplusBalance,
 				"surplus_error", surplusErr,
@@ -828,11 +839,15 @@ func (a *Accounting) PeerAccounting() (map[string]PeerInfo, error) {
 		refreshDue := new(big.Int).Mul(big.NewInt(timeElapsedInSeconds), refreshRate)
 		currentThresholdGiven := new(big.Int).Add(accountingPeer.disconnectLimit, refreshDue)
 
-		timeElapsedInSeconds = min((t.UnixMilli()-accountingPeer.refreshTimestampMilliseconds)/1000, 1)
-
-		// get appropriate refresh rate
-		refreshDue = new(big.Int).Mul(big.NewInt(timeElapsedInSeconds), a.refreshRate)
-		currentThresholdReceived := new(big.Int).Add(accountingPeer.paymentThreshold, refreshDue)
+		// wasp #359: the same helper the gate uses, so that the reported
+		// CurrentThresholdReceived is the limit actually being enforced. The
+		// given side just above keeps its own computation, on the other
+		// timestamp field and in whole seconds, because this change does not
+		// touch what this node grants its peers.
+		currentThresholdReceived := new(big.Int).Add(
+			accountingPeer.paymentThreshold,
+			a.refreshDue(accountingPeer, t),
+		)
 
 		s[peer] = PeerInfo{
 			Balance:                  new(big.Int).Sub(balance, surplusBalance),
