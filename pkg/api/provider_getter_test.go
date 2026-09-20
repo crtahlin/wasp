@@ -6,6 +6,7 @@ package api_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/ethersphere/bee/v2/pkg/api"
@@ -21,13 +22,28 @@ import (
 // point before retrieval, so that pkg/file/ stays byte-identical to upstream.
 
 // capturingGetter records the context each fetch arrives with.
+//
+// The mutex is not needed by the tests here, which drive one sequential fetch
+// each. It is there because this stands in for the getter the real prefetch
+// calls from one goroutine per outstanding shard, so the first person to extend
+// these tests towards that would otherwise get a data race in the helper rather
+// than a result.
 type capturingGetter struct {
+	mu  sync.Mutex
 	got []context.Context
 }
 
 func (c *capturingGetter) Get(ctx context.Context, _ swarm.Address) (swarm.Chunk, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.got = append(c.got, ctx)
 	return nil, storage.ErrNotFound
+}
+
+func (c *capturingGetter) contexts() []context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]context.Context(nil), c.got...)
 }
 
 func newProviderGetterUnderTest(t *testing.T, set *retrieval.PreferredSet) (storage.Getter, *capturingGetter) {
@@ -51,10 +67,10 @@ func TestProviderGetterRestoresSetOnBackgroundContext(t *testing.T) {
 	// built with
 	_, _ = g.Get(context.Background(), swarm.RandAddress(t))
 
-	if len(rec.got) != 1 {
-		t.Fatalf("the underlying getter saw %d fetches, want 1", len(rec.got))
+	if len(rec.contexts()) != 1 {
+		t.Fatalf("the underlying getter saw %d fetches, want 1", len(rec.contexts()))
 	}
-	if got := retrieval.PreferredPeers(rec.got[0]); got != set {
+	if got := retrieval.PreferredPeers(rec.contexts()[0]); got != set {
 		t.Fatal("a fetch on a background context did not arrive with the preferred set")
 	}
 }
@@ -72,10 +88,10 @@ func TestProviderGetterLeavesExistingSetAlone(t *testing.T) {
 
 	_, _ = g.Get(retrieval.WithPreferredPeers(context.Background(), otherSet), swarm.RandAddress(t))
 
-	if len(rec.got) != 1 {
-		t.Fatalf("the underlying getter saw %d fetches, want 1", len(rec.got))
+	if len(rec.contexts()) != 1 {
+		t.Fatalf("the underlying getter saw %d fetches, want 1", len(rec.contexts()))
 	}
-	if got := retrieval.PreferredPeers(rec.got[0]); got != otherSet {
+	if got := retrieval.PreferredPeers(rec.contexts()[0]); got != otherSet {
 		t.Fatal("a fetch that already carried a set had it replaced")
 	}
 }
@@ -97,10 +113,10 @@ func TestProviderGetterKeepsDeliberateNil(t *testing.T) {
 
 	_, _ = g.Get(retrieval.WithPreferredPeers(context.Background(), nil), swarm.RandAddress(t))
 
-	if len(rec.got) != 1 {
-		t.Fatalf("the underlying getter saw %d fetches, want 1", len(rec.got))
+	if len(rec.contexts()) != 1 {
+		t.Fatalf("the underlying getter saw %d fetches, want 1", len(rec.contexts()))
 	}
-	if got := retrieval.PreferredPeers(rec.got[0]); got != nil {
+	if got := retrieval.PreferredPeers(rec.contexts()[0]); got != nil {
 		t.Fatal("a deliberately suppressed set was replaced by the hint's set")
 	}
 }

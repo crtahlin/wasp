@@ -152,9 +152,14 @@ func NewParseError(entry, value string, cause error) error {
 	return newParseError(entry, value, cause)
 }
 
-// NewProviderGetterForTest builds the hint the way withProviders does and
+// NewProviderGetterForTest builds the hint withProviders would build and
 // returns providerGetter's wrapper, so a test can assert on the context a fetch
 // arrives with. The wrapper is where issue #299's re-attach happens.
+//
+// The outer context is deliberately bare. withProviders also attaches the set
+// to it and calls ConnectHints; neither is reproduced, because providerGetter
+// reads only the hint from that context, and a test that mimicked the rest
+// would be asserting on withProviders rather than on the wrapper.
 //
 // It constructs a bare Service because providerGetter returns the getter
 // unwrapped when s.providers is nil, and newTestServer does not hand back the

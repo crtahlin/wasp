@@ -118,11 +118,15 @@ func (s *Service) providerGetter(ctx context.Context, g storage.Getter) storage.
 			s.providers.Discover(retrieval.WithPreferredPeers(ctx, nil), hint.key, hint.set)
 		}
 		// Re-attach the set for fetches that lost it. On erasure-coded content
-		// most fetches come from the decoder's prefetch, whose context is built
-		// from context.Background() and so carries nothing the request put
-		// there. This is the last point before retrieval and it is fork
-		// authored, which is why pkg/file/ is left byte-identical to upstream.
-		// See issue #299.
+		// the decoder's prefetch builds its context from context.Background(),
+		// so it carries nothing the request put there. Which fetches the
+		// prefetch claims is a race it usually but not always wins, so this is
+		// many fetches rather than provably most: the spec says so and no run
+		// has counted it.
+		//
+		// Nothing between this wrapper and RetrieveChunk drops context values,
+		// which is what makes here the right place, and it is fork authored,
+		// which is why pkg/file/ stays byte-identical to upstream. See #299.
 		if !retrieval.HasPreferredPeers(ctx) {
 			ctx = retrieval.WithPreferredPeers(ctx, hint.set)
 		}

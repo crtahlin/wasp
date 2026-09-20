@@ -64,3 +64,15 @@ func (s *Service) PreferredCandidatesSelected(tb testing.TB) float64 {
 	}
 	return m.GetCounter().GetValue()
 }
+
+// PreferredAttemptsForTest reports the preferred-attempt counter, so a test can
+// assert that a flight really made more than one attempt before asserting that
+// the per-flight counter still moved once.
+func (s *Service) PreferredAttemptsForTest(tb testing.TB) float64 {
+	tb.Helper()
+	var m dto.Metric
+	if err := s.metrics.PreferredAttempts.Write(&m); err != nil {
+		tb.Fatalf("reading the counter: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
