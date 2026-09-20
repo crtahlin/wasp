@@ -499,6 +499,63 @@ func TestDoubleConnectOnAllAddresses(t *testing.T) {
 	}
 }
 
+// TestDoubleConnectOnDifferentAddresses pins CURRENT behaviour, deliberately.
+//
+// p2p.ErrAlreadyConnected is decided by matching the remote address of an open
+// connection rather than by asking whether the peer is connected, so
+// connecting again over a DIFFERENT underlay of a peer we already hold does
+// not take that branch. host.Connect returns without dialling, a second
+// handshake runs over the existing connection, and Connect returns a plain
+// success. A caller cannot tell that from a dial.
+//
+// This test exists so that the behaviour is reproduced rather than only
+// reasoned about, and so that changing it has to change a test rather than
+// happening quietly. Its near neighbours reconnect on the SAME address and
+// assert ErrAlreadyConnected; neither covers this. See issue #382, which
+// records why the address keying is left alone for now and what it would cost
+// to change.
+func TestDoubleConnectOnDifferentAddresses(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	s1, overlay1 := newService(t, 1, libp2pServiceOpts{
+		notifier: mockNotifier(noopCf, noopDf, true),
+		libp2pOpts: libp2p.Options{
+			FullNode: true,
+		},
+	})
+	s2, overlay2 := newService(t, 1, libp2pServiceOpts{notifier: mockNotifier(noopCf, noopDf, true)})
+
+	addrs, err := s1.Addresses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) < 2 {
+		// A host listening on ":0" usually has several underlays, but that is
+		// a property of the machine's interfaces and not of the listen
+		// address, so it cannot be assumed.
+		t.Skipf("need two underlays to connect over, host has %d", len(addrs))
+	}
+
+	if _, err := s2.Connect(ctx, []ma.Multiaddr{addrs[0]}); err != nil {
+		t.Fatal(err)
+	}
+
+	expectPeers(t, s2, overlay1)
+	expectPeersEventually(t, s1, overlay2)
+
+	// The defect: a second underlay of a peer we are already connected to.
+	if _, err := s2.Connect(ctx, []ma.Multiaddr{addrs[1]}); err != nil {
+		t.Fatalf("want a plain success on a second underlay, got %v", err)
+	}
+
+	// Still one peer: the second connect added no connection, it only ran the
+	// handshake again.
+	expectPeers(t, s2, overlay1)
+	expectPeers(t, s1, overlay2)
+}
+
 func TestDifferentNetworkIDs(t *testing.T) {
 	t.Parallel()
 
