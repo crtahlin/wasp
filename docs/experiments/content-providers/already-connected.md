@@ -42,9 +42,10 @@ function returns false and `Connect` falls through to the dial path.
 What follows is not a second transport connection. `s.host.Connect` returns
 `nil` without dialing when the peer is already connected, checked in the pinned
 dependency rather than recalled: `go-libp2p v0.48.0`,
-`p2p/host/basic/basic_host.go:538-546`, where addresses are absorbed into the
-peerstore and the early return is guarded only by `forceDirect`, which Bee never
-sets (`grep -rn ForceDirectDial pkg cmd` finds nothing). What does happen is a
+`p2p/host/basic/basic_host.go:538-547`, where addresses are absorbed into the
+peerstore and the early return is taken when the connectedness is already
+`Connected`, unless `forceDirect` is set, which Bee never does (`grep -rn
+ForceDirectDial pkg cmd` finds nothing). What does happen is a
 **new handshake stream** on the existing connection (`libp2p.go:1131`), a
 `peerMultiaddrs` exchange, and a full `handshakeService.Handshake` round trip
 (`:1156`). Only then does `addIfNotExists` (`peer.go:141`) notice the overlay is
@@ -52,8 +53,10 @@ already registered and return `exists == true`, and the branch handling that,
 `libp2p.go:1191`, closes the handshake stream and returns `i.BzzAddress, nil`, a
 plain success with no error.
 
-So the provider adapter at `pkg/node/providers.go:100-106` sees a nil error, and
-reports a dial.
+So the provider adapter never reaches its `ErrAlreadyConnected` branch
+(`pkg/node/providers.go:101-108`). It sees a nil error, falls through the
+overlay guard and the `kad.Connected` call, and returns `false, nil` at `:120`,
+which `countConnect` records as a dial.
 
 ### Why the addresses differ in the first place
 
@@ -88,27 +91,61 @@ and the conclusion drawn was that the peer was already connected when the
 provider service's `Connect` ran, so a connect over an open connection was
 counted as a dial.
 
-That does not follow, and the ordering in the code is what rules it out:
+That does not follow. The ordering in the code makes the same observation the
+**expected signature of a completely correct provider dial**:
 
 1. `/peers` is `s.p2p.Peers()` (`pkg/api/peer.go:100-103`), which reads the
    libp2p peer registry.
 2. The registry entry for a new peer is created by `addIfNotExists`
-   (`peer.go:141-162`, writing `r.overlays[peerID]`), called from
-   `libp2p.go:1191`, **inside** `Connect` and a few lines before it returns.
+   (`peer.go:141-162`, writing `r.overlays[peerID]`), reached on the outbound
+   path from `libp2p.go:1191`, **inside** `Connect` and before it returns.
 3. `ConnectsDialed.Inc()` runs in `countConnect`
    (`pkg/providers/providers.go:387-392`), called at `:376`, **after**
-   `s.opts.Connect` has returned, and for the provider adapter later still,
-   because `pkg/node/providers.go:115` calls `kad.Connected` first.
+   `s.opts.Connect` has returned, and later still here because
+   `pkg/node/providers.go:116` calls `kad.Connected` first.
 
-So "the peer appears, then `connects_dialed` rises one sample later" is the
-**expected signature of the provider service's own successful dial**. The two
-events are microseconds apart in the code and merely straddled a 0.2 second
-sampling boundary. The run is ambiguous between the defect and entirely correct
-behavior, and cannot distinguish them with those two observables.
+**The gap between those two points is several network round trips, not a
+moment.** An earlier version of this correction said "microseconds apart", which
+is wrong by orders of magnitude and is worth stating properly, because the size
+of the gap is exactly what makes the correct-dial explanation sufficient. In
+between lie `handshakeStream.FullClose` (`libp2p.go:1201`, which waits on the
+remote), a `putHandshakeAddress` statestore write (`:1210`), the whole
+`ConnectOut` notifier loop (`:1218-1226`) whose handlers include `pricing.init`
+(`pkg/pricing/pricing.go:115-126`) sending a payment threshold over a stream,
+and `pseudosettle.init` and `swapprotocol.init`; then, in the adapter,
+`kad.Connected` reaching `onConnected` and `Announce`, which blocks on
+`BroadcastPeers` (`kademlia.go:1221`). A 0.2 second separation between the two
+samples is entirely ordinary for that path.
 
-The same table records the provider's overlay as **absent** from `/peers` at the
-response instant for that run, which is the opposite of already connected. That
-should have been noticed at the time.
+**The ordering does not rule the defect out either, and saying it did was the
+same overreach in the opposite direction.** `addIfNotExists` has more than one
+caller: `libp2p.go:661`, in the inbound handshake stream handler, runs on a
+libp2p goroutine with no `Connect` on the stack, and `Connect` itself is called
+by kademlia's dial path and by `POST /connect` (`pkg/api/peer.go:34`). Under any
+of those the overlay can appear in `/peers` with no relation to the provider
+service, and a later provider connect on a different underlay would then fall
+through and count a dial, which is the defect signature.
+
+So the correct conclusion is neither that the defect was observed nor that it
+was excluded: **the run is ambiguous, and those two observables cannot separate
+the cases.** The same table also records the provider's overlay as **absent**
+from `/peers` at the response instant for that run, which is the opposite of
+already connected, and that should have been noticed at the time.
+
+### The consequence for #369's own acceptance criterion
+
+This is larger than one paragraph being wrong, and it reaches a **merged** spec.
+[discovery-lifetime.md](discovery-lifetime.md) requires, for arm 2, that "the
+overlay's **first appearance in `/peers` is at or after the second in which
+`ConnectsDialed` rose**", justified by "if the overlay appears first, kademlia
+got there and discovery only observed it."
+
+Point 2 above says a genuine discovery dial writes the overlay **before** the
+counter rises, always, because one happens inside the call the other measures.
+So that criterion is satisfied only when the two land in the same sampling
+bucket, and fails whenever they do not. It is **systematically unsatisfiable by
+the behavior it exists to confirm**, and it was the reason run 1 was read as a
+failure at all. It is withdrawn in that document by this change.
 
 **What the defect actually rests on** is reading `isConnected`, which is
 deterministic and not in doubt, plus the unit reproduction below. Rule 11 asks
@@ -120,17 +157,32 @@ promised.
 
 The stated reason for the `pkg/p2p` change was that
 [#369](https://github.com/crtahlin/wasp/issues/369) arms 2 and 6 cannot be
-settled while this holds. That is not right either.
-`discovery-lifetime-results.md` records arm 2's three runs, and in runs 2 and 3
-the dial completed **inside the request**, before the response ended. Those runs
-are inconclusive for a reason this defect has nothing to do with, and a correct
-fix would still show `connects_dialed` rising in them, because at the instant
-`Connect` ran the peer genuinely was not connected.
+settled while this holds. That is not right either, but the reason has to be
+stated carefully, because a first version of this section got it wrong in a way
+worth naming.
 
-Fixing the address keying is therefore **necessary but not sufficient** for
-those arms. What they also need is a pair of nodes that do not reconnect to each
-other on their own, which the results document already says and which this bench
-cannot provide.
+That version said runs 2 and 3 of arm 2 are inconclusive because the dial
+completed inside the request, "and a correct fix would still show
+`connects_dialed` rising in them, because at the instant `Connect` ran the peer
+genuinely was not connected". **That is an unsupported causal claim of exactly
+the kind being retracted two sections above, from a less resolved observation.**
+For runs 2 and 3 the table records the peer present at the response, first seen
+at 0.2 s, and the dial counter already risen at the response. Both events fall
+in the first bucket, and the results document itself says that when events land
+in the same bucket nothing can be ordered. Whether the peer was connected when
+`Connect` ran is precisely what those runs cannot say.
+
+The correct statement rests on reading the code rather than on those runs.
+`Discover`'s connect runs in a goroutine bounded by `discoverBound()` and not by
+the request (`providers.go:340`, `:413`), so it can and does complete before the
+response ends; when it does, the counters have already moved by the time any
+instant-of-response reading is taken, and no amount of later sampling recovers
+the order. That is independent of how already-connected is decided.
+
+So fixing the address keying is **necessary but not sufficient** for those arms.
+What they also need is a pair of nodes that do not reconnect to each other on
+their own, which the results document already says and which this bench cannot
+provide. Runs 2 and 3 are **unresolved**, not evidence for either side.
 
 ## Hypothesis
 
@@ -178,6 +230,47 @@ interface (`pkg/p2p/p2p.go:67`), so no interface gains a method. It is linear in
 the peer count, a few hundred at most, and runs once per provider connect, which
 is bounded by `lookupCandidates` at 16 (`pkg/providers/providers.go:35`).
 
+### Making it testable, which the code is not today
+
+Five of the six arms below are unwritable against the code as it stands, and
+that has to be part of the design rather than discovered during implementation.
+`newProvidersService` (`pkg/node/providers.go:37-52`) takes `p2ps
+*libp2p.Service` and `kad *kademlia.Kad`, both concrete structs with unexported
+state, so no fake can be supplied. The closure is then stored in
+`providers.Options` behind `Service.opts`, which is unexported, so a test cannot
+reach it even if the service could be built. Every existing `pkg/node` test
+covers a pure helper; nothing wired is tested in that package today.
+
+So the closure body moves into a named unexported function:
+
+```go
+// providerConnect performs one provider connect and reports whether this node
+// was already connected to that peer before the connect ran.
+func providerConnect(
+	ctx context.Context,
+	p2ps p2p.Service,
+	notifier p2p.PickyNotifier,
+	kadConnected func(context.Context, p2p.Peer, bool) error,
+	addr *bzz.Address,
+) (bool, error)
+```
+
+taking the two dependencies as the narrowest shapes that work rather than as
+concrete types, with the closure reduced to a call into it. `*libp2p.Service`
+already satisfies `p2p.Service` (`pkg/p2p/libp2p/libp2p.go:1323` provides
+`Peers()`), and the single call site at `pkg/node/node.go:1596` passes the same
+values, so the change compiles unchanged there. The function is exported for
+tests through `pkg/node/export_test.go`, which already exists and already
+exports four helpers this way.
+
+The fakes needed exist: `pkg/p2p/mock` has `WithConnectFunc` (`:41`),
+`WithPeersFunc` (`:55`), `Peers()` (`:137`) and `Disconnect` (`:118`), and
+`pkg/topology/mock` has a `Connected` (`:104`) with the right signature.
+
+This refactor is the precondition for arms 2 to 6 and is listed in Files below.
+Without it the arms are aspirational, which is the shape of failure this
+repository keeps producing.
+
 **What this changes:** the value of one boolean that feeds two counters.
 `p2ps.Connect` is called with the same arguments, in the same place, and every
 error path, the overlay guard and the `kad.Connected` call are untouched. The
@@ -203,14 +296,14 @@ they are the reason that change is not made here:
    on `ErrAlreadyConnected` **before** `k.detector.Record()` (`:1149`) and
    `k.Announce(ctx, peer, true)` (`:1151`). This one is near-unreachable in
    practice, since `connectBalanced` and `connectNeighbours` skip peers already
-   held (`kademlia.go:344`, `:387`), so it needs a race between selection and
+   held (`kademlia.go:343`, `:387`), so it needs a race between selection and
    dial. The first draft gave it the most space of the three, which was the
    wrong emphasis.
 2. **The provider adapter stops notifying topology.** Today the different
-   underlay case falls through to `kad.Connected` at `pkg/node/providers.go:115`
+   underlay case falls through to `kad.Connected` at `pkg/node/providers.go:116`
    and so reaches `onConnected` (`kademlia.go:1326-1339`), running `Announce`,
    `connectedPeers.Add`, `waitNext.Remove`, `recalcDepth` and
-   `detector.Record()`. Under the peer-keyed check the early return at `:106`
+   `detector.Record()`. Under the peer-keyed check the early return at `:107`
    happens first and none of it runs. This is reachable on every provider
    connect to an already-connected peer, which is the case the change is about.
 3. **`POST /connect/{multiaddr}` changes from 200 to 500.** `pkg/api/peer.go:34`
@@ -297,23 +390,54 @@ two. A skip that fires everywhere is a test that never runs, so the
 implementation reports which CI platforms skipped, and if all of them do, the
 fallback is a second multiaddr spelling of the same endpoint, `/dns4/localhost`
 against `/ip4/127.0.0.1`, which survives `filterSupportedAddresses` because
-`bzz.ClassifyTransport` (`pkg/bzz/transport.go:72-80`) keys on `/tcp` alone.
+`bzz.ClassifyTransport` (`pkg/bzz/transport.go:70-81`) tests websocket and TLS
+first and then falls to TCP, which a `dns4` address carrying `/tcp` reaches.
+
+That fallback is a **weaker** reproduction and is not equivalent to the arm
+proper: it differs only in how the same endpoint is spelled, so it exercises the
+address equality compare in `isConnected` without the peer genuinely being
+reachable on two underlays. It is a fallback for a platform that cannot run the
+real thing, not a substitute for it.
 
 *Mutation:* none, this arm pins existing behavior.
 
-**Arm 2, the counter is right when the peer was already connected.** With a
-fake `p2p.Service` whose `Peers()` reports the provider's overlay and whose
-`Connect` returns success with a nil error, the adapter's `Connect` returns
-`true`.
+**Arm 2, already connected: the counter is right AND nothing is skipped.** With
+a fake `p2p.Service` whose `Peers()` reports the provider's overlay and whose
+`Connect` returns success with a nil error, `providerConnect` returns `true`,
+**and the fake's `Connect` was invoked, and the `kadConnected` function was
+invoked.** All three assertions are required.
 
-*Mutation:* return `false` unconditionally, or classify from `err` alone as
-today. Both fail this arm. Today's code fails it, which is the point.
+The last two are not padding, and leaving them out is the defect a review found
+in the first version of this arm. Without them the following passes every arm
+here:
 
-**Arm 3, the counter is right when the peer was not connected.** Same fake with
-`Peers()` empty. The adapter returns `false`.
+```go
+if connectedOverlay(p2ps, addr.Overlay) {
+	return true, nil
+}
+```
 
-*Mutation:* return `true` unconditionally. This is the sensitivity control for
-arm 2: without it, a change that always reports already-connected passes arm 2.
+That returns the right boolean and skips both `p2ps.Connect` and
+`kad.Connected`, which is consequence 2 in the section above, the one this whole
+design exists to avoid, and it contradicts "Do not short-circuit the connect" in
+the Design section. An arm that cannot reject the single implementation the
+design most wants to exclude is not an arm.
+
+*Mutations caught:* return `false` unconditionally; classify from `err` alone as
+today; short-circuit before `p2ps.Connect`; short-circuit before
+`kad.Connected`. Today's code fails this arm on the second, which is the point.
+
+**Arm 3, not connected: the counter is right.** Same fake, with `Peers()`
+reporting **one unrelated peer** rather than an empty set, and the provider's
+overlay absent. `providerConnect` returns `false`.
+
+The peer set is non-empty deliberately. With an empty set, an implementation
+whose overlay comparison matches any peer at all would still return `false`
+here and the mutation would go uncaught.
+
+*Mutations caught:* return `true` unconditionally, which is the sensitivity
+control for arm 2; and an overlay comparison that matches any peer rather than
+the requested one.
 
 **Arm 4, the classification is read before the connect, not after.** The fake's
 `Connect` adds the overlay to what `Peers()` subsequently reports. The adapter
@@ -324,12 +448,20 @@ must still return `false`, because the peer was not connected when it was asked.
 ordering the whole design rests on.
 
 **Arm 5, the overlay guard still fires.** The fake returns success with an
-overlay different from the record's. The adapter returns `errProviderOverlay`
-and calls `Disconnect`, and does **not** report a connect of either kind.
+overlay different from the record's. `providerConnect` returns
+`errProviderOverlay`, calls the fake's `Disconnect` with the overlay it got, and
+does **not** call `kadConnected`.
 
-*Mutation:* return `wasConnected` before the overlay check. This arm exists
-because the first draft's `pkg/p2p` change would have widened exactly this hole
-and no arm in that draft tested it.
+An earlier version of this arm also required that the adapter "does not report a
+connect of either kind". That assertion cannot be made here: reporting is
+decided by `countConnect` (`pkg/providers/providers.go:387-406`) from the error,
+not by the adapter, so there is nothing in a `pkg/node` test to assert it
+against. It is true by construction and has been removed rather than left as an
+arm that asserts nothing.
+
+*Mutations caught:* return `wasConnected` before the overlay check; drop the
+`Disconnect`. This arm exists because the first draft's `pkg/p2p` change would
+have widened exactly this hole and no arm in that draft tested it.
 
 **Arm 6, the `ErrAlreadyConnected` branch is unchanged.** The fake returns that
 error; the adapter returns `true` with no error and does not call
@@ -338,11 +470,14 @@ error; the adapter returns `true` with no error and does not call
 *Mutation:* delete the branch. Catches a refactor that folds it into the new
 classification and changes the early-return behavior with it.
 
-**Known mutation with no arm.** Replacing `connectedOverlay`'s equality test
-with one that matches any peer would be caught by arm 3 only when the fake
-reports a non-empty peer set of other peers, so arm 3 is written that way,
-with one unrelated peer present. Stated because listing a mutation and not
-covering it is how the #299 table went wrong.
+**Known gap with no arm, stated rather than omitted.** The race in the Design
+section, kademlia connecting the peer between the `Peers()` read and the moment
+`Connect` decides, is not covered by any arm and cannot be: reproducing it needs
+the two statements to interleave with a real dial, and a fake that forces the
+interleaving would be asserting the test's own scheduling rather than the code's
+behavior. It is a known and accepted miscount, argued in the Design section, not
+something the arms establish. Listing a mutation and quietly not covering it is
+how the #299 table went wrong, so it is named here instead.
 
 `make test-race` covers `pkg/node` and `pkg/p2p/...` in the same pass.
 
@@ -382,16 +517,25 @@ None. See "Rollout and rollback".
 
 Implementation, on `fix/382-provider-connect-counted` after this spec merges:
 
-- `pkg/node/providers.go`, the classification and the `connectedOverlay` helper,
-  and the stale comment in the `ErrAlreadyConnected` branch which describes the
-  behavior this change stops relying on.
-- `pkg/node/providers_test.go`, arms 2 to 6 against a fake `p2p.Service`.
+- `pkg/node/providers.go`, the `providerConnect` function extracted from the
+  closure, taking its two dependencies as interfaces, the `connectedOverlay`
+  helper, the classification, and the stale comment in the `ErrAlreadyConnected`
+  branch which describes the behavior this change stops relying on.
+- `pkg/node/export_test.go`, exporting `providerConnect` for tests, alongside
+  the four helpers it already exports.
+- `pkg/node/providers_test.go`, arms 2 to 6, using `pkg/p2p/mock` and
+  `pkg/topology/mock`.
 - `pkg/p2p/libp2p/connections_test.go`, arm 1. Not `libp2p_test.go`, which holds
   only helpers.
 - `docs/experiments/content-providers/discovery-lifetime-results.md`, retracting
-  the causal reading of arm 2 run 1. It is merged on `main` and says the node
-  was already connected to the peer, which the ordering above rules out.
+  the causal reading of arm 2 run 1, and the claim about runs 2 and 3. Merged on
+  `main`.
+- `docs/experiments/content-providers/discovery-lifetime.md`, withdrawing arm
+  2's ordering criterion, which the section above shows a correct discovery dial
+  cannot satisfy. Also merged on `main`, and the larger of the two corrections.
 - `docs/DIFFERENCES.md`, the counter's description, and the header commit line,
-  which still names `f5fd2b51` while `main` is further on.
+  which still names `f5fd2b51` while `origin/main` is further on. `origin/main`
+  rather than `main` per rule 13: the local `main` in this worktree is itself
+  behind, which is the exact trap that rule describes.
 
 No bench harness, because there is no bench arm.
