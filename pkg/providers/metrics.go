@@ -42,16 +42,25 @@ type metrics struct {
 	LookupsCanceled prometheus.Counter
 
 	// ConnectsDialed counts connect procedures that ran to completion,
-	// handshake and topology included. It does NOT prove a dial opened a new
-	// connection: the already-connected short-circuit in libp2p is keyed on
-	// the remote address rather than the peer, so a connection to the same
-	// peer on a different underlay falls through to a connect that succeeds
-	// against the open one. Attributing a connection to discovery needs this
-	// counter ordered against the peer set, which is what the measurement
-	// does.
+	// handshake and topology included, against a provider this node did not
+	// already hold.
+	//
+	// The split from ConnectsAlreadyConnected is decided by the caller
+	// reading its peer set immediately before the connect, not by the error
+	// the connect returns: p2p.ErrAlreadyConnected is keyed on the remote
+	// address rather than the peer, so a provider held on another underlay
+	// comes back as a plain success. See issue #382.
+	//
+	// It is a diagnostic rather than an accounting record. The peer set
+	// reflects peers whose bzz handshake has finished, while the connect
+	// short-circuits as soon as a transport connection exists, so a peer
+	// connecting concurrently can be counted here even though no dial was
+	// needed. That window is the length of a concurrent connection setup,
+	// not an instant.
 	ConnectsDialed prometheus.Counter
-	// ConnectsAlreadyConnected counts connects short-circuited because this
-	// node was already connected to that peer on that address.
+	// ConnectsAlreadyConnected counts connects to a provider this node was
+	// already connected to, on any underlay, and so needed no dial. Carries
+	// the same caveat as ConnectsDialed.
 	ConnectsAlreadyConnected prometheus.Counter
 	// ConnectsFailed counts connects that returned an error other than one
 	// abandoned by shutdown or by the run's own timeout. Those are excluded
@@ -101,13 +110,13 @@ func newMetrics() metrics {
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
 			Name:      "connects_dialed",
-			Help:      "Number of connects to a provider that ran to completion.",
+			Help:      "Number of connects to a provider that ran to completion and were not already connected.",
 		}),
 		ConnectsAlreadyConnected: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
 			Name:      "connects_already_connected",
-			Help:      "Number of connects to a provider short-circuited as already connected.",
+			Help:      "Number of connects to a provider that needed no dial because it was already connected.",
 		}),
 		ConnectsFailed: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,

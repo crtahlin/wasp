@@ -32,6 +32,96 @@ import (
 // is not the provider the record names.
 var errProviderOverlay = errors.New("provider overlay mismatch")
 
+// peerConnector is the part of p2p.Service a provider connect uses. It is an
+// interface so the connect can be tested; the concrete libp2p service
+// satisfies it.
+type peerConnector interface {
+	Connect(ctx context.Context, addrs []ma.Multiaddr) (*bzz.Address, error)
+	Disconnect(overlay swarm.Address, reason string) error
+	Peers() []p2p.Peer
+}
+
+// connectedOverlay reports whether the node currently holds a connection to
+// overlay.
+//
+// Peers() allocates and sorts, which peer.go calls too heavy for the dial hot
+// path, and p2p.Service exposes no per-overlay lookup to use instead. This is
+// not that path: it runs once per provider connect, bounded by
+// providers.lookupCandidates.
+func connectedOverlay(p peerConnector, overlay swarm.Address) bool {
+	for _, peer := range p.Peers() {
+		if peer.Address.Equal(overlay) {
+			return true
+		}
+	}
+	return false
+}
+
+// providerConnect connects to one provider and reports whether the node was
+// already connected to it before the connect ran.
+//
+// The answer cannot be taken from p2ps.Connect's result. It returns
+// p2p.ErrAlreadyConnected only when an open connection's remote address
+// matches the one being dialled, so a peer connected on a different underlay
+// comes back as a plain success and is indistinguishable from a peer that was
+// dialled. A provider record's addresses are liable to differ by construction,
+// since Options.Address filters this node's underlays to public ones while
+// kademlia may hold a private one. See issue #382, which also records why the
+// address keying itself is left alone.
+//
+// So the peer set is read here, immediately before the connect, and the
+// connect itself is left exactly as it was: every error path, the overlay
+// guard and the topology notification all still run, in the same order.
+//
+// This over-reports dials, and by more than the gap between two statements.
+// Peers() lists peers whose bzz handshake has finished, because that is when
+// addIfNotExists writes the registry, while the connect short-circuits as soon
+// as a transport connection exists, which is earlier. A peer whose connection
+// is up but whose handshake is still running therefore reads as absent here
+// and needs no dial there, and is counted as a dial. The window is the length
+// of that concurrent setup, and it is likeliest exactly when both nodes learn
+// of each other at once, which is the discovery case. Closing it means
+// changing the address keying in pkg/p2p, which costs more than the counter is
+// worth; issue #382 records what.
+//
+// These counters are a diagnostic rather than an accounting record, and that
+// caveat belongs with them rather than only here: see ConnectsDialed.
+func providerConnect(
+	ctx context.Context,
+	p2ps peerConnector,
+	kadConnected func(context.Context, p2p.Peer, bool) error,
+	addr *bzz.Address,
+) (alreadyConnected bool, err error) {
+	wasConnected := connectedOverlay(p2ps, addr.Overlay)
+
+	got, err := p2ps.Connect(ctx, addr.Underlays)
+	if errors.Is(err, p2p.ErrAlreadyConnected) {
+		// A success that needed no dial, reported by p2p itself. Returning
+		// early here is the behaviour that shipped and is kept unchanged.
+		//
+		// Note it does not check the overlay, unlike the path below: the
+		// address this branch returns carries whatever overlay we have
+		// registered for that peer id, which need not be the one the record
+		// names. Kademlia does guard that on the same error
+		// (kademlia.go:1099). Preserved rather than fixed here because it is
+		// pre-existing and reaches only the counter, since Discover adds the
+		// record's overlay to the set before connecting either way.
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !got.Overlay.Equal(addr.Overlay) {
+		_ = p2ps.Disconnect(got.Overlay, "provider overlay mismatch")
+		return false, errProviderOverlay
+	}
+	if err := kadConnected(ctx, p2p.Peer{Address: got.Overlay, FullNode: true}, false); err != nil {
+		_ = p2ps.Disconnect(got.Overlay, "provider not accepted by topology")
+		return false, fmt.Errorf("topology: %w", err)
+	}
+	return wasConnected, nil
+}
+
 // newProvidersService builds the content-providers service from the node's
 // parts. See docs/experiments/content-providers/spec.md.
 func newProvidersService(
@@ -97,27 +187,7 @@ func newProvidersService(
 		// dial a provider without forcing past a full bin, and keep the
 		// connection only if the topology accepts the peer
 		Connect: func(ctx context.Context, addr *bzz.Address) (bool, error) {
-			got, err := p2ps.Connect(ctx, addr.Underlays)
-			if errors.Is(err, p2p.ErrAlreadyConnected) {
-				// A success that needed no dial. Reported separately because
-				// only this branch can tell the two apart and the measurement
-				// for issue #369 has to. Note the branch is keyed on the
-				// remote address rather than the peer, so a peer connected on
-				// another underlay falls through to the dial below.
-				return true, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			if !got.Overlay.Equal(addr.Overlay) {
-				_ = p2ps.Disconnect(got.Overlay, "provider overlay mismatch")
-				return false, errProviderOverlay
-			}
-			if err := kad.Connected(ctx, p2p.Peer{Address: got.Overlay, FullNode: true}, false); err != nil {
-				_ = p2ps.Disconnect(got.Overlay, "provider not accepted by topology")
-				return false, fmt.Errorf("topology: %w", err)
-			}
-			return false, nil
+			return providerConnect(ctx, p2ps, kad.Connected, addr)
 		},
 		// the dial is checked against the overlay in Connect, so an address
 		// the handshake has not verified yet is good enough to try

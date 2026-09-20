@@ -83,6 +83,8 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#337](https://github.com/crtahlin/wasp/issues/337) | file: hashtrie.Sum formats the dispersed-replica failure with %s against err.Error() rather than %w, so errors.Is cannot see the cause | open | - | - |
 | [#359](https://github.com/crtahlin/wasp/issues/359) | accounting: the refresh allowance is granted as a step, and nearly all refusals fall in the discarded window | open | - | - |
 | [#366](https://github.com/crtahlin/wasp/issues/366) | api: a malformed Swarm-Index-Document header returns 500 instead of 400 | open | - | - |
+| [#382](https://github.com/crtahlin/wasp/issues/382) | p2p: already-connected is decided per address, so a connect over an open connection runs a second handshake and reports as a dial | open | - | - |
+| [#387](https://github.com/crtahlin/wasp/issues/387) | postage: TestCrashRecovery assumes two random addresses land in different buckets, so it fails about 1 run in 256 | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
