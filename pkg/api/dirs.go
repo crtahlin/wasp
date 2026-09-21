@@ -102,6 +102,22 @@ func (s *Service) dirUploadHandler(
 			jsonhttp.BadRequest(w, errInvalidIndexDocument)
 		case errors.Is(err, tar.ErrHeader):
 			jsonhttp.BadRequest(w, "invalid filename in tar archive")
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			// A body that stops part way through, which includes anything
+			// shorter than one 512-byte tar header block. archive/tar reports
+			// this differently from a bad header, and both are the caller's
+			// fault, so both answer 400. POST /wasp/ingest already answered
+			// this way through the same storeDir (#409).
+			//
+			// This matches wider than the reader. storeDir also wraps the
+			// pipeline as "store dir file", so a node-side failure whose
+			// chain carried io.ErrUnexpectedEOF would be reported here as a
+			// malformed archive. No such source exists in the write path
+			// today, checked across pkg/file, pkg/storer, pkg/sharky and
+			// pkg/storage, and a body that stops inside an entry arrives
+			// through exactly that wrap, which is why the match is not
+			// narrowed to the reader. If one ever appears, narrow it.
+			jsonhttp.BadRequest(w, "archive ends before it is complete")
 		default:
 			jsonhttp.InternalServerError(w, errDirectoryStore)
 		}

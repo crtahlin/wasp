@@ -1,7 +1,11 @@
 # Spec: answer a body that is not an archive with 400, not 500
 
 Issue: [#409](https://github.com/crtahlin/wasp/issues/409). Type: fix. Area: api.
-Affects upstream: yes (`pkg/api/dirs.go` is unmodified from bee v2.8.2).
+Affects upstream: yes. **Corrected**: an earlier version of this line said
+`pkg/api/dirs.go` is unmodified from bee v2.8.2. It is not, and was not when this spec
+merged: the #366 fix landed on `main` first and added twelve lines to that file. What is
+unmodified is the part that matters, the handler's error switch, which upstream carries as
+`ErrBucketFull / errEmptyDir / tar.ErrHeader / default` with no case for this one.
 
 ## Problem
 

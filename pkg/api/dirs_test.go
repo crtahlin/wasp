@@ -56,22 +56,48 @@ func TestDirs(t *testing.T) {
 		)
 	})
 
-	t.Run("non tar file", func(t *testing.T) {
-		file := bytes.NewReader([]byte("some data"))
-
-		jsonhttptest.Request(t, client, http.MethodPost, dirUploadResource,
-			http.StatusInternalServerError,
-			jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
-			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
-			jsonhttptest.WithRequestBody(file),
-			jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "True"),
-			jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
-				Message: api.ErrDirectoryStoreError.Error(),
-				Code:    http.StatusInternalServerError,
-			}),
-			jsonhttptest.WithRequestHeader(api.ContentTypeHeader, api.ContentTypeTar),
-		)
-	})
+	// A body that is not a usable archive is the caller's fault, not this
+	// node's, so it is 400. This case asserted 500 until #409; the fork's own
+	// POST /wasp/ingest already answered 400 for the same bodies through the
+	// same storeDir, and the two routes should not disagree.
+	//
+	// The four cases are not one case four times, and which message each gets
+	// was established by running them rather than assumed. archive/tar reports
+	// a body shorter than one 512-byte header block, and a body that stops
+	// inside an entry, as an unexpected end of input; a full-size block of
+	// nonsense is an invalid header, whether it stands alone or follows a
+	// valid entry. So they reach two different branches of the handler's
+	// switch, and the entry case reaches its branch through a different
+	// wrapping than the other three.
+	//
+	// A first version of this test carried only the nine byte body, and a
+	// second assumed a valid entry followed by garbage would be an unexpected
+	// end of input. It is not.
+	for _, tc := range []struct {
+		name    string
+		body    func(t *testing.T) *bytes.Buffer
+		message string
+	}{
+		{"non tar file", tarShorterThanHeader, "archive ends before it is complete"},
+		{"stops inside an entry", tarShortEntry, "archive ends before it is complete"},
+		{"valid entry then a block of nonsense", tarThenGarbage, "invalid filename in tar archive"},
+		{"invalid tar header", tarInvalidHeader, "invalid filename in tar archive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jsonhttptest.Request(t, client, http.MethodPost, dirUploadResource,
+				http.StatusBadRequest,
+				jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
+				jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
+				jsonhttptest.WithRequestBody(tc.body(t)),
+				jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "True"),
+				jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+					Message: tc.message,
+					Code:    http.StatusBadRequest,
+				}),
+				jsonhttptest.WithRequestHeader(api.ContentTypeHeader, api.ContentTypeTar),
+			)
+		})
+	}
 
 	t.Run("wrong content type", func(t *testing.T) {
 		tarReader := tarFiles(t, []f{{
@@ -674,4 +700,136 @@ type f struct {
 	dir      string
 	filePath string
 	header   http.Header
+}
+
+// tarShortEntry is a header promising more bytes than follow, so the body stops
+// in the middle of an entry rather than before the first header.
+//
+// It is not the same case as a body shorter than one header block: that one
+// fails in reader.Next, while this one fails while the pipeline is reading the
+// entry's content, so it reaches the handler wrapped as "store dir file" rather
+// than "read dir stream". Both carry io.ErrUnexpectedEOF, which is what the
+// handler matches, and neither existing helper covers this path.
+func tarShortEntry(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "big.bin",
+		Mode: 0o600,
+		Size: 4096,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Fewer bytes than the header promises. Flush and Close are skipped
+	// only because both return "missed writing 3996 bytes" here; measured,
+	// neither writes a further byte, so the body is the same 612 bytes
+	// either way and omitting them just avoids a pointless error check.
+	if _, err := tw.Write(bytes.Repeat([]byte("a"), 100)); err != nil {
+		t.Fatal(err)
+	}
+
+	return &buf
+}
+
+// TestDirsMultipartMalformed covers the other reader. storeDir dispatches on
+// the content type, so multipart bodies reach the same switch through
+// multipartReader, and the spec for #409 required what that reader returns to
+// be established rather than assumed.
+//
+// Two of these improve with the #409 fix and two do not, which is why they are
+// one table: the two that do not are the same class of defect reached through
+// mime/multipart's own errors rather than archive/tar's, and they are recorded
+// here so the gap is visible in the tests rather than only in an issue.
+func TestDirsMultipartMalformed(t *testing.T) {
+	t.Parallel()
+
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:          mockstorer.New(),
+		PreventRedirect: true,
+		Post:            mockpost.New(mockpost.WithAcceptAll()),
+	})
+
+	complete, boundary := multipartFiles(t, []f{{
+		data: []byte("<h1>Swarm"),
+		name: "index.html",
+	}})
+
+	for _, tc := range []struct {
+		name        string
+		body        []byte
+		contentType string
+		code        int
+		message     string
+	}{
+		{
+			// Fixed by #409: this used to answer 500.
+			name:        "cut inside a part body",
+			body:        complete.Bytes()[:complete.Len()-20],
+			contentType: "multipart/form-data; boundary=" + boundary,
+			code:        http.StatusBadRequest,
+			message:     "archive ends before it is complete",
+		},
+		{
+			// Already 400 before #409, by a different route: the reader
+			// finds no parts, so the collection is empty.
+			name:        "no boundary in the body",
+			body:        []byte("not a multipart body at all"),
+			contentType: "multipart/form-data; boundary=" + boundary,
+			code:        http.StatusBadRequest,
+			message:     api.ErrEmptyDir.Error(),
+		},
+		{
+			// NOT fixed by #409, and recorded rather than hidden. The
+			// content type names no boundary, so mime/multipart refuses
+			// before reading anything. That is the caller's mistake and
+			// should be 400, but the error is mime/multipart's own and
+			// matches no case in the switch.
+			name:        "content type declares no boundary",
+			body:        complete.Bytes(),
+			contentType: "multipart/form-data",
+			code:        http.StatusInternalServerError,
+			message:     api.ErrDirectoryStoreError.Error(),
+		},
+		{
+			// NOT fixed by #409, same reason: a part header line with no
+			// colon is a malformed MIME header, which is again the
+			// caller's mistake reported as a node fault.
+			name:        "part header line without a colon",
+			body:        []byte("--" + boundary + "\r\nnot a header line\r\n\r\nbody\r\n--" + boundary + "--\r\n"),
+			contentType: "multipart/form-data; boundary=" + boundary,
+			code:        http.StatusInternalServerError,
+			message:     api.ErrDirectoryStoreError.Error(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			jsonhttptest.Request(t, client, http.MethodPost, "/bzz", tc.code,
+				jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
+				jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
+				jsonhttptest.WithRequestBody(bytes.NewReader(tc.body)),
+				jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "True"),
+				jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+					Message: tc.message,
+					Code:    tc.code,
+				}),
+				jsonhttptest.WithRequestHeader(api.ContentTypeHeader, tc.contentType),
+			)
+		})
+	}
+}
+
+// tarShorterThanHeader is the nine byte body the pre-#409 test used, kept so
+// the behaviour change is visible on exactly the input that asserted the 500.
+// archive/tar reports anything shorter than one 512-byte header block as an
+// unexpected end of input.
+//
+// A named function rather than a closure, for the reason localingest_dir_test.go
+// records next to tarEmpty: every case in a table should be one.
+func tarShorterThanHeader(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	return bytes.NewBufferString("some data")
 }
