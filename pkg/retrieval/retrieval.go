@@ -264,6 +264,12 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 
 		inflight := 0
 
+		// wasp #392: an ordinary, forwarding retrieval has failed for this
+		// chunk, so the network does not hold it and only a preferred peer can
+		// serve it. Set once and never cleared: a chunk the network did not
+		// have a moment ago does not acquire it mid-download.
+		ordinaryFailed := false
+
 		for errorsLeft > 0 {
 			select {
 			case <-ctx.Done():
@@ -284,6 +290,27 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 					switch {
 					case err == nil:
 						// started, fall past this block to the bookkeeping below
+					case errors.Is(err, accounting.ErrOverdraft) && ordinaryFailed:
+						// wasp #392: an ordinary retrieval has already failed
+						// for this chunk, so the network does not hold it and
+						// more ordinary attempts cannot succeed. Wait for this
+						// peer's credit instead of spending the error budget
+						// and the readmit cap on peers that will not answer.
+						//
+						// Not counted as a readmit. That cap exists to stop
+						// favouring one peer over the alternatives, and here
+						// there are none. Bounded by the request context: a
+						// download that cannot progress ends when its caller
+						// gives up, and each wait is one wakeup rather than a
+						// spin.
+						s.metrics.PreferredOverdrafts.Inc()
+						select {
+						case <-time.After(overDraftRefresh):
+							retry()
+							continue
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
 					case errors.Is(err, accounting.ErrOverdraft) && readmits[peer.ByteString()] < maxOverdraftReadmits:
 						// Keep the peer for a later attempt, but do NOT wait for
 						// its credit here. Ordinary selection is tried straight
@@ -412,7 +439,24 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 					continue
 				}
 
-				errorsLeft--
+				// wasp #392: an ordinary retrieval failing says the network
+				// does not hold this chunk, not just that this peer does not.
+				ordinaryFailed = true
+
+				// The error budget exists to end a hopeless search. While a
+				// verified provider is still a candidate the search is not
+				// hopeless, only unfunded, and spending the budget here ends
+				// the download before the provider regains credit. With no
+				// candidate left it applies exactly as before, so content the
+				// network does hold is unaffected.
+				//
+				// Load bearing, measured rather than assumed: with this guard
+				// removed and the wait below kept, a 4 MiB sole-source
+				// download truncates at 1,310,720 bytes, which is the failure
+				// this issue is about.
+				if len(candidates) == 0 {
+					errorsLeft--
+				}
 				s.errSkip.Add(chunkAddr, res.peer, skiplistDur)
 				retry()
 			}

@@ -618,3 +618,99 @@ func TestHasPreferredPeersDistinguishesAbsentFromNil(t *testing.T) {
 		t.Fatal("a context carrying a set reported otherwise")
 	}
 }
+
+// TestPreferredSurvivesMoreOverdraftsThanReadmits is the #392 case: content
+// that only the preferred peer holds, where that peer is out of credit for
+// longer than maxOverdraftReadmits allows.
+//
+// Before #392 the chunk was lost. Each overdraft fell through to ordinary
+// selection, which cannot succeed because no other peer has the chunk, and
+// each of those failures spent one of the allowed errors and one of the
+// readmits. The peer was dropped from the chunk once the readmits ran out, and
+// the download failed with the only holder connected and willing.
+//
+// The refusal count here is deliberately above maxOverdraftReadmits. At or
+// below it the test passes against the unfixed code and pins nothing.
+func TestPreferredSurvivesMoreOverdraftsThanReadmits(t *testing.T) {
+	t.Parallel()
+
+	var (
+		chunk      = testingc.FixtureChunk("0033")
+		clientAddr = swarm.RandAddress(t)
+		holderAddr = swarm.RandAddress(t)
+		emptyAddr  = swarm.RandAddress(t)
+		pricer     = pricermock.NewMockService(defaultPrice, defaultPrice)
+		credits    atomic.Int32
+	)
+
+	// the only node that has the chunk
+	st := &testStorer{ChunkStore: inmemchunkstore.New()}
+	if err := st.Put(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	holder := createRetrieval(t, holderAddr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	holder.SetProvidersEnabled(true)
+
+	var localOnlyAsks atomic.Int32
+	spec := holder.Protocol()
+	inner := spec.StreamSpecs[0].Handler
+	spec.StreamSpecs[0].Handler = func(ctx context.Context, p p2p.Peer, s p2p.Stream) error {
+		if _, ok := s.Headers()[retrieval.LocalOnlyHeader]; ok {
+			localOnlyAsks.Add(1)
+		}
+		return inner(ctx, p, s)
+	}
+
+	// an ordinary peer that does not have it, so ordinary selection fails and
+	// the chunk is genuinely sole-source
+	// an empty topology so that it answers not-found rather than trying to
+	// forward, which is what a peer at the edge of the network does
+	empty := createRetrieval(t, emptyAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, nil,
+		topologymock.NewTopologyDriver(), log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{
+			holderAddr.String(): spec,
+			emptyAddr.String():  empty.Protocol(),
+		}),
+	)
+
+	// refuse the holder more often than the readmit cap allows, then relent
+	const refusals = 20
+	var acc *accountingmock.Service
+	acc = accountingmock.NewAccounting(
+		accountingmock.WithPrepareCreditFunc(func(peer swarm.Address, price uint64, originated bool) (accounting.Action, error) {
+			if peer.Equal(holderAddr) && credits.Add(1) <= refusals {
+				return nil, accounting.ErrOverdraft
+			}
+			return acc.MakeCreditAction(peer, price), nil
+		}),
+	)
+
+	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		topologymock.NewTopologyDriver(topologymock.WithPeers(holderAddr, emptyAddr)), log.Noop, acc, pricer, nil, false)
+	client.SetProvidersEnabled(true)
+
+	// each overdraft costs one overDraftRefresh wait, so the deadline has to
+	// allow for all of them: the point of the change is that it waits
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(holderAddr))
+
+	got, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress)
+	if err != nil {
+		t.Fatalf("sole-source chunk lost after %d overdrafts: %v", refusals, err)
+	}
+	if !got.Address().Equal(chunk.Address()) {
+		t.Fatalf("got chunk %s, want %s", got.Address(), chunk.Address())
+	}
+	if n := credits.Load(); int(n) <= refusals {
+		t.Fatalf("the holder was asked for credit %d times, want more than the %d refusals", n, refusals)
+	}
+	// it must have been served as a preferred peer rather than stumbled upon
+	// by ordinary selection, which is what the local-only header distinguishes
+	if localOnlyAsks.Load() == 0 {
+		t.Fatal("the holder was never asked as a preferred peer; it was dropped from the chunk")
+	}
+}
