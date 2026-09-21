@@ -216,6 +216,13 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 			logger.Debug("local ingest: collection has no files", "error", err)
 			jsonhttp.BadRequest(ow, errEmptyDir)
 			return
+		case errors.Is(err, errInvalidIndexDocument):
+			// This route calls the same storeDir as /bzz and passes the same
+			// header, so it inherits the same malformed-request case and
+			// answers it the same way (#366).
+			logger.Debug("local ingest: invalid index document suffix", "error", err)
+			jsonhttp.BadRequest(ow, errInvalidIndexDocument)
+			return
 		case errors.Is(err, tar.ErrHeader):
 			logger.Debug("local ingest: invalid tar header", "error", err)
 			jsonhttp.BadRequest(ow, "invalid tar archive")

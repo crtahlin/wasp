@@ -33,7 +33,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var errEmptyDir = errors.New("no files in root directory")
+var (
+	errEmptyDir = errors.New("no files in root directory")
+	// errInvalidIndexDocument is returned when the Swarm-Index-Document header
+	// names a path rather than a file. The header is a suffix appended to a
+	// directory path, so a slash in it is rejected rather than used. The request is
+	// malformed, which is why this is a sentinel: the handler answers 400 for
+	// it rather than reporting a node failure (#366).
+	errInvalidIndexDocument = errors.New("index document suffix must not include slash character")
+)
 
 // dirUploadHandler uploads a directory supplied as a tar in an HTTP request
 func (s *Service) dirUploadHandler(
@@ -90,6 +98,8 @@ func (s *Service) dirUploadHandler(
 			jsonhttp.PaymentRequired(w, "batch is overissued")
 		case errors.Is(err, errEmptyDir):
 			jsonhttp.BadRequest(w, errEmptyDir)
+		case errors.Is(err, errInvalidIndexDocument):
+			jsonhttp.BadRequest(w, errInvalidIndexDocument)
 		case errors.Is(err, tar.ErrHeader):
 			jsonhttp.BadRequest(w, "invalid filename in tar archive")
 		default:
@@ -168,7 +178,7 @@ func storeDir(
 	}
 
 	if indexFilename != "" && strings.ContainsRune(indexFilename, '/') {
-		return swarm.ZeroAddress, errors.New("index document suffix must not include slash character")
+		return swarm.ZeroAddress, errInvalidIndexDocument
 	}
 
 	filesAdded := 0

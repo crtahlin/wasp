@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
@@ -624,5 +625,46 @@ func TestLocalIngestDirRejectsMalformedArchive(t *testing.T) {
 				t.Fatalf("a refused collection left committed=%d reserved=%d, want 0 and 0", committed, reserved)
 			}
 		})
+	}
+}
+
+// TestLocalIngestDirRejectsSlashIndexDocument covers the second caller of
+// storeDir. This route passes the same Swarm-Index-Document header as /bzz, so
+// it inherits the same malformed-request case and must answer it the same way.
+//
+// Fixing only /bzz would have left the fork's own route answering 500 for a
+// request the upstream route now answers 400, which is worse than the defect
+// being fixed (#366).
+func TestLocalIngestDirRejectsSlashIndexDocument(t *testing.T) {
+	t.Parallel()
+
+	store := mockstorer.New()
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:             store,
+		Logger:             log.Noop,
+		Post:               mockpost.New(mockpost.WithAcceptAll()),
+		LocalIngestEnabled: true,
+	})
+
+	jsonhttptest.Request(t, client, http.MethodPost, localIngestResource, http.StatusBadRequest,
+		jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "true"),
+		jsonhttptest.WithRequestHeader(api.ContentTypeHeader, api.ContentTypeTar),
+		jsonhttptest.WithRequestHeader(api.SwarmIndexDocumentHeader, "dir/index.html"),
+		jsonhttptest.WithRequestBody(tarFiles(t, []f{{
+			data: []byte("<h1>Swarm"),
+			name: "index.html",
+		}})),
+		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+			Message: api.ErrInvalidIndexDocument.Error(),
+			Code:    http.StatusBadRequest,
+		}),
+	)
+
+	// The refusal happens before any chunk is written, but assert the claim is
+	// released anyway: answering through the plain writer rather than the
+	// cleanup one is the mistake this route's other refusals guard against.
+	committed, reserved, _ := store.LocalIngestUsage()
+	if committed != 0 || reserved != 0 {
+		t.Fatalf("a refused collection left committed=%d reserved=%d, want 0 and 0", committed, reserved)
 	}
 }

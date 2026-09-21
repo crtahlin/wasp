@@ -28,10 +28,11 @@ type (
 )
 
 var (
-	ErrInvalidContentType  = errInvalidContentType
-	ErrInvalidRequest      = errInvalidRequest
-	ErrDirectoryStoreError = errDirectoryStore
-	ErrEmptyDir            = errEmptyDir
+	ErrInvalidContentType   = errInvalidContentType
+	ErrInvalidRequest       = errInvalidRequest
+	ErrDirectoryStoreError  = errDirectoryStore
+	ErrEmptyDir             = errEmptyDir
+	ErrInvalidIndexDocument = errInvalidIndexDocument
 )
 
 var ContentTypeTar = contentTypeTar
