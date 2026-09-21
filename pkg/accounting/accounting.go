@@ -1536,6 +1536,14 @@ func (a *Accounting) Connect(peer swarm.Address, fullNode bool) {
 	accountingPeer.reservedBalance.Set(zero)
 	accountingPeer.refreshReservedBalance.Set(zero)
 	accountingPeer.paymentThresholdForPeer.Set(paymentThreshold)
+	// wasp #333: the checkpoint and the counter it is compared against have to
+	// be reset together. The counter is zeroed only when the record is created,
+	// and the record outlives a disconnect, so without this a returning peer is
+	// already past the checkpoint and collects an upgrade on every repayment
+	// until the checkpoint climbs back over the stale total, by steps and then
+	// by doubling. The doubling overshoots, so the burst of upgrades is
+	// followed by a long stall before the peer earns its next one.
+	accountingPeer.totalDebtRepay.Set(zero)
 	accountingPeer.thresholdGrowAt.Set(thresholdGrowStep)
 	accountingPeer.disconnectLimit.Set(disconnectLimit)
 	// wasp #327: a grant belongs to one connection. Connect knows nothing about

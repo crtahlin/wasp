@@ -113,11 +113,25 @@ the changes:
   re-zeroes the cumulative figure it is tested against, which is written once at
   record creation, and the per-peer record is never deleted from the map. So a
   returning peer with a long history fires the threshold upgrade on every
-  settlement until the checkpoint catches up, raising its granted threshold past
-  a limit the node refuses to start with and sending an announce under the peer
-  lock each time. Verified byte-identical to `upstream/v2.8.2` across
-  `pkg/accounting`, `pkg/pricing` and `pkg/settlement/pseudosettle`. It is read
-  from the code and not measured, and the issue says what would confirm it.
+  settlement until the checkpoint climbs back over the stale total, sending an
+  announce under the peer lock each time.
+
+  **Two statements here were wrong and are corrected, per rule 11.** The first
+  said the run raises the granted threshold "past a limit the node refuses to
+  start with". It does not, at the shipped default: a peer at 10,000,000,000
+  collects 18 upgrades worth 81,000,000, and 13,500,000 + 81,000,000 =
+  94,500,000, below the 108,000,000 `maxPaymentThreshold`. It passes that limit
+  only for a configured base above 27,000,000. The second said the area was
+  "verified byte-identical to `upstream/v2.8.2` across `pkg/accounting`,
+  `pkg/pricing` and `pkg/settlement/pseudosettle`". That is no longer true:
+  `git diff --stat upstream/v2.8.2 origin/main` over those three paths reports
+  11 files changed and 2,203 lines inserted. The defect is still upstream's, but
+  that had to be checked in upstream's own copy rather than by diffing the
+  files: `totalDebtRepay` is written zero once at line 613 there and every other
+  write is an addition, and upstream's `Connect` carries the same reset block,
+  lines 1425 to 1433, with the same omission.
+
+  It was read from the code and not measured on a node.
 - [#317](https://github.com/crtahlin/wasp/issues/317), the unlocked allocation
   in `chequebook.Issue`, is **not** tagged and has no row. The code is the same
   upstream, but no caller there or here can reach it: `Issue` has a single

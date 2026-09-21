@@ -2008,3 +2008,160 @@ func debitAndReceivePayment(t *testing.T, acc *accounting.Accounting, peer1Addr 
 		t.Fatalf("unexpected error from NotifyRefreshmentReceived: %v", err)
 	}
 }
+
+// countingPricingMock records how many threshold announcements were made, which
+// pricingMock does not, because the defect in #333 is a run of upgrades rather
+// than a wrong final value.
+type countingPricingMock struct {
+	calls            int
+	paymentThreshold *big.Int
+}
+
+func (p *countingPricingMock) AnnouncePaymentThreshold(_ context.Context, _ swarm.Address, paymentThreshold *big.Int) error {
+	p.calls++
+	p.paymentThreshold = new(big.Int).Set(paymentThreshold)
+	return nil
+}
+
+// TestThresholdGrowthResetOnReconnect covers #333: Connect rewound
+// thresholdGrowAt to the starting step without resetting totalDebtRepay, the
+// cumulative figure it is compared against. That figure is zeroed only when the
+// per-peer record is created, and the record outlives a disconnect, so a
+// returning peer was already past the checkpoint and collected an upgrade on
+// every repayment until the checkpoint caught up one step at a time.
+func TestThresholdGrowthResetOnReconnect(t *testing.T) {
+	t.Parallel()
+
+	// thresholdGrowStep is refreshRate * 100, so with the test refresh rate of
+	// 1000 the first checkpoint is at 100,000.
+	const growStep = testRefreshRate * 100
+
+	newAccounting := func(t *testing.T) (*accounting.Accounting, *countingPricingMock, swarm.Address) {
+		t.Helper()
+
+		store := mock.NewStateStore()
+		t.Cleanup(func() { store.Close() })
+
+		pricing := &countingPricingMock{}
+		acc, err := accounting.NewAccounting(testPaymentThreshold, 0, 0, log.Noop, store, pricing, big.NewInt(testRefreshRate), testLightFactor, p2pmock.New())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		peer, err := swarm.ParseHexAddress("00112233")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return acc, pricing, peer
+	}
+
+	// repay settles an amount without creating debt first. The growth check runs
+	// at the top of NotifyPaymentReceived, before any balance is consulted, so
+	// this is enough to drive the checkpoint.
+	repay := func(t *testing.T, acc *accounting.Accounting, peer swarm.Address, amount int64) {
+		t.Helper()
+
+		if err := acc.NotifyPaymentReceived(peer, big.NewInt(amount)); err != nil {
+			t.Fatalf("NotifyPaymentReceived: %v", err)
+		}
+	}
+
+	t.Run("a reconnecting peer does not collect a run of upgrades", func(t *testing.T) {
+		t.Parallel()
+
+		acc, pricing, peer := newAccounting(t)
+		acc.Connect(peer, true)
+
+		// Build a repayment history well past the first checkpoint. Ten steps
+		// is what would otherwise become ten consecutive upgrades.
+		repay(t, acc, peer, 10*growStep)
+		before := pricing.calls
+
+		acc.Disconnect(peer)
+		acc.Connect(peer, true)
+
+		// Several small repayments on the new connection. None is anywhere
+		// near the checkpoint, so none may move the threshold.
+		//
+		// The count matters. The defect is not one stray upgrade but a run of
+		// them: every repayment fires one until the checkpoint climbs back
+		// past the stale total, one step at a time. Repaying five times shows
+		// the run rather than a single event, and without the reset this
+		// reports five.
+		const smallRepayments = 5
+		for range smallRepayments {
+			repay(t, acc, peer, 1)
+		}
+
+		if got := pricing.calls - before; got != 0 {
+			t.Fatalf("after reconnecting, %d small repayments caused %d threshold upgrades, want 0", smallRepayments, got)
+		}
+	})
+
+	// The same, for a light peer. Without this the reset could be applied only
+	// to full nodes and the whole package would still pass, which matters
+	// because a light peer uses lightThresholdGrowStep and reconnects more
+	// often rather than less.
+	t.Run("a reconnecting light peer does not collect a run of upgrades", func(t *testing.T) {
+		t.Parallel()
+
+		acc, pricing, peer := newAccounting(t)
+		acc.Connect(peer, false)
+
+		repay(t, acc, peer, 10*growStep)
+		before := pricing.calls
+
+		acc.Disconnect(peer)
+		acc.Connect(peer, false)
+
+		const smallRepayments = 5
+		for range smallRepayments {
+			repay(t, acc, peer, 1)
+		}
+
+		if got := pricing.calls - before; got != 0 {
+			t.Fatalf("after reconnecting, %d small repayments caused %d threshold upgrades, want 0", smallRepayments, got)
+		}
+	})
+
+	t.Run("a reconnecting peer still earns an upgrade on merit", func(t *testing.T) {
+		t.Parallel()
+
+		acc, pricing, peer := newAccounting(t)
+		acc.Connect(peer, true)
+
+		repay(t, acc, peer, 10*growStep)
+
+		acc.Disconnect(peer)
+		acc.Connect(peer, true)
+
+		before := pricing.calls
+
+		// Past the checkpoint on this connection, so one upgrade is due.
+		repay(t, acc, peer, growStep+1)
+
+		if got := pricing.calls - before; got != 1 {
+			t.Fatalf("after reconnecting, crossing the checkpoint caused %d threshold upgrades, want 1", got)
+		}
+	})
+
+	t.Run("a peer that stays connected is unaffected", func(t *testing.T) {
+		t.Parallel()
+
+		acc, pricing, peer := newAccounting(t)
+		acc.Connect(peer, true)
+
+		// Below the checkpoint: no upgrade.
+		repay(t, acc, peer, growStep-1)
+		if pricing.calls != 0 {
+			t.Fatalf("below the checkpoint caused %d threshold upgrades, want 0", pricing.calls)
+		}
+
+		// Crossing it: exactly one.
+		repay(t, acc, peer, 2)
+		if pricing.calls != 1 {
+			t.Fatalf("crossing the checkpoint caused %d threshold upgrades, want 1", pricing.calls)
+		}
+	})
+}

@@ -49,14 +49,33 @@ the test `totalDebtRepay > thresholdGrowAt` (`:1111`, `:1278`) is **already true
 the peer has repaid anything on this connection.
 
 `notifyPaymentThresholdUpgrade` then fires on the peer's first repayment after
-reconnecting and on every repayment after that. Each firing advances the checkpoint by
-one step and raises that peer's threshold by one refresh rate. The checkpoint closes the
-gap 450,000,000 at a time, so this peer receives about **22 consecutive upgrades**, and
-since pseudosettle refreshes about once a second they land at roughly one a second.
+reconnecting and on every repayment after that. Each firing advances the checkpoint and
+raises that peer's threshold by one refresh rate.
 
-The result is that a reconnecting peer is handed a threshold it did not earn on this
-connection, several times over, at a rate the mechanism was never meant to produce. The
-peer is also told about each upgrade, so the announcements are real traffic, not just an
+**Corrected after review.** An earlier version of this spec said "about 22 consecutive
+upgrades", reasoning that the checkpoint closes the gap 450,000,000 at a time and
+10,000,000,000 divided by 450,000,000 is about 22. That is wrong, and it is wrong for the
+reason it explicitly dismissed. The checkpoint steps by 450,000,000 only while it is
+below `thresholdGrowChange`, which is `refreshRate * 1800` = **8,100,000,000**. It
+reaches exactly that on the eighteenth upgrade, and `notifyPaymentThresholdUpgrade` then
+**doubles** it to 16,200,000,000, which is past 10,000,000,000, so the run stops there.
+
+The measured answer, driven against the shipped constants, is **18 upgrades**, raising
+the threshold by 81,000,000. Since pseudosettle grants at most one refreshment per whole
+second per peer, one a second is the ceiling rather than the rate.
+
+The overshoot matters as much as the burst. After it, the checkpoint sits at
+16,200,000,000 against a counter near 10,000,000,000, so the same peer must repay another
+6,200,000,000, about 23 minutes at the full refresh rate, before it earns anything at
+all. A peer that never disconnected needs 450,000,000, about 100 seconds. So the defect
+is a burst of unearned upgrades followed by a long stall, which is both a better
+description and more clearly wrong than a steady over-grant.
+
+At the shipped default `payment-threshold` of 13,500,000 the run ends at 94,500,000,
+which is **below** `maxPaymentThreshold` of 108,000,000. It passes that limit only for a
+configured base above 27,000,000.
+
+The peer is told about each upgrade, so the announcements are real traffic, not just an
 internal number.
 
 ## The change
@@ -129,6 +148,10 @@ Per rule 11 the label is a marker for a later human decision and nothing more.
 - A unit test that drives a peer's `totalDebtRepay` above `thresholdGrowStep`,
   disconnects and reconnects it, then makes **one** repayment, and asserts exactly one
   threshold upgrade rather than a run of them. On unmodified code that test sees the run.
+- The same for a **light peer**. Added after review found that guarding the reset with
+  `if fullNode` passed the whole package, so an entire arm of the fix was covered by
+  nothing. A light peer uses `lightThresholdGrowStep` and reconnects more often rather
+  than less.
 - A second test that a peer which has **not** passed the checkpoint still gets its
   upgrade at the right point after a reconnect, so the fix did not simply switch growth
   off.
