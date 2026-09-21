@@ -69,6 +69,23 @@ A sentinel error is a package-level error value compared by identity with `error
 which is the pattern `CODING.md` prescribes and the pattern the two working cases in
 this switch already use. So this adds no new mechanism.
 
+## The second caller, found by review
+
+**`storeDir` has two callers, not one.** The fork's own local-ingest route calls it at
+`pkg/api/localingest.go:182` with the same `Swarm-Index-Document` header, and has its own
+error switch handling `errEmptyDir`, `tar.ErrHeader` and `io.ErrUnexpectedEOF`. A first
+version of this work changed only `/bzz`, which would have left `POST /wasp/ingest`
+answering 500 for a request `POST /bzz` had just started answering 400.
+
+That is worse than the defect being fixed, because the two routes would disagree about
+the same header on the same node. The sentinel case is added to that switch too, with its
+own test.
+
+This is also what the issue asked for. It says "Worth checking in the same pass whether
+any other bare `errors.New` inside `storeDir` reaches the same `default`". The first pass
+covered the returns inside `storeDir` and missed the second caller of it, which is the
+same question asked one level up.
+
 ## What was checked in the same pass, and left alone
 
 **The other errors returned by `storeDir` are correctly 500.** Every one of them

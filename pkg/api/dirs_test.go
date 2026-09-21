@@ -93,6 +93,48 @@ func TestDirs(t *testing.T) {
 		)
 	})
 
+	// A Swarm-Index-Document header naming a path rather than a file is a
+	// malformed request, and was answered with 500 until #366. The two cases
+	// below are a pair: the first is the defect, the second is the guard that
+	// the fix did not turn a working header into a rejected one.
+	t.Run("index document with a slash", func(t *testing.T) {
+		tarReader := tarFiles(t, []f{{
+			data: []byte("some data"),
+			name: "index.html",
+		}})
+
+		jsonhttptest.Request(t, client, http.MethodPost, dirUploadResource,
+			http.StatusBadRequest,
+			jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
+			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
+			jsonhttptest.WithRequestBody(tarReader),
+			jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "True"),
+			jsonhttptest.WithRequestHeader(api.SwarmIndexDocumentHeader, "dir/index.html"),
+			jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+				Message: api.ErrInvalidIndexDocument.Error(),
+				Code:    http.StatusBadRequest,
+			}),
+			jsonhttptest.WithRequestHeader(api.ContentTypeHeader, api.ContentTypeTar),
+		)
+	})
+
+	t.Run("index document without a slash is accepted", func(t *testing.T) {
+		tarReader := tarFiles(t, []f{{
+			data: []byte("some data"),
+			name: "index.html",
+		}})
+
+		jsonhttptest.Request(t, client, http.MethodPost, dirUploadResource,
+			http.StatusCreated,
+			jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
+			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
+			jsonhttptest.WithRequestBody(tarReader),
+			jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "True"),
+			jsonhttptest.WithRequestHeader(api.SwarmIndexDocumentHeader, "index.html"),
+			jsonhttptest.WithRequestHeader(api.ContentTypeHeader, api.ContentTypeTar),
+		)
+	})
+
 	// valid tars
 	for _, tc := range []struct {
 		name                string
