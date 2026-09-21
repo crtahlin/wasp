@@ -244,6 +244,28 @@ stalled for the same length in the same way, ending at 30.1, 35.7 and 36.5
 seconds. Both numbers being about thirty is noted so that the coincidence is
 not mistaken for a finding in either direction.
 
+**The stall is the gap between the first refreshment and the second.** Three
+further cold downloads were sampled with the pseudosettle counters beside the
+balance. Every failing run counts exactly **one** refreshment, its error
+counter stays at **zero**, so the missing refreshments are not failing but are
+never attempted, and the download resumes if and when a second one happens: one
+run sat flat at -68,950,000 until the counter went from 1 to 2 at 6.7 seconds
+and then completed with 55 cheques and 12 refreshments, while another sat flat
+at -50,300,000 for the whole run. **One of those stalling runs issued no
+cheque at all**, which demotes the cheque count from cause to symptom and
+`paymentOngoing` from suspect to insufficient, since it gates cheques only.
+
+Reading `pkg/accounting/accounting.go`, the refreshment branch needs
+`paymentAmount >= refreshRate`, `timeElapsedInMilliseconds > 999` and
+`!refreshOngoing`. The first two plainly hold during a stall, tens of millions
+against a refresh rate of 4,500,000 and seconds since the last refreshment,
+which leaves **`refreshOngoing` stuck true**. That would also explain the zero
+error count, because a refreshment that never returns increments neither
+counter. `NotifyRefreshmentSent` is its only writer and `Pay` has a five second
+context, so a hang inside the timed section should clear and move one of the
+counters; neither moves. Not established, and it is what the observability work
+should now aim at.
+
 **One suspect is refuted by the sampling and is withdrawn.** The amount a
 cheque may pay is capped at `debt - refreshDue - shadowReservedBalance`, and
 `shadowReservedBalance` holds the reserved price of every chunk in flight, so a
