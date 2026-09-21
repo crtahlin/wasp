@@ -12,6 +12,8 @@ var (
 	ShallowReceiptToleranceFor = shallowReceiptToleranceFor
 	EffectiveMaxDoubling       = effectiveMaxDoubling
 	SyncedWithinThreshold      = syncedWithinThreshold
+	RadiusWithoutWaiting       = radiusWithoutWaiting
+	ErrNetworkRadiusUnknown    = errNetworkRadiusUnknown
 )
 
 // NewTestBeeWithClosers builds a Bee with only the push-sync and retrieval

@@ -372,6 +372,35 @@ func effectiveReserveCapacity(configured uint64, doubling int) int {
 	return (1 << doubling) * base
 }
 
+// errNetworkRadiusUnknown is what a radius lookup returns to a caller that
+// must not wait for the network storage radius to be learned.
+var errNetworkRadiusUnknown = errors.New("node: network storage radius not known yet")
+
+// radiusWithoutWaiting adapts a radius lookup that waits into one that does
+// not. While known reports false it returns errNetworkRadiusUnknown at once
+// and does NOT call wait; after that it delegates.
+//
+// See issue #398. The waiting lookup blocks until the radius is first
+// received from peers, and retrieval calls it inside its per-chunk loop, for
+// one purpose: deciding whether to fan a request out across the
+// neighbourhood. That call site skips the fan-out when the lookup returns an
+// error, so retrieval has nothing to wait for, and waiting there stopped
+// every chunk of every download for the first seconds after a restart. The
+// caller cannot tell a stalled download from a slow one, because the joiner
+// reads a whole unit or none of it and a truncated read surfaces as a short
+// body with HTTP 200.
+//
+// Pushsync and the reserve worker keep the waiting lookup: neither should act
+// on a radius it does not have.
+func radiusWithoutWaiting(known func() bool, wait func() (uint8, error)) func() (uint8, error) {
+	return func() (uint8, error) {
+		if !known() {
+			return 0, errNetworkRadiusUnknown
+		}
+		return wait()
+	}
+}
+
 func NewBee(
 	ctx context.Context,
 	addr string,
@@ -1373,7 +1402,8 @@ func NewBee(
 	// set the pushSyncer in the PSS
 	pssService.SetPushSyncer(pushSyncProtocol)
 
-	retrieval := retrieval.New(swarmAddress, waitNetworkRFunc, localStore, p2ps, kad, logger, acc, pricer, tracer, o.RetrievalCaching)
+	networkRadiusKnown := func() bool { return networkR.Load() != uint32(swarm.MaxBins) }
+	retrieval := retrieval.New(swarmAddress, radiusWithoutWaiting(networkRadiusKnown, waitNetworkRFunc), localStore, p2ps, kad, logger, acc, pricer, tracer, o.RetrievalCaching)
 	b.retrievalCloser = retrieval
 	localStore.SetRetrievalService(retrieval)
 	retrieval.SetProvidersEnabled(o.ProvidersEnable)

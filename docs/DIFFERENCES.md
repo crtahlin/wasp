@@ -7,8 +7,8 @@ is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
   on 2026-09-10.
-- **wasp described:** commit `031f65ea`, 2026-09-21, the last commit that
-  changes what a node does. The latest wasp release is v0.1.3.
+- **wasp described:** the tip of `fix/398-radius-wait`, 2026-09-21, updated to
+  the merge commit when that lands. The latest wasp release is v0.1.3.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
 
 The comparison is always with the latest **released** Bee, never with upstream
@@ -51,6 +51,7 @@ behind and would silently show fewer changes. See rule 13 in `AGENTS.md`.
 
 | Area | Bee v2.8.2 | wasp | In wasp | Bee defect | Record |
 |---|---|---|---|---|---|
+| Downloads in the first seconds after a restart | Retrieval waits for the network storage radius inside its per-chunk loop, so every chunk of every download blocks until the radius first arrives from peers. Measured on the bench at 6 to 30 seconds, with **324 goroutines** parked in that one function. A download still running when it happens is not slow but stopped, and because `joiner.ReadAt` reads a whole unit or none of it the caller gets **HTTP 200 with a truncated body** and no error anywhere. A 50 MB file held by a single provider truncated at 524,288 bytes four times out of four. | Retrieval is given a radius lookup that reports the radius as unknown instead of waiting for it. Its one call site uses the radius only to decide whether to fan a request out across the neighbourhood, and already skips that when the lookup returns an error, so nothing is waited for and nothing is lost once the radius is known. **The cost, while the radius is unknown:** a request that would have been multiplexed across the neighbourhood goes to one peer at a time, so a download started immediately after a restart may be slower than the same download started later, and a chunk close to this node may take more rounds to find. It costs other operators nothing and in that window slightly less, since the multiplexer is the part that sends the same request to several neighbours at once. Pushsync and the reserve worker keep the waiting lookup, because neither should act on a radius it does not have. | `main` | [affects-upstream](https://github.com/crtahlin/wasp/issues/398) | [#398](https://github.com/crtahlin/wasp/issues/398), [spec](experiments/content-providers/radius-wait.md) |
 | Overdraft limit when the clock steps backwards | The refresh allowance is `min(elapsed/1000, 1) * refreshRate` with integer division on a signed elapsed time. A clock stepping back **a second or more** makes the term **negative**, so the limit becomes `paymentThreshold - refreshRate` or lower: the node refuses credit it should allow, against every peer, until the timestamps catch up. A backwards step of 1 to 999 ms is harmless, because the division truncates toward zero. | The elapsed time is clamped at zero, so the allowance is never negative and the limit is never below the threshold the peer announced. Applies with no configuration, in both accrual modes. | `main` | Yes | [#359](https://github.com/crtahlin/wasp/issues/359) |
 | Dial backoff | The dial circuit breaker never resets its backoff after a successful dial, so the backoff only grows, up to one hour. | The backoff resets after a successful dial. | v0.1.0 | Yes | [#74](https://github.com/crtahlin/wasp/issues/74) |
 | Zero peers | With every known peer in backoff, the breaker refuses every dial, so a node at zero peers stays at zero until restarted. | A dial is always allowed when the node has zero peers. | v0.1.0 | Yes | [#85](https://github.com/crtahlin/wasp/issues/85) |
