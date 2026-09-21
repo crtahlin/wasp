@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"math/rand"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -807,6 +808,23 @@ func (k *Kad) pruneOversaturatedBins(depth uint8) {
 
 			binPeers := k.connectedPeers.BinPeers(uint8(i))
 			peers := k.balancedSlotPeers(k.commonBinPrefixes[i][j], binPeers, i)
+
+			// wasp #291: a static peer is not a candidate for pruning.
+			// binPruneCount already counts the bin as though static peers were
+			// not in it, so this is the half that did not agree. That
+			// randomPeer skips them too is evidence of the intent, though it
+			// is a different code path and not part of pruning.
+			//
+			// Filtered before the guard below, not after, for two reasons.
+			// The pick at the end of this block is rand.Intn(len(peers)), and
+			// rand.Intn(0) panics: filtering afterwards lets a slot whose
+			// candidates are all static reach that line empty. And a slot
+			// holding one static and one ordinary peer would otherwise lose
+			// the ordinary one, when the bin is not over its limit once the
+			// static peer is discounted, which is what binPruneCount already
+			// assumes.
+			peers = slices.DeleteFunc(peers, k.staticPeer)
+
 			if len(peers) <= 1 {
 				continue
 			}

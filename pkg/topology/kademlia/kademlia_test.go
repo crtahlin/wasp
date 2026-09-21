@@ -1349,7 +1349,7 @@ func TestOutofDepthPrune(t *testing.T) {
 		// implement empty prune func
 		pruneMux.Lock()
 		pruneImpl := func(uint8) {}
-		pruneFuncImpl = &(pruneImpl)
+		pruneFuncImpl = &pruneImpl
 		pruneMux.Unlock()
 
 		if err := kad.Start(context.Background()); err != nil {
@@ -1412,7 +1412,7 @@ func TestOutofDepthPrune(t *testing.T) {
 		pruneImpl = func(depth uint8) {
 			kademlia.PruneOversaturatedBinsFunc(kad)(depth)
 		}
-		pruneFuncImpl = &(pruneImpl)
+		pruneFuncImpl = &pruneImpl
 		pruneMux.Unlock()
 
 		// add a peer to kick start pruning
@@ -1470,7 +1470,7 @@ func TestPruneExcludeOps(t *testing.T) {
 	// implement empty prune func
 	pruneMux.Lock()
 	pruneImpl := func(uint8) {}
-	pruneFuncImpl = &(pruneImpl)
+	pruneFuncImpl = &pruneImpl
 	pruneMux.Unlock()
 
 	if err := kad.Start(context.Background()); err != nil {
@@ -1525,7 +1525,7 @@ func TestPruneExcludeOps(t *testing.T) {
 	pruneImpl = func(depth uint8) {
 		kademlia.PruneOversaturatedBinsFunc(kad)(depth)
 	}
-	pruneFuncImpl = &(pruneImpl)
+	pruneFuncImpl = &pruneImpl
 	pruneMux.Unlock()
 
 	// add a peer to kick start pruning
@@ -2840,4 +2840,149 @@ func TestCloseIsNotHeldUpByAWedgedDial(t *testing.T) {
 		t.Fatalf("Close failed with a dial wedged: %v; shutting down still "+
 			"waits for a stuck dial (issue #167)", closeErr)
 	}
+}
+
+// TestPruneKeepsStaticPeers is the reproducing test for #291. --static-nodes is
+// documented as protecting a peer from being kicked out, and binPruneCount
+// honours that when it counts a bin. The candidate list the pruner chooses from
+// does not, so all three of its picks, the first unhealthy peer, an unreachable
+// one, or one at random, can land on a static peer.
+//
+// The scenario is one over-saturated bin shallower than depth, holding a static
+// peer in the same balanced slot as one ordinary peer. It is run several times
+// because two of the three picks are not deterministic: one run proves nothing.
+func TestPruneKeepsStaticPeers(t *testing.T) {
+	t.Parallel()
+
+	// Each round is a fresh kademlia over freshly mined addresses. The
+	// chooser turns out to be deterministic here, taking its first branch
+	// every time, so the rounds are not there to beat a random pick: they vary
+	// the addresses, and the count reported below says how many rounds lost
+	// the peer rather than asserting on a single run.
+	const rounds = 12
+
+	disconnected := 0
+
+	for range rounds {
+		if !staticPeerSurvivesPrune(t) {
+			disconnected++
+		}
+	}
+
+	if disconnected > 0 {
+		t.Fatalf("the pruner disconnected a static peer in %d of %d rounds, want 0", disconnected, rounds)
+	}
+}
+
+// staticPeerSurvivesPrune builds one over-saturated bin containing a static
+// peer, runs the real pruner over it, and reports whether the static peer is
+// still connected.
+func staticPeerSurvivesPrune(t *testing.T) bool {
+	t.Helper()
+
+	const (
+		bin                 = 0
+		overSaturationPeers = 4
+		saturationPeers     = 2
+	)
+
+	base := swarm.RandAddress(t)
+
+	// mineBin's balanced form fills the first 2^bitSuffixLength entries with
+	// the bin's slot addresses, so peers[0] is the address of slot 0.
+	peers := mineBin(t, base, bin, 16, true)
+	staticPeer := peers[0]
+
+	// Two more peers in slot 0. balancedSlotPeers admits a peer whose extended
+	// proximity to the slot address is at least bin+bitSuffixLength+1.
+	//
+	// Two, not one. With a single slot-mate the filter always leaves one
+	// candidate and the guard below fires, so the test cannot tell this fix
+	// from one that skipped any slot containing a static peer. That other fix
+	// would stop pruning a whole bin once static peers were spread across its
+	// slots, and it passed this test when the slot held only two peers.
+	slotMates := []swarm.Address{
+		swarm.RandAddressAt(t, staticPeer, bin+kademlia.DefaultBitSuffixLength+1),
+		swarm.RandAddressAt(t, staticPeer, bin+kademlia.DefaultBitSuffixLength+1),
+	}
+
+	var conns, failedConns int32
+	pruneImpl := func(uint8) {}
+	_, kad, ab, _, signer := newTestKademliaWithAddr(t, base, &conns, &failedConns, kademlia.Options{
+		SaturationPeers:     new(saturationPeers),
+		OverSaturationPeers: new(overSaturationPeers),
+		StaticNodes:         []swarm.Address{staticPeer},
+		PruneFunc:           func(depth uint8) { pruneImpl(depth) },
+	})
+
+	if err := kad.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	testutil.CleanupCloser(t, kad)
+
+	// The two slot-0 peers are connected directly, before the bin fills. Left
+	// to the manage loop they may never be dialled at all once the bin is
+	// saturated, and a first version of this test did exactly that: the static
+	// peer was never connected, so every round reported it missing and the
+	// test "reproduced" the defect against a correct fix as readily as against
+	// a broken one.
+	connectOne(t, signer, kad, ab, staticPeer, nil)
+	kad.Reachable(staticPeer, p2p.ReachabilityStatusPublic)
+	for _, mate := range slotMates {
+		connectOne(t, signer, kad, ab, mate, nil)
+		kad.Reachable(mate, p2p.ReachabilityStatusPublic)
+	}
+
+	for _, peer := range peers[1:] {
+		addOne(t, signer, kad, ab, peer)
+		// Public, so the reachability exclusion does not remove them from the
+		// prune count and leave nothing to prune.
+		kad.Reachable(peer, p2p.ReachabilityStatusPublic)
+	}
+
+	// The bin has to be over-saturated before pruning means anything.
+	if err := spinlock.Wait(spinLockWaitTime, func() bool {
+		return binSizes(kad)[bin] > overSaturationPeers
+	}); err != nil {
+		t.Fatalf("timed out waiting for bin %d to fill: got %v", bin, binSizes(kad))
+	}
+
+	// The precondition, asserted rather than assumed. Without it this test
+	// cannot tell "the pruner disconnected it" from "it was never there".
+	if !isConnected(t, kad, staticPeer) {
+		t.Fatal("the static peer is not connected before pruning, so this round would measure nothing")
+	}
+
+	// Depth 1, so the pruner considers bin 0 and stops.
+	kademlia.PruneOversaturatedBinsFunc(kad)(1)
+
+	// Pruning must still happen. Without this the fix could switch the pruner
+	// off altogether, or skip every slot holding a static peer, and the static
+	// peer would survive for the wrong reason.
+	pruned := 0
+	for _, mate := range slotMates {
+		if !isConnected(t, kad, mate) {
+			pruned++
+		}
+	}
+	if pruned == 0 {
+		t.Fatal("the pruner disconnected neither ordinary peer in the slot, so it pruned nothing at all")
+	}
+
+	return isConnected(t, kad, staticPeer)
+}
+
+func isConnected(t *testing.T, kad *kademlia.Kad, peer swarm.Address) bool {
+	t.Helper()
+
+	found := false
+	_ = kad.EachConnectedPeer(func(addr swarm.Address, _ uint8) (bool, bool, error) {
+		if addr.Equal(peer) {
+			found = true
+			return true, false, nil
+		}
+		return false, false, nil
+	}, topology.Select{})
+
+	return found
 }
