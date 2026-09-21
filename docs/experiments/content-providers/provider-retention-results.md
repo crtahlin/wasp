@@ -6,17 +6,29 @@ Measured 2026-09-21 on the two-node bench, requester `bench-2` and provider
 [#392](https://github.com/crtahlin/wasp/issues/392).
 
 **Headline: the change does what it was specified to do, and it is not what
-decides whether a large sole-source download completes.** Arms 2, 3 and 4 pass.
-Arm 1 fails its acceptance condition on the changed build and on the control
-alike, and the reason is settlement rather than retention. That is the outcome
-the spec pre-registered as the negative, with one correction: the spec named
-`joiner.ReadAt` as the next suspect, and the read unit being all or nothing is
-indeed how the failure becomes a truncation, but it is not the cause. The cause
-is upstream of it. The requester spends its whole credit with the provider in
-**under one second**, issues one cheque, and then neither settlement path moves
-the debt back under the limit for about **thirty seconds**, during which
-nothing is outstanding and nothing arrives. The download that results is not
-slow, it is stopped.
+decides whether a large sole-source download completes.** Arms 2, 3 and 4
+pass. Arm 1 fails its acceptance condition on the changed build and on the
+control alike.
+
+**The reason arm 1 fails is not settlement, and not retention. It is that the
+runner restarts the requester inside every arm-1 run**, and retrieval blocks
+every chunk of every download until the node first learns the network storage
+radius, which after a restart takes 6 to 30 seconds. That is
+[#398](https://github.com/crtahlin/wasp/issues/398), it is present unmodified
+in upstream Bee v2.8.2, and it has nothing to do with this experiment. Arm 1
+therefore says nothing about provider retention in either direction.
+
+The spec pre-registered `joiner.ReadAt` as the next suspect if arm 1 failed.
+The read unit being all or nothing is indeed how the failure becomes a
+truncation rather than a slow download, so the caller sees HTTP 200 with a
+short body. It is the mechanism of the symptom, not the cause.
+
+An earlier version of this headline said the cause was settlement, that the
+requester spends its credit in under a second and then neither settlement path
+moves the debt for thirty seconds. **That is withdrawn.** The observation is
+real and is recorded below; its interpretation was backwards. A loop blocked
+before `PrepareCredit` never asks for credit, so no settlement is attempted,
+which is why the balance freezes and nothing is reserved.
 
 ## What was measured, and on which build
 
@@ -112,6 +124,32 @@ requester distinguishes that from a miss.
 
 ## Arm 1: 50 MB, sole source, hinted
 
+> **Correction, 2026-09-21. Arm 1 did not measure what this document says it
+> measured, and its conclusion about settlement is withdrawn.** The runner
+> restarts the requester inside every arm-1 run, and a goroutine dump taken
+> during one of these stalls shows **324 goroutines blocked in
+> `waitNetworkRFunc`**, which retrieval calls inside the per-chunk loop and
+> which does not return until the node first learns the network storage radius
+> from its peers. After a restart that takes 6 to 30 seconds, and every chunk
+> flight waits it out before reaching peer selection or accounting. The same
+> download, from the same pair, with the peer relationship reset but **no
+> restart**, completed six times out of six at 2.7 to 4.1 MB/s.
+>
+> So arm 1 was measuring a startup defect, filed as
+> [#398](https://github.com/crtahlin/wasp/issues/398) and present unmodified
+> in upstream Bee v2.8.2. The settlement reading below, that the download
+> stalls because a second refreshment is never attempted, is **the symptom**:
+> a loop blocked before `PrepareCredit` never asks for credit, so `settle` is
+> never called, so no refreshment is attempted and no cheque is issued. It is
+> kept below as the before state for #398 rather than deleted, with this
+> correction attached, because the numbers are real and only their
+> interpretation was wrong.
+>
+> **Arms 2, 3 and 4 are unaffected**: none of them restarts the node inside
+> the arm, and their conclusions stand. What #392's own change does and does
+> not do is therefore still as stated, except that arm 1 does not bear on it
+> either way.
+
 The arm this experiment exists for, and the one that fails.
 
 | Build | Run 1 | Run 2 | Run 3 |
@@ -128,7 +166,15 @@ the same build produced both outcomes in later runs.
 Five of the seven failures stopped at exactly 524,288 bytes, which is 128
 chunks, and every failure ended between 30 and 37 seconds.
 
-## What actually decides arm 1
+## What decides arm 1, read correctly
+
+> The section title was "what actually decides arm 1", and what follows was
+> read as settlement deciding it. **That reading is withdrawn**; see the
+> correction above and [#398](https://github.com/crtahlin/wasp/issues/398).
+> The measurements are kept because they are the before state for that fix,
+> and because the cold against warm split is the clue that was in front of me
+> the whole time: **cold means a restarted node**, and a restarted node does
+> not know the network storage radius.
 
 Same build, same size, same script, alternating a run made immediately after
 restarting the requester against one made straight afterwards with nothing
