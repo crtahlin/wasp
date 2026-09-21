@@ -190,6 +190,26 @@ in under a second, and then neither settlement path moves the debt back under
 the limit for thirty seconds. Because `joiner.ReadAt` reads a whole unit or
 none of it, what the caller sees at the end is a truncation.
 
+The same sampling on a download that **completes**, taken minutes later on the
+same pair with nothing else changed, shows what the working case looks like:
+
+| Time | Balance | Reserved | Cheques |
+|---|---|---|---|
+| 0.03 s | -24,350,000 | 950,000 | 1 |
+| 0.57 s | -106,700,000 | 19,260,000 | 1 |
+| 1.11 s | -130,440,000 | 0 | 2 |
+| 1.65 s | -44,390,000 | 99,430,000 | 4 |
+| 2.18 s | -2,150,000 | 320,000 | 6 |
+| 3.25 s | -34,100,000 | 2,880,000 | 8 |
+| 6.48 s | -35,620,000 | 610,000 | 18 |
+| 20.47 s | -76,800,000 | 13,600,000 | 60 |
+
+Sixty cheques in 20.5 seconds, between two and three a second throughout, with
+the debt oscillating between about 2 million and 157 million and the reserved
+balance rarely zero, which is chunks continuously in flight. The two runs are
+not a fast one and a slow one. One settles continuously and the other settles
+once and then stops.
+
 So the failure is settlement starvation. The provider is healthy throughout:
 it served 464 of the 475 attempts it was actually asked, a 97.7 per cent hit
 rate, and the hint reached 724 of 732 flights. Retention is working as
