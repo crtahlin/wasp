@@ -93,6 +93,12 @@ type Service struct {
 	// asking this node as a provider (#327). Nil unless wired in, and then the
 	// handler grants nothing.
 	providerCredit providerCreditor
+
+	// providerWait is how long a preferred peer is retained on a chunk after
+	// being refused credit for it. A field rather than a package variable so a
+	// parallel test that shortens it cannot race another that reads it, which
+	// is what happened with the #369 timeout.
+	providerWait time.Duration
 }
 
 func New(
@@ -123,6 +129,7 @@ func New(
 		// local-only misses: 100 per second per peer, 1000 per second in total
 		peerMissLimiter: ratelimit.New(10*time.Millisecond, 100),
 		nodeMissLimiter: ratelimit.New(time.Millisecond, 1000),
+		providerWait:    providerCreditWait,
 	}
 }
 
@@ -157,6 +164,23 @@ const (
 	// a later attempt at the same chunk after being refused credit. Bounded so
 	// a peer that never regains credit cannot livelock the request.
 	maxOverdraftReadmits = 8
+	// providerCreditWait is how long a preferred peer stays a candidate for a
+	// chunk after it is first refused credit for it. See issue #392.
+	//
+	// A count of attempts cannot express the thing that matters, which is how
+	// long credit takes to arrive: settlement runs at about one refreshment a
+	// second and one cheque every 1.2 s, so eight tries can be spent while the
+	// money is still in flight, and the peer was then dropped from a chunk no
+	// other peer held.
+	//
+	// Generous on purpose. Retries here are paced by overDraftRefresh, 600 ms,
+	// so five seconds would buy about eight of them, which is the count this
+	// replaces and would change nothing. Thirty seconds covers several
+	// settlement cycles. It is close to free: an overdraft falls through to
+	// ordinary selection immediately and retention never blocks it, so a long
+	// wait costs nothing whenever another peer can serve the chunk, and the
+	// request context still bounds the whole retrieval.
+	providerCreditWait   = 30 * time.Second
 	maxMultiplexForwards = 2
 )
 
@@ -264,6 +288,12 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 
 		inflight := 0
 
+		// wasp #392: when each preferred peer was first refused credit for this
+		// chunk. Retention is bounded by elapsed time from that moment, not by
+		// a count of attempts, because what decides whether the peer is worth
+		// keeping is how long its credit takes to arrive.
+		overdraftSince := make(map[string]time.Time, len(candidates))
+
 		for errorsLeft > 0 {
 			select {
 			case <-ctx.Done():
@@ -284,7 +314,7 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 					switch {
 					case err == nil:
 						// started, fall past this block to the bookkeeping below
-					case errors.Is(err, accounting.ErrOverdraft) && readmits[peer.ByteString()] < maxOverdraftReadmits:
+					case errors.Is(err, accounting.ErrOverdraft) && time.Since(firstOverdraft(overdraftSince, peer, time.Now())) < s.providerWait:
 						// Keep the peer for a later attempt, but do NOT wait for
 						// its credit here. Ordinary selection is tried straight
 						// away instead: where other peers hold the chunk that
@@ -298,6 +328,13 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 						// Consuming the candidate, which is what the code did
 						// before #324, made the refusal permanent and stopped
 						// downloads of content only this peer held.
+						//
+						// wasp #392: bounded by elapsed time rather than by a
+						// count of tries. Settlement arrives at about one
+						// refreshment a second and one cheque every 1.2 s, so a
+						// count of 8 could be spent in well under a second while
+						// the money was still in flight, and the peer was then
+						// dropped from a chunk nobody else held.
 						readmits[peer.ByteString()]++
 						s.metrics.PreferredReadmits.Inc()
 					default:
@@ -412,7 +449,16 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 					continue
 				}
 
-				errorsLeft--
+				// wasp #392: the error budget exists to end a hopeless search
+				// among ordinary peers. While a verified provider is still a
+				// candidate for this chunk the search is not hopeless, only
+				// unfunded, and spending the budget here ends the download
+				// before the provider's credit arrives. With no candidate left
+				// it behaves exactly as before, so content the network holds is
+				// unaffected and a genuinely missing chunk still fails fast.
+				if len(candidates) == 0 {
+					errorsLeft--
+				}
 				s.errSkip.Add(chunkAddr, res.peer, skiplistDur)
 				retry()
 			}
@@ -500,6 +546,18 @@ func (s *Service) retrieveChunk(ctx context.Context, quit chan struct{}, chunkAd
 	}
 
 	err = action.Apply()
+}
+
+// firstOverdraft records when this peer was first refused credit for the chunk
+// of the flight that owns the map, and returns that moment. It never returns
+// the zero value, so the caller's elapsed comparison is meaningful on the very
+// first refusal. See issue #392.
+func firstOverdraft(since map[string]time.Time, peer swarm.Address, now time.Time) time.Time {
+	if t, ok := since[peer.ByteString()]; ok {
+		return t
+	}
+	since[peer.ByteString()] = now
+	return now
 }
 
 func (s *Service) prepareCredit(ctx context.Context, peer, chunk swarm.Address, origin bool) (accounting.Action, error) {

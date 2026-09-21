@@ -76,3 +76,19 @@ func (s *Service) PreferredAttemptsForTest(tb testing.TB) float64 {
 	}
 	return m.GetCounter().GetValue()
 }
+
+// FirstOverdraft exposes the retention clock helper for tests. See issue #392.
+func FirstOverdraft(since map[string]time.Time, peer swarm.Address, now time.Time) time.Time {
+	return firstOverdraft(since, peer, now)
+}
+
+// ProviderCreditWait is how long a preferred peer is retained on a chunk after
+// it is first refused credit for it.
+const ProviderCreditWait = providerCreditWait
+
+// SetProviderCreditWait shortens the retention window so a test can reach its
+// expiry without waiting the shipped duration. Per service, so parallel tests
+// do not race.
+func (s *Service) SetProviderCreditWait(d time.Duration) {
+	s.providerWait = d
+}
