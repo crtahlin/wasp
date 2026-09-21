@@ -5,11 +5,13 @@ Measured 2026-09-21 on the two-node bench, requester `bench-2` and provider
 [radius-wait.md](radius-wait.md). Issue:
 [#398](https://github.com/crtahlin/wasp/issues/398).
 
-**Headline: the change removes the truncation, and does not make the download
-fast.** A 50 MB file held by a single provider, fetched immediately after
-restarting the requester, now arrives complete with a matching checksum where
-the control truncates, three runs to none. It arrives at about **51 KB/s**, which
-is a separate problem and is recorded here rather than left out.
+**Headline: the change removes the truncation. How fast a download then runs
+after a restart is still unmeasured.** A 50 MB file held by a single provider,
+fetched immediately after restarting the requester, now arrives complete with a
+matching checksum where the control truncates, three runs to none. The rate
+these runs recorded is **withdrawn**: they were made with the requester's
+chequebook empty, so they measure a node that cannot pay rather than a node
+after a restart.
 
 ## Builds
 
@@ -61,39 +63,45 @@ like.
 **The two times are not a speed comparison.** The control "finishes" in 52
 seconds because it gives up; the fix takes longer because it keeps working.
 
-## What is still wrong: the rate in that window
+## The rate in that window: measured, then withdrawn
 
-The fix delivers at 51,809, 51,224 and 52,549 B/s. That is a spread of 2.6
-per cent across three runs, which is the signature of a hard limit rather than
-of a busy network.
+The three fix runs delivered at 51,809, 51,224 and 52,549 B/s, a spread of 2.6
+per cent. That was read here as the download running on the pseudosettle
+refreshment allowance alone, because 12.6 chunks a second sits just under the
+14.7 that allowance pays for.
 
-At 4,096 bytes a chunk that is about 12.6 chunks a second. The pseudosettle
-time allowance is 4,500,000 units a second and the measured price is about
-307,000 units a chunk, which is 14.7 chunks a second. **The download after a
-restart is running at close to the refreshment allowance alone**, which means
-few or no cheques are being issued.
+**That reading is withdrawn. The runs were made with the requester unable to
+pay.** Checked immediately afterwards, its chequebook held 1.76 BZZ deposited
+and **0.0000192 BZZ available**, with `bee_swap_cheques_sent` at zero and
+`bee_accounting_payment_error_count` at four. Everything issued had gone
+uncashed until nothing was left to issue against, which is the same condition
+that cost a day earlier in this project and that `cp290/liquidity-gate.sh`
+exists to refuse. The harness for this arm did not call it.
 
-For contrast, the same pair with the node already up runs the same download at
-**2.7 to 4.1 MB/s**, which is past the 1 MB/s this work was aiming at. So the
-slowness belongs to the minutes after a restart, not to sole-source downloads
-in general.
+So the agreement with the refreshment rate is **circular**: a node that cannot
+issue a cheque settles by refreshment, and the measured rate is the refreshment
+rate. It says nothing about what a funded node does after a restart. The
+near-identical spread across three runs, which was offered above as the
+signature of a hard limit, is better read as the signature of a single
+mechanism doing all the work.
 
-This is where [#396](https://github.com/crtahlin/wasp/issues/396) and
-[#316](https://github.com/crtahlin/wasp/issues/316) apply. #396 was filed
-against these stalls and read them as a settlement defect; that reading was
-wrong about the truncation, which was this issue, and may be right about the
-rate. #316 reports that `refreshDue` in `settle` is computed without the one
-second cap that `PrepareCredit` applies, so the term grows as the last
-refreshment recedes and can push a cheque below `minimumPayment`. That is the
-right shape for a download running on refreshments alone, and it is now
-testable for the first time, because the blocking that used to mask everything
-is gone.
+**The rate after a restart is therefore unmeasured**, and the suggestion that
+[#316](https://github.com/crtahlin/wasp/issues/316) explains it is unsupported
+by anything here. The chequebook has been funded again and the arm has to be
+re-run behind the gate.
+
+**What this does not touch is arm 1.** Whether a download truncates is decided
+by the radius wait, not by money: the control failed with 210, 328 and 330
+goroutines parked in the radius lookup while the fix had none, and no amount of
+credit changes that. A node that cannot pay settles more slowly; it does not
+stop asking. The three-to-none result stands.
 
 ## What this does not show
 
 - **Nothing about warm downloads.** The change is inert once the radius is
   known, and that is argued from the code and from the unit tests rather than
   measured here. The no-regression arm in the spec is still to run.
+- **Nothing about the rate after a restart**, for the reason above.
 - **Nothing about other sizes.** Only 50 MB was run. The size sweep is a
   separate arm and is what answers whether the feature is reliable.
 - **Nothing about the fan-out this gives up.** While the radius is unknown a
