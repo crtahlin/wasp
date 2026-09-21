@@ -693,6 +693,7 @@ type DB struct {
 	retrieval           retrieval.Interface
 	pusherFeed          chan *pusher.Op
 	quit                chan struct{}
+	quitOnce            sync.Once
 	cacheLimiter        cacheLimiter
 	dbCloser            io.Closer
 	subscriptionsWG     sync.WaitGroup
@@ -986,7 +987,8 @@ func (db *DB) StatusMetrics() []prometheus.Collector {
 }
 
 func (db *DB) Close() error {
-	close(db.quit)
+	// Idempotent: TriggerQuit (tests) and a double Close share this guard.
+	db.quitOnce.Do(func() { close(db.quit) })
 
 	bgReserveWorkersClosed := make(chan struct{})
 	go func() {
@@ -1005,10 +1007,16 @@ func (db *DB) Close() error {
 		}
 	}()
 
+	// Close the underlying store only after the workers that use it have
+	// stopped. Closing it while a reserve scan is still iterating pulls the
+	// store out from under a live iterator, which segfaults under pebble.
+	// See issue #399.
 	var err error
 	closerDone := make(chan struct{})
 	go func() {
 		defer close(closerDone)
+		<-bgReserveWorkersClosed
+		<-bgCacheWorkersClosed
 		err = db.dbCloser.Close()
 	}()
 
@@ -1016,8 +1024,6 @@ func (db *DB) Close() error {
 	go func() {
 		defer close(done)
 		<-closerDone
-		<-bgCacheWorkersClosed
-		<-bgReserveWorkersClosed
 	}()
 
 	shutdownTimeout := db.shutdownTimeout

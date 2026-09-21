@@ -1068,3 +1068,45 @@ func TestDebugInfoAgreesWithStatus(t *testing.T) {
 			info.Reserve.SizeWithinRadius, status)
 	}
 }
+
+// TestReserveScanStopsOnShutdown covers the shutdown race in #399: on shutdown
+// the reserve within-radius scans must stop as soon as the quit signal is
+// raised, rather than iterating the store while it is being closed, which
+// segfaults under pebble. Both the cheap and the combined scan must return
+// ErrDBQuit once quit is closed.
+func TestReserveScanStopsOnShutdown(t *testing.T) {
+	t.Parallel()
+
+	baseAddr := swarm.RandAddress(t)
+	st, err := diskStorer(t, dbTestOps(baseAddr, 100, nil, nil, time.Minute))()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	putter := st.ReservePutter()
+	for b := range 3 {
+		for range 10 {
+			ch := chunk.GenerateTestRandomChunkAt(t, baseAddr, b).
+				WithStamp(postagetesting.MustNewBatchStamp(postagetesting.MustNewBatch().ID))
+			if err := putter.Put(context.Background(), ch); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Sanity: before shutdown the combined scan runs and counts the chunks.
+	if n, err := st.CountWithinRadius(context.Background()); err != nil || n == 0 {
+		t.Fatalf("pre-shutdown combined scan: n=%d err=%v, want a count and no error", n, err)
+	}
+
+	// Raise the shutdown signal. Close shares this guard, so the builder's
+	// cleanup Close does not double-close the channel.
+	st.TriggerQuit()
+
+	if _, err := st.CountChunksWithinRadius(); !errors.Is(err, storer.ErrDBQuit) {
+		t.Fatalf("cheap scan after shutdown: got %v, want ErrDBQuit", err)
+	}
+	if _, err := st.CountWithinRadius(context.Background()); !errors.Is(err, storer.ErrDBQuit) {
+		t.Fatalf("combined scan after shutdown: got %v, want ErrDBQuit", err)
+	}
+}

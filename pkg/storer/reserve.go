@@ -98,6 +98,12 @@ func (db *DB) countChunksWithinRadius() (int, error) {
 
 	count := 0
 	err := db.reserve.IterateChunksItems(db.StorageRadius(), func(*reserve.ChunkBinItem) (bool, error) {
+		select {
+		case <-db.quit:
+			return true, ErrDBQuit
+		default:
+		}
+
 		count++
 		return false, nil
 	})
@@ -159,6 +165,15 @@ func (db *DB) countWithinRadius(ctx context.Context) (int, error) {
 	}
 
 	err := db.reserve.IterateChunksItems(0, func(ci *reserve.ChunkBinItem) (bool, error) {
+		select {
+		case <-db.quit:
+			// Stop before touching the store again: on shutdown the store is
+			// being closed, and iterating into a closed store segfaults under
+			// pebble. See issue #399.
+			return true, ErrDBQuit
+		default:
+		}
+
 		if ci.Bin >= radius {
 			count++
 		}
@@ -264,6 +279,9 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 			radius := db.reserve.Radius()
 			count, err := db.reserveWakeupScan(ctx, &lastSweep)
 			if err != nil {
+				if errors.Is(err, ErrDBQuit) {
+					return
+				}
 				db.logger.Warning("reserve worker count within radius", "error", err)
 				continue
 			}
