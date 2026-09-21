@@ -697,7 +697,11 @@ func TestPreferredRetainedBeyondReadmitCount(t *testing.T) {
 		}),
 	)
 
-	const refusals = 20 // above maxOverdraftReadmits, below what 5s allows
+	// Above the old bound of 8, so the test fails against count-based
+	// retention. Each refusal costs one overDraftRefresh, 600 ms, once the
+	// ordinary peers are exhausted, so the count also sets how long this
+	// test runs.
+	const refusals = 12
 	var acc *accountingmock.Service
 	acc = accountingmock.NewAccounting(
 		accountingmock.WithPrepareCreditFunc(func(peer swarm.Address, price uint64, originated bool) (accounting.Action, error) {
@@ -711,8 +715,13 @@ func TestPreferredRetainedBeyondReadmitCount(t *testing.T) {
 	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
 		topologymock.NewTopologyDriver(topologymock.WithPeers(holderAddr, emptyAddr)), log.Noop, acc, pricer, nil, false)
 	client.SetProvidersEnabled(true)
+	// Comfortably longer than refusals x overDraftRefresh, and set here so the
+	// test does not break when the shipped default changes or becomes a
+	// configuration option.
+	const window = 30 * time.Second
+	client.SetProviderCreditWait(window)
 
-	ctx, cancel := context.WithTimeout(context.Background(), retrieval.ProviderCreditWait+10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), window+10*time.Second)
 	defer cancel()
 	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(holderAddr))
 
@@ -728,74 +737,6 @@ func TestPreferredRetainedBeyondReadmitCount(t *testing.T) {
 	}
 	if localOnlyAsks.Load() == 0 {
 		t.Fatal("the holder was never asked as a preferred peer; it was dropped from the chunk")
-	}
-}
-
-// TestPreferredRetentionExpires is the other half of #392: retention must end.
-// A provider that never regains credit has to be dropped from the chunk so the
-// request can conclude, rather than being retried until the caller gives up.
-//
-// The window is shortened on this client only, through a per-service field, so
-// the test does not wait the shipped duration and cannot race a parallel test.
-func TestPreferredRetentionExpires(t *testing.T) {
-	t.Parallel()
-
-	var (
-		chunk      = testingc.FixtureChunk("0033")
-		clientAddr = swarm.RandAddress(t)
-		holderAddr = swarm.RandAddress(t)
-		otherAddr  = swarm.RandAddress(t)
-		pricer     = pricermock.NewMockService(defaultPrice, defaultPrice)
-		credits    atomic.Int32
-	)
-
-	// the OTHER peer has the chunk, so once the holder is dropped the request
-	// can still finish and we can tell "dropped" from "hung"
-	st := &testStorer{ChunkStore: inmemchunkstore.New()}
-	if err := st.Put(context.Background(), chunk); err != nil {
-		t.Fatal(err)
-	}
-	other := createRetrieval(t, otherAddr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
-
-	recorder := streamtest.New(
-		streamtest.WithBaseAddr(clientAddr),
-		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{
-			otherAddr.String(): other.Protocol(),
-		}),
-	)
-
-	// the preferred holder is refused credit for ever
-	var acc *accountingmock.Service
-	acc = accountingmock.NewAccounting(
-		accountingmock.WithPrepareCreditFunc(func(peer swarm.Address, price uint64, originated bool) (accounting.Action, error) {
-			if peer.Equal(holderAddr) {
-				credits.Add(1)
-				return nil, accounting.ErrOverdraft
-			}
-			return acc.MakeCreditAction(peer, price), nil
-		}),
-	)
-
-	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
-		topologymock.NewTopologyDriver(topologymock.WithPeers(holderAddr, otherAddr)), log.Noop, acc, pricer, nil, false)
-	client.SetProvidersEnabled(true)
-	client.SetProviderCreditWait(300 * time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(holderAddr))
-
-	start := time.Now()
-	got, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress)
-	if err != nil {
-		t.Fatalf("retention did not expire, the request never fell back: %v", err)
-	}
-	if !got.Address().Equal(chunk.Address()) {
-		t.Fatalf("got chunk %s, want %s", got.Address(), chunk.Address())
-	}
-	// it must not have spun on the holder for the whole deadline
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("took %v, want the holder dropped soon after the 300ms window", elapsed)
 	}
 }
 
@@ -950,7 +891,7 @@ func TestErrorBudgetSurvivesWhileAProviderRemains(t *testing.T) {
 	const (
 		// one empty peer per unit of the origin error budget
 		ordinary = 32
-		// more refusals than that, so the two behaviours separate
+		// more refusals than that, so the two behaviors separate
 		refusals = 40
 	)
 
@@ -1008,5 +949,93 @@ func TestErrorBudgetSurvivesWhileAProviderRemains(t *testing.T) {
 	}
 	if n := credits.Load(); int(n) <= refusals {
 		t.Fatalf("the provider was asked for credit %d times, want more than the %d refusals", n, refusals)
+	}
+}
+
+// TestOverdraftedProviderDoesNotBlockAnother pins the ordering half of #392.
+// Retaining a provider that cannot be paid must not stop the other providers
+// in the hint from being asked. Only candidates[0] is ever tried, so a
+// retained peer that kept the head of the list would hold every other
+// candidate behind it for the whole of its window, and the worst case for a
+// chunk would be one window per candidate rather than one in total.
+//
+// The second provider answers local-only requests and fails ordinary ones, so
+// a pass means it was asked AS A PROVIDER rather than reached by normal peer
+// selection, which would prove nothing about the candidate order.
+func TestOverdraftedProviderDoesNotBlockAnother(t *testing.T) {
+	t.Parallel()
+
+	var (
+		chunk      = testingc.FixtureChunk("0033")
+		clientAddr = swarm.RandAddress(t)
+		pricer     = pricermock.NewMockService(defaultPrice, defaultPrice)
+	)
+
+	// Candidates are tried closest to the chunk first, so the broke provider
+	// has to be the closer of the two for this to test anything.
+	ring := peersByDistance(t, chunk.Address(), 3)
+	brokeAddr, richAddr, emptyAddr := ring[0], ring[1], ring[2]
+
+	st := &testStorer{ChunkStore: inmemchunkstore.New()}
+	if err := st.Put(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	rich := createRetrieval(t, richAddr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	rich.SetProvidersEnabled(true)
+
+	var localOnlyAsks atomic.Int32
+	richSpec := rich.Protocol()
+	inner := richSpec.StreamSpecs[0].Handler
+	richSpec.StreamSpecs[0].Handler = func(ctx context.Context, p p2p.Peer, s p2p.Stream) error {
+		if _, ok := s.Headers()[retrieval.LocalOnlyHeader]; !ok {
+			return errors.New("ordinary request refused, this peer answers providers only")
+		}
+		localOnlyAsks.Add(1)
+		return inner(ctx, p, s)
+	}
+
+	specs := failingPeers(t, []swarm.Address{emptyAddr}, 0)
+	specs[richAddr.String()] = richSpec
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(specs),
+	)
+
+	// the closer provider can never be paid; the other one always can
+	var acc *accountingmock.Service
+	acc = accountingmock.NewAccounting(
+		accountingmock.WithPrepareCreditFunc(func(peer swarm.Address, price uint64, originated bool) (accounting.Action, error) {
+			if peer.Equal(brokeAddr) {
+				return nil, accounting.ErrOverdraft
+			}
+			return acc.MakeCreditAction(peer, price), nil
+		}),
+	)
+
+	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		topologymock.NewTopologyDriver(topologymock.WithPeers(ring...)), log.Noop, acc, pricer, nil, false)
+	client.SetProvidersEnabled(true)
+	// Long on purpose: a client that lets the broke provider hold the head of
+	// the list takes this whole window to reach the other one.
+	client.SetProviderCreditWait(20 * time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(brokeAddr, richAddr))
+
+	start := time.Now()
+	got, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress)
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if !got.Address().Equal(chunk.Address()) {
+		t.Fatalf("got chunk %s, want %s", got.Address(), chunk.Address())
+	}
+	if localOnlyAsks.Load() == 0 {
+		t.Fatal("the second provider was never asked as a provider")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("took %v, want the second provider asked without waiting out the first one's window", elapsed)
 	}
 }

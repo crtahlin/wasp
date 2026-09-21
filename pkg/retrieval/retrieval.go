@@ -327,10 +327,24 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 						// count of 8 could be spent in well under a second while
 						// the money was still in flight, and the peer was then
 						// dropped from a chunk nobody else held.
+						//
+						// The peer keeps its place among the candidates but
+						// goes behind the others, so a second provider that
+						// CAN be paid is asked on the next round instead of
+						// waiting out this peer's window. Holding the head of
+						// the list would make the worst case two windows
+						// rather than one, and would leave a funded provider
+						// holding the chunk unasked for the whole of the
+						// first. With one candidate this rotation changes
+						// nothing, which is the usual case for a hint.
+						candidates = append(candidates[1:], peer)
 						s.metrics.PreferredReadmits.Inc()
 					default:
-						// will not clear by itself, for example a peer that is
-						// not connected: drop it for this chunk
+						// Drop the peer for this chunk. Two cases reach here:
+						// an error that will not clear by itself, such as a
+						// peer that is not connected, and an overdraft whose
+						// retention window has passed, which after #392 is the
+						// ordinary way a provider is let go.
 						candidates = candidates[1:]
 						retry()
 						continue

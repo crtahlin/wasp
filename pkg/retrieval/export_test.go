@@ -82,13 +82,11 @@ func FirstOverdraft(since map[string]time.Time, peer swarm.Address, now time.Tim
 	return firstOverdraft(since, peer, now)
 }
 
-// ProviderCreditWait is how long a preferred peer is retained on a chunk after
-// it is first refused credit for it.
-const ProviderCreditWait = providerCreditWait
-
-// SetProviderCreditWait shortens the retention window so a test can reach its
-// expiry without waiting the shipped duration. Per service, so parallel tests
-// do not race.
+// SetProviderCreditWait sets the retention window on one service. Every test
+// that depends on the window sets it rather than reading the shipped constant,
+// so a change to that constant, or making it a configuration option, does not
+// silently change what the tests assert or how long they take. Per service, so
+// parallel tests do not race.
 func (s *Service) SetProviderCreditWait(d time.Duration) {
 	s.providerWait = d
 }
