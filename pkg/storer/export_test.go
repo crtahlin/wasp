@@ -126,3 +126,8 @@ func (db *DB) LocalIngestPublished() uint64 {
 
 	return db.localIngest.published
 }
+
+// TriggerQuit closes the shutdown signal without tearing the store down, so a
+// test can assert the reserve scans stop on shutdown. It shares Close's guard,
+// so a later Close does not double-close the channel. See issue #399.
+func (db *DB) TriggerQuit() { db.quitOnce.Do(func() { close(db.quit) }) }
