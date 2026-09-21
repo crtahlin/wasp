@@ -9,13 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethersphere/bee/v2/pkg/settlement/swap/chequebook"
 	erc20mock "github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20/mock"
 	storemock "github.com/ethersphere/bee/v2/pkg/statestore/mock"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
 	transactionmock "github.com/ethersphere/bee/v2/pkg/transaction/mock"
 )
@@ -509,5 +512,228 @@ func TestStateStoreKeys(t *testing.T) {
 	expected = "swap_chequebook_last_received_cheque__000000000000000000000000000000000000abcd"
 	if chequebook.LastReceivedChequeKey(address) != expected {
 		t.Fatalf("wrong last received cheque key. wanted %s, got %s", expected, chequebook.LastReceivedChequeKey(address))
+	}
+}
+
+// newConcurrentChequebook builds a chequebook whose chain calls answer in any
+// order and any number of times, which WithABICallSequence cannot do: a
+// concurrent test has no fixed call order.
+func newConcurrentChequebook(t *testing.T, store storage.StateStorer) chequebook.Service {
+	t.Helper()
+
+	address := common.HexToAddress("0xabcd")
+	balance := big.NewInt(1_000_000)
+
+	svc, err := chequebook.New(
+		transactionmock.New(
+			transactionmock.WithCallFunc(func(_ context.Context, req *transaction.TxRequest) ([]byte, error) {
+				method, err := chequebookABI.MethodById(req.Data[:4])
+				if err != nil {
+					return nil, err
+				}
+				switch method.Name {
+				case "balance":
+					return balance.FillBytes(make([]byte, 32)), nil
+				case "totalPaidOut":
+					return big.NewInt(0).FillBytes(make([]byte, 32)), nil
+				}
+				return nil, fmt.Errorf("unexpected call to %s", method.Name)
+			}),
+		),
+		address,
+		common.HexToAddress("0xfff"),
+		store,
+		&chequeSignerMock{sign: func(c *chequebook.Cheque) ([]byte, error) { return common.Hex2Bytes("0xffff"), nil }},
+		erc20mock.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return svc
+}
+
+// TestChequebookIssueConcurrentOneBeneficiary covers #317. Issue reads the last
+// cheque, adds the amount, sends and persists. Without a lock held across that,
+// two overlapping calls for one beneficiary read the same cumulative payout and
+// send the same next value, and the later write can persist a value lower than
+// what was sent. Every later cheque is then computed from it and repeats a
+// payout the receiver has already credited.
+//
+// Not reachable through any caller today: settle gates payments per peer and two
+// peers cannot share a beneficiary. This test is what stops that staying true by
+// accident.
+func TestChequebookIssueConcurrentOneBeneficiary(t *testing.T) {
+	t.Parallel()
+
+	const calls = 25
+
+	beneficiary := common.HexToAddress("0xdddd")
+
+	var mu sync.Mutex
+	sent := make([]*big.Int, 0, calls)
+
+	svc := newConcurrentChequebook(t, storemock.NewStateStore())
+
+	var wg sync.WaitGroup
+	for range calls {
+		wg.Go(func() {
+			_, err := svc.Issue(context.Background(), beneficiary, big.NewInt(10), func(c *chequebook.SignedCheque) error {
+				// The send sits between the read of the cumulative payout
+				// and the write of it, so a pause here is what makes the
+				// unlocked window wide enough to be entered twice.
+				//
+				// Without it the test is machine dependent rather than
+				// merely weaker: with the lock removed it caught nothing
+				// at GOMAXPROCS=1, and failed about 15 times in 25 on a
+				// 15-core machine. With the pause it catches the defect
+				// 50 times out of 50 in both settings.
+				time.Sleep(2 * time.Millisecond)
+
+				mu.Lock()
+				defer mu.Unlock()
+				sent = append(sent, new(big.Int).Set(c.CumulativePayout))
+				return nil
+			})
+			if err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+
+	if len(sent) != calls {
+		t.Fatalf("sent %d cheques, want %d", len(sent), calls)
+	}
+
+	// Every payout distinct, which is the property a receiver depends on: a
+	// cheque that does not increase is not credited.
+	seen := make(map[string]struct{}, len(sent))
+	for _, p := range sent {
+		if _, dup := seen[p.String()]; dup {
+			t.Fatalf("cumulative payout %s was sent twice", p)
+		}
+		seen[p.String()] = struct{}{}
+	}
+
+	// The highest sent must be what is persisted. A lower persisted value is
+	// the lasting damage: every later cheque would be computed from it.
+	highest := big.NewInt(0)
+	for _, p := range sent {
+		if p.Cmp(highest) > 0 {
+			highest = p
+		}
+	}
+	if want := big.NewInt(int64(calls) * 10); highest.Cmp(want) != 0 {
+		t.Fatalf("highest payout sent is %s, want %s", highest, want)
+	}
+
+	last, err := svc.LastCheque(beneficiary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last.CumulativePayout.Cmp(highest) != 0 {
+		t.Fatalf("persisted payout is %s, but %s was sent", last.CumulativePayout, highest)
+	}
+}
+
+// TestChequebookIssueDifferentBeneficiariesNotSerialized checks the other half
+// of #317: the lock is per beneficiary, not service-wide. A service-wide lock
+// would also pass the test above while queueing every cheque this node issues
+// behind every other.
+//
+// It discriminates by construction rather than by timing. Each send blocks
+// until all of them have arrived, so the test can only finish if every call is
+// inside its send at the same time. Under a service-wide lock the second call
+// never reaches its send and the test fails on its own deadline rather than on
+// a slow machine's.
+func TestChequebookIssueDifferentBeneficiariesNotSerialized(t *testing.T) {
+	t.Parallel()
+
+	const beneficiaries = 4
+
+	svc := newConcurrentChequebook(t, storemock.NewStateStore())
+
+	arrived := make(chan struct{}, beneficiaries)
+	release := make(chan struct{})
+
+	var wg sync.WaitGroup
+
+	// Released and awaited on every exit, including the t.Fatal below. Without
+	// this, a failing run leaves every goroutine blocked on release forever:
+	// harmless to the process, which exits anyway, but it leaves the failure
+	// looking like a hang and would hide a later t.Error behind a panic for
+	// logging after the test completed.
+	var once sync.Once
+	releaseAll := func() { once.Do(func() { close(release) }) }
+	defer func() {
+		releaseAll()
+		wg.Wait()
+	}()
+	for i := range beneficiaries {
+		wg.Go(func() {
+			b := common.BigToAddress(big.NewInt(int64(i) + 1))
+			_, err := svc.Issue(context.Background(), b, big.NewInt(10), func(*chequebook.SignedCheque) error {
+				arrived <- struct{}{}
+				<-release
+				return nil
+			})
+			if err != nil {
+				t.Error(err)
+			}
+		})
+	}
+
+	// All four must be inside their send before any is let go.
+	for range beneficiaries {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			t.Fatal("not every beneficiary reached its send, so the lock is serializing peers that should be independent")
+		}
+	}
+
+	releaseAll()
+}
+
+// TestChequebookIssueReleasesLockOnFailure covers the mutation the two tests
+// above do not: unlocking only on the success path instead of with defer.
+//
+// That is worse than the defect being fixed. A failed Issue would leave the
+// beneficiary's mutex held forever, so every later payment to that peer would
+// block, and a send failure is an ordinary event rather than a rare one.
+//
+// The existing error-path tests miss it because each builds a fresh service and
+// issues once, so nothing ever takes the lock a second time.
+func TestChequebookIssueReleasesLockOnFailure(t *testing.T) {
+	t.Parallel()
+
+	beneficiary := common.HexToAddress("0xdddd")
+	svc := newConcurrentChequebook(t, storemock.NewStateStore())
+
+	sendFailed := errors.New("send failed")
+	_, err := svc.Issue(context.Background(), beneficiary, big.NewInt(10), func(*chequebook.SignedCheque) error {
+		return sendFailed
+	})
+	if !errors.Is(err, sendFailed) {
+		t.Fatalf("first Issue returned %v, want the send failure", err)
+	}
+
+	// The second call must not block on a lock the first never gave back.
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.Issue(context.Background(), beneficiary, big.NewInt(10), func(*chequebook.SignedCheque) error {
+			return nil
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("second Issue returned %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second Issue for this beneficiary never returned: the lock was not released when the first one failed")
 	}
 }
