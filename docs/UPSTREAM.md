@@ -79,12 +79,12 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#301](https://github.com/crtahlin/wasp/issues/301) | chequebook: read the chequebook issuer once instead of on every cheque | done, neutral | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done, neutral (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#316](https://github.com/crtahlin/wasp/issues/316) | accounting: refreshDue is computed without the one second cap in settle, which can suppress cheques entirely | open | - | - |
-| [#333](https://github.com/crtahlin/wasp/issues/333) | accounting: Connect rewinds the threshold-growth checkpoint but not the counter it is compared against | open | - | - |
-| [#337](https://github.com/crtahlin/wasp/issues/337) | file: hashtrie.Sum formats the dispersed-replica failure with %s against err.Error() rather than %w, so errors.Is cannot see the cause | open | - | - |
+| [#333](https://github.com/crtahlin/wasp/issues/333) | accounting: Connect rewinds the threshold-growth checkpoint but not the counter it is compared against | done | `fix/333-threshold-growth-reconnect` | [`84897232`](https://github.com/crtahlin/wasp/commit/84897232) |
+| [#337](https://github.com/crtahlin/wasp/issues/337) | file: hashtrie.Sum formats the dispersed-replica failure with %s against err.Error() rather than %w, so errors.Is cannot see the cause | done | `fix/337-replica-error-chain` | [`e2e2c623`](https://github.com/crtahlin/wasp/commit/e2e2c623) |
 | [#359](https://github.com/crtahlin/wasp/issues/359) | accounting: the refresh allowance is granted as a step, and nearly all refusals fall in the discarded window | open | - | - |
-| [#366](https://github.com/crtahlin/wasp/issues/366) | api: a malformed Swarm-Index-Document header returns 500 instead of 400 | open | - | - |
+| [#366](https://github.com/crtahlin/wasp/issues/366) | api: a malformed Swarm-Index-Document header returns 500 instead of 400 | done | `fix/366-index-document-status` | [`7d072d97`](https://github.com/crtahlin/wasp/commit/7d072d97) |
 | [#382](https://github.com/crtahlin/wasp/issues/382) | p2p: already-connected is decided per address, so a connect over an open connection runs a second handshake and reports as a dial | open | - | - |
-| [#387](https://github.com/crtahlin/wasp/issues/387) | postage: TestCrashRecovery assumes two random addresses land in different buckets, so it fails about 1 run in 256 | open | - | - |
+| [#387](https://github.com/crtahlin/wasp/issues/387) | postage: TestCrashRecovery assumes two random addresses land in different buckets, so it fails about 1 run in 256 | done | `fix/387-crash-recovery-buckets` | [`3a83199c`](https://github.com/crtahlin/wasp/commit/3a83199c) |
 | [#399](https://github.com/crtahlin/wasp/issues/399) | Shutdown race: reserve worker iterates the store while it is being closed, SIGSEGV under pebble | done | `fix/399-shutdown-race` | [`dc9f69c6`](https://github.com/crtahlin/wasp/commit/dc9f69c6) |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
