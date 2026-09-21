@@ -75,6 +75,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#173](https://github.com/crtahlin/wasp/issues/173) | The store read benchmarks charge harness overhead to the engine | done | `fix/173-store-read-benchmark-overhead` | [`fcb110f0`](https://github.com/crtahlin/wasp/commit/fcb110f0) |
 | [#176](https://github.com/crtahlin/wasp/issues/176) | A write-stalled index store has no in-process recovery | done | `fix/176-write-pause-log-line` | [`150d644c`](https://github.com/crtahlin/wasp/commit/150d644c) |
 | [#282](https://github.com/crtahlin/wasp/issues/282) | Research: can a light node serve its cache to offload retrieval bandwidth from full nodes? | open | - | - |
+| [#291](https://github.com/crtahlin/wasp/issues/291) | Kademlia pruning can disconnect a static peer it is meant to protect | open | - | - |
 | [#300](https://github.com/crtahlin/wasp/issues/300) | swap: three chain calls per received cheque cap how fast one peer can serve another | open | - | - |
 | [#301](https://github.com/crtahlin/wasp/issues/301) | chequebook: read the chequebook issuer once instead of on every cheque | done, neutral | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done, neutral (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
