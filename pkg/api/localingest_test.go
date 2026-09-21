@@ -263,11 +263,11 @@ func TestLocalIngestLimitMidStream(t *testing.T) {
 // exists for, and the only one that distinguishes it from errors.Is.
 //
 // The dispersed root replicas are stored inside hashtrie.Sum, after the whole
-// body has been read, and Sum formats that failure with %s against err.Error()
-// rather than %w (pkg/file/pipeline/hashtrie/hashtrie.go:267). The chain is
-// discarded, so errors.Is returns false and a handler relying on it would
-// answer 500. The limit is calibrated here so that it is crossed by exactly
-// that put. See issue #337.
+// body has been read. Sum once formatted that failure with %s against
+// err.Error() rather than %w, so the chain was discarded and errors.Is returned
+// false; issue #337 has since fixed that line. The out-of-band report is kept
+// because it does not depend on any single wrapping site staying correct. The
+// limit is calibrated here so that it is crossed by exactly that put.
 func TestLocalIngestLimitCrossedInsideSum(t *testing.T) {
 	t.Parallel()
 

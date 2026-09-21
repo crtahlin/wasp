@@ -58,6 +58,26 @@ return nil, fmt.Errorf("hashtrie: cannot put dispersed replica: %w", err)
 Note the added colon before the verb, which is the separator the rest of the codebase
 uses and which the original line is missing.
 
+## What this does change, found by review
+
+An earlier version of this spec said nothing an operator can observe changes. **That was
+wrong**, and the same claim was in the pull request.
+
+Making the cause reachable makes it reachable for every `errors.Is` upstream of the call,
+and three upload handlers test for exactly one cause that can arrive this way:
+`pkg/api/dirs.go`, `pkg/api/bzz.go` and `pkg/api/bytes.go` each answer 402 Payment
+Required on `postage.ErrBucketFull`. The pipeline passes the same putter as the replica
+putter (`pkg/file/pipeline/builder/builder.go:38`), and in the API that putter stamps
+every chunk it is given, so a bucket filling on the dispersed-replica put is a real
+condition rather than a hypothetical one.
+
+Before this change those handlers could not see it and answered **500**. After it they
+answer **402**, which is the correct answer and the one they already give when a bucket
+fills earlier in the same upload. `docs/DIFFERENCES.md` gains a row for this, per rule 13.
+
+No other error changes status. The empty-directory, bad-tar-header and
+malformed-index-document cases cannot appear in a putter's error chain.
+
 ## What this does not do
 
 It does not change what `Sum` returns to a caller that only prints the error: the text is
@@ -71,8 +91,11 @@ how many replicas are attempted. Nothing on the wire is involved.
   `Sum` returns. That test fails on the unmodified line and passes after it, which is
   the whole of the claim.
 - The test must use a level above `NONE`, because `replicas.putter.Put` returns nil
-  immediately at level 0 and the failing line is never reached. A test written at the
-  default level would pass either way and prove nothing.
+  immediately at level 0 and the failing line is never reached. **Only `NONE` is
+  vacuous**, and `NONE` is the Go zero value rather than a package default: an earlier
+  version of this spec said "a test written at the default level would pass either way",
+  which is wrong, since `DefaultUploadLevel` is `MEDIUM` and `DefaultDownloadLevel` is
+  `PARANOID` and the test works at both.
 - The existing `hashtrie` tests keep passing, so no error that previously reached a
   caller stops reaching it.
 - A mutation: putting `%s` and `err.Error()` back must fail the new test.
