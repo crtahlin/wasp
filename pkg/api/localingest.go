@@ -234,8 +234,8 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 			// A body that stops mid-archive, which includes anything shorter
 			// than one 512-byte tar header block. archive/tar reports the two
 			// cases differently and both are the caller's fault, so both are
-			// 400. The stamped route answers 500 for this one; it is unmodified
-			// upstream code and out of scope here.
+			// 400. The stamped route answered 500 for this one until #409,
+			// which gave it the same case; the two routes now agree.
 			logger.Debug("local ingest: archive ends early", "error", err)
 			jsonhttp.BadRequest(ow, "archive ends before it is complete")
 			return
