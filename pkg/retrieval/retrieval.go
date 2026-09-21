@@ -160,10 +160,6 @@ const (
 	skiplistDur          = time.Minute
 	originSuffix         = "_origin"
 	maxOriginErrors      = 32
-	// maxOverdraftReadmits is how many times one preferred peer may be kept for
-	// a later attempt at the same chunk after being refused credit. Bounded so
-	// a peer that never regains credit cannot livelock the request.
-	maxOverdraftReadmits = 8
 	// providerCreditWait is how long a preferred peer stays a candidate for a
 	// chunk after it is first refused credit for it. See issue #392.
 	//
@@ -241,10 +237,6 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		if len(candidates) > 0 {
 			s.metrics.PreferredCandidatesSelected.Inc()
 		}
-		// how many times each preferred peer has been kept after an overdraft,
-		// bounded by maxOverdraftReadmits so a peer that never regains credit
-		// cannot hold the request open (#324)
-		readmits := make(map[string]int, len(candidates))
 		var (
 			preferredTimer  *time.Timer
 			preferredTimerC <-chan time.Time
@@ -335,7 +327,6 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 						// count of 8 could be spent in well under a second while
 						// the money was still in flight, and the peer was then
 						// dropped from a chunk nobody else held.
-						readmits[peer.ByteString()]++
 						s.metrics.PreferredReadmits.Inc()
 					default:
 						// will not clear by itself, for example a peer that is
