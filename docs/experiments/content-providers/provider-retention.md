@@ -72,6 +72,28 @@ Proposed value **5 s**, with the spec required to justify it against the
 measured cadence rather than pick it. It bounds the added delay per chunk in the
 worst case, and the request context continues to bound the download.
 
+**Corrected during implementation: the value shipped is 30 s, not 5 s.** Five
+seconds does not survive the justification this spec asked for. A refused
+candidate is retried at the `overDraftRefresh` cadence of 600 ms, so 5 s buys
+about eight retries, which is the same eight the count-based bound already
+allowed. The change would then have been a rewrite that altered nothing.
+Thirty seconds covers several settlement cycles at the measured cadence of one
+refreshment per second and one cheque per 1.2 s. The cost of the larger value
+is stated with it in `docs/DIFFERENCES.md`, and it is close to free in the
+common case because an overdraft falls through to ordinary selection at once
+and retention never delays it.
+
+**Also corrected: a retained candidate does not keep the head of the list.**
+Only `candidates[0]` is ever tried, so a retained provider that stayed at the
+head would hold every other provider in the hint behind it for its whole
+window. Two consequences, neither of which the spec had foreseen: the worst
+case per chunk would be one window per candidate rather than one in total, and
+a second provider that **can** be paid and does hold the chunk would go unasked
+for the length of the first one's window, which defeats the point of naming
+more than one. A retained peer therefore goes behind the others rather than
+staying in front of them. With a single provider in the hint, the usual case,
+this changes nothing.
+
 **3. The error budget is not spent on a chunk that still has a provider.**
 `errorsLeft` exists to end a hopeless search among ordinary peers. While a
 verified provider is retained for the chunk the search is not hopeless, so
@@ -94,6 +116,25 @@ chunk is dropped at once rather than retained for the full wait.
 
 This says nothing about the network, only about one peer, which is its correct
 scope and is precisely where the withdrawn design overreached.
+
+**Not implemented, because the behaviour it asks for already holds.** The
+premise above is wrong about what retention covers. Retention applies only to
+an **overdraft**, which is a statement about this node's funds. A provider that
+answers at all has already had its candidate consumed: `retrievePreferred`
+returns a nil error once credit is reserved, and the loop does
+`candidates = candidates[1:]` on that branch before the answer comes back. The
+miss then arrives as a result with `preferred` set, which deliberately does not
+spend the error budget and does not skip the peer for other chunks, and the
+candidate is already gone. So a provider that says it does not hold the chunk
+is dropped at once today, with or without a recoverable error.
+
+Carrying the error back recoverably is still worth doing for a different
+reason, which is that a miss and a timeout are indistinguishable in the logs
+and in `preferredResult`, where both feed the same demotion counter. That is an
+observability change rather than a retention change, and it belongs in its own
+issue with its own measurement. **The consequence for this experiment is that
+arm 4 measures existing behaviour rather than anything this change introduces**,
+and is kept only as a guard that the change did not break it.
 
 ## Protocol impact
 
