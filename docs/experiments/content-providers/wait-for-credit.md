@@ -1,5 +1,20 @@
 # Waiting for a provider's credit instead of asking peers that do not have the chunk
 
+> **WITHDRAWN, 2026-09-21. Do not build on this document.** The design inferred
+> from a single failed ordinary retrieval that the network did not hold a chunk.
+> Nothing on the wire supports that: a failed retrieval arrives as an opaque
+> string covering timeouts, dropped streams and the forwarder's own accounting
+> refusal alike. The implementation could also livelock, because once the flag
+> was set and a candidate remained, ordinary selection became unreachable and
+> the error budget could not decrement.
+>
+> The truncation it was written for was mostly caused by the requester's
+> chequebook being out of funds, so every cheque failed and settlement fell back
+> to the time allowance alone. Funding it took the same 50 MB download from
+> 17m29s to 16.8 s on the same build.
+>
+> The residue is specified in [provider-retention.md](provider-retention.md).
+
 Issue: [#392](https://github.com/crtahlin/wasp/issues/392). Type: fix.
 
 ## Problem
