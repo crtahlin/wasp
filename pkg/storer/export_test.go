@@ -131,3 +131,10 @@ func (db *DB) LocalIngestPublished() uint64 {
 // test can assert the reserve scans stop on shutdown. It shares Close's guard,
 // so a later Close does not double-close the channel. See issue #399.
 func (db *DB) TriggerQuit() { db.quitOnce.Do(func() { close(db.quit) }) }
+
+// EvictExpiredBatches and Unreserve expose the two reserve-worker operations
+// that #407 gave a shutdown exit, so a test can run them directly rather than
+// through the worker's triggers.
+func (db *DB) EvictExpiredBatches(ctx context.Context) error { return db.evictExpiredBatches(ctx) }
+
+func (db *DB) Unreserve(ctx context.Context) error { return db.unreserve(ctx) }

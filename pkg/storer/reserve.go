@@ -258,6 +258,11 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 
 			err := db.evictExpiredBatches(ctx)
 			if err != nil {
+				// A shutdown is not a fault, and the worker is stopping
+				// anyway, so it returns rather than warning (#407).
+				if errors.Is(err, ErrDBQuit) {
+					return
+				}
 				db.logger.Warning("reserve worker evict expired batches", "error", err)
 			}
 
@@ -271,6 +276,9 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 
 			db.metrics.OverCapTriggerCount.Inc()
 			if err := db.unreserve(ctx); err != nil {
+				if errors.Is(err, ErrDBQuit) {
+					return
+				}
 				db.logger.Warning("reserve worker unreserve", "error", err)
 			}
 
@@ -305,6 +313,17 @@ func (db *DB) evictExpiredBatches(ctx context.Context) error {
 	}
 
 	for _, batchID := range batches {
+		// wasp #407: stop between batches on shutdown. Close waits five
+		// seconds for this worker and then closes the store anyway, so a
+		// long evict that keeps running is the read-after-close #399 fixed
+		// for the scan. A batch boundary is a safe point: the batch just
+		// evicted is committed and the next has not started.
+		select {
+		case <-db.quit:
+			return ErrDBQuit
+		default:
+		}
+
 		evicted, err := db.evictBatch(ctx, batchID, math.MaxInt, swarm.MaxBins)
 		if err != nil {
 			return err
@@ -501,6 +520,11 @@ func (db *DB) unreserve(ctx context.Context) (err error) {
 		for _, b := range batches {
 
 			select {
+			case <-db.quit:
+				// wasp #407: same reason as evictExpiredBatches. Returning
+				// the error rather than nil so the caller can tell a
+				// shutdown from an ordinary finish.
+				return ErrDBQuit
 			case <-batchExpiry:
 				db.logger.Debug("stopping unreserve, received batch expiration signal")
 				return nil

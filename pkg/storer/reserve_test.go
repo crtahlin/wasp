@@ -1110,3 +1110,119 @@ func TestReserveScanStopsOnShutdown(t *testing.T) {
 		t.Fatalf("combined scan after shutdown: got %v, want ErrDBQuit", err)
 	}
 }
+
+// TestReserveOperationsStopOnQuit covers #407. Close waits five seconds for the
+// reserve worker and then closes the store whether or not the worker stopped,
+// so an evict or an unreserve that keeps running is the read-after-close #399
+// fixed for the within-radius scan. Both now return ErrDBQuit promptly.
+//
+// The third case is the guard. Without it a fix that made the loops exit
+// unconditionally would pass the first two and quietly stop the node ever
+// evicting anything.
+func TestReserveOperationsStopOnQuit(t *testing.T) {
+	t.Parallel()
+
+	// makeStorer builds a storer holding one expired batch and enough chunks
+	// for both operations to have work to do.
+	makeStorer := func(t *testing.T) (*storer.DB, *postage.Batch) {
+		t.Helper()
+
+		baseAddr := swarm.RandAddress(t)
+		bs := batchstore.New()
+		opts := dbTestOps(baseAddr, 100, bs, nil, time.Minute)
+		opts.ReserveCapacity = 10
+
+		db, err := storer.New(context.Background(), "", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		batch := postagetesting.MustNewBatch()
+		if err := bs.Save(batch); err != nil {
+			t.Fatal(err)
+		}
+
+		putter := db.ReservePutter()
+		for po := range 4 {
+			for range 5 {
+				ch := chunk.GenerateTestRandomChunkAt(t, baseAddr, po).
+					WithStamp(postagetesting.MustNewBatchStamp(batch.ID))
+				if err := putter.Put(context.Background(), ch); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return db, batch
+	}
+
+	t.Run("evict expired batches stops", func(t *testing.T) {
+		t.Parallel()
+
+		db, batch := makeStorer(t)
+		if err := db.EvictBatch(context.Background(), batch.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		db.TriggerQuit()
+
+		if err := db.EvictExpiredBatches(context.Background()); !errors.Is(err, storer.ErrDBQuit) {
+			t.Fatalf("evictExpiredBatches returned %v after quit, want ErrDBQuit", err)
+		}
+	})
+
+	t.Run("unreserve stops", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := makeStorer(t)
+		db.TriggerQuit()
+
+		if err := db.Unreserve(context.Background()); !errors.Is(err, storer.ErrDBQuit) {
+			t.Fatalf("unreserve returned %v after quit, want ErrDBQuit", err)
+		}
+	})
+
+	// The two guards below are separate storers on purpose. Running them
+	// against one, with the evict first, made the unreserve guard vacuous:
+	// the evict empties the reserve, so EvictionTarget is zero or less and
+	// unreserve returns before reaching the loop the quit check is in. A
+	// mutation making unreserve exit unconditionally passed it.
+	t.Run("evict still evicts when not quitting", func(t *testing.T) {
+		t.Parallel()
+
+		db, batch := makeStorer(t)
+		if err := db.EvictBatch(context.Background(), batch.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := db.EvictExpiredBatches(context.Background()); err != nil {
+			t.Fatalf("evictExpiredBatches returned %v with no quit signal", err)
+		}
+
+		if size := db.ReserveSize(); size != 0 {
+			t.Fatalf("reserve still holds %d chunks after evicting the only batch", size)
+		}
+	})
+
+	t.Run("unreserve still evicts when not quitting", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := makeStorer(t)
+
+		// The storer holds 20 chunks against a capacity of 10, so unreserve
+		// has a target and reaches the loop. Nothing is expired here, so the
+		// evict path is not what does the work.
+		before := db.ReserveSize()
+		if before <= 10 {
+			t.Fatalf("reserve holds %d chunks, so it is not over its capacity of 10 and this guards nothing", before)
+		}
+
+		if err := db.Unreserve(context.Background()); err != nil {
+			t.Fatalf("unreserve returned %v with no quit signal", err)
+		}
+
+		if after := db.ReserveSize(); after >= before {
+			t.Fatalf("reserve held %d chunks and holds %d after unreserving: nothing was evicted", before, after)
+		}
+	})
+}
