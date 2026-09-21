@@ -6,9 +6,16 @@ Build: `0.1.3-359-54c926a5` on the requester, provider unchanged.
 
 **The mechanism works exactly as designed, at the predicted values, and the
 safety hazard did not occur in fourteen downloads. It delivered no additional
-bytes, because the truncation the experiment was designed around no longer
-happens on this build.** The acceptance table cannot be applied as written, for
-the reason given under "The control condition did not reproduce".
+bytes, because the truncation the experiment was designed around did not occur
+in these runs.** The acceptance table cannot be applied as written, for the
+reason given under "The control condition did not reproduce".
+
+That truncation has since been traced to
+[#398](https://github.com/crtahlin/wasp/issues/398), retrieval waiting for the
+network storage radius after a restart, and fixed in `6c41c66e`. It is not
+that the build stopped truncating: the same build truncates 0 of 3 at 50 MB
+when the download starts early enough after a restart. See "Answered
+afterwards, by #398" below.
 
 ## What ran
 
@@ -119,14 +126,51 @@ discriminate between the arms. **No outcome in the table describes what
 happened**, which is that everything the change targets improved while the
 user-visible result was already fine.
 
-Why the control no longer truncates is **not established here**. Several
-changes have landed since that measurement, including the readmit path in
+Why the control no longer truncates was **not established here**, and was
+recorded as an open question rather than attributed to the readmit path in
 [#324](https://github.com/crtahlin/wasp/issues/324), the preferred set reaching
 erasure-coded downloads in
-[#299](https://github.com/crtahlin/wasp/issues/299), and this measurement uses
-freshly uploaded content rather than the content that baseline used. Attributing
-it to any of those would be the same unsupported causal reading this repository
-has had to retract twice already. What is recorded is that the baseline moved.
+[#299](https://github.com/crtahlin/wasp/issues/299), or the freshly uploaded
+content, any of which would have been the same unsupported causal reading this
+repository has had to retract twice already.
+
+### Answered afterwards, by #398
+
+The truncation the acceptance table is built on was
+[#398](https://github.com/crtahlin/wasp/issues/398): retrieval waited for the
+network storage radius **inside its per-chunk loop**, and the lookup it was
+given blocks until that radius is first learned from peers. So for the first
+seconds to minutes after a restart, every chunk of every download stopped
+there, and because `joiner.ReadAt` reads a whole unit or none of it the caller
+got HTTP 200 with a short body. Fixed in `6c41c66e`.
+
+That is the same condition this measurement runs in. **Every run here begins
+with a requester restart**, as "What ran" above says, and the build used,
+`0.1.3-359-54c926a5`, is byte for byte the control build of the #398
+experiment, which truncated **0 of 3** at 50 MB with 210, 328 and 330
+goroutines parked in that lookup.
+
+Whether a post-restart download truncates therefore depends on whether it
+starts before or after the radius arrives, which is why the same build gives
+1 of 3 in one session and 3 of 3 in another. That is a property of when the
+download starts, not of the accrual mode, and not of #324, #299 or the
+content.
+
+**What is inference rather than measurement here**: this run recorded neither
+the network radius nor the goroutines waiting on it, because neither was known
+to matter when it was made. So the claim that its runs landed outside the
+window is read from a shared build and a known mechanism, not measured on
+these runs. Confirming it would mean re-running with `bee_salud_network_radius`
+and the waiter count recorded, which is what the #398 harness now does. The
+reconnect and link verification this harness performs before every download is
+the plausible reason its runs cleared the window.
+
+**This does not change any result below or the verdict.** Everything this
+experiment measures, refusals, overdraft limits and the safety gate, is
+counted per credit decision and is unaffected by when a download starts. What
+it changes is that completion never discriminated between the arms for a
+reason now known, so the acceptance table was built on a control that this
+bench can only reproduce by accident of timing.
 
 ## Disposition
 
