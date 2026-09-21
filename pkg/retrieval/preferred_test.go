@@ -1039,3 +1039,64 @@ func TestOverdraftedProviderDoesNotBlockAnother(t *testing.T) {
 		t.Fatalf("took %v, want the second provider asked without waiting out the first one's window", elapsed)
 	}
 }
+
+// TestRadiusErrorDoesNotStopRetrieval pins the contract the #398 fix rests on.
+// The radius lookup is used at one place in the per-chunk loop, to decide
+// whether to fan a request out across the neighbourhood, and that decision is
+// guarded on the lookup NOT returning an error. The fix at the node makes the
+// lookup return an error while the network storage radius is still unknown,
+// which is only safe while this holds.
+//
+// A lookup that always errors stands for the worst case, a node that never
+// learns a radius at all.
+func TestRadiusErrorDoesNotStopRetrieval(t *testing.T) {
+	t.Parallel()
+
+	var (
+		chunk      = testingc.FixtureChunk("0025")
+		clientAddr = swarm.RandAddress(t)
+		serverAddr = swarm.RandAddress(t)
+		pricer     = pricermock.NewMockService(defaultPrice, defaultPrice)
+		radiusErr  = errors.New("network storage radius not known yet")
+		asked      atomic.Int32
+	)
+
+	st := &testStorer{ChunkStore: inmemchunkstore.New()}
+	if err := st.Put(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	server := createRetrieval(t, serverAddr, st, nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+
+	spec := server.Protocol()
+	inner := spec.StreamSpecs[0].Handler
+	spec.StreamSpecs[0].Handler = func(ctx context.Context, p p2p.Peer, s p2p.Stream) error {
+		asked.Add(1)
+		return inner(ctx, p, s)
+	}
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(map[string]p2p.ProtocolSpec{serverAddr.String(): spec}),
+	)
+
+	// the radius is never available, so the fan-out decision can never be made
+	radiusF := func() (uint8, error) { return 0, radiusErr }
+	client := retrieval.New(clientAddr, radiusF, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		topologymock.NewTopologyDriver(topologymock.WithPeers(serverAddr)), log.Noop,
+		accountingmock.NewAccounting(), pricer, nil, false)
+	t.Cleanup(func() { client.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	got, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress)
+	if err != nil {
+		t.Fatalf("a radius lookup that errors stopped the retrieval: %v", err)
+	}
+	if !bytes.Equal(got.Data(), chunk.Data()) {
+		t.Fatalf("got data %x, want %x", got.Data(), chunk.Data())
+	}
+	if asked.Load() == 0 {
+		t.Fatal("the peer holding the chunk was never asked")
+	}
+}
