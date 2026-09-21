@@ -24,6 +24,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/file/pipeline/mock"
 	"github.com/ethersphere/bee/v2/pkg/file/pipeline/store"
 	"github.com/ethersphere/bee/v2/pkg/file/redundancy"
+	"github.com/ethersphere/bee/v2/pkg/postage"
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storage/inmemchunkstore"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -373,5 +374,87 @@ func TestRedundancy(t *testing.T) {
 				t.Fatalf("unexpected number of replicas: want %d. Got: %d", tc.level.GetReplicaCount(), int(replicaChunkCounter.replicaCount.Load()))
 			}
 		})
+	}
+}
+
+// errReplicaPut stands for a condition a caller's own putter enforces. The test
+// asks whether it is still reachable in what Sum returns.
+var errReplicaPut = errors.New("hashtrie_test: replica put refused")
+
+// refusingPutter refuses every put with a given error, which is what the
+// dispersed-replica write sees when the putter supplied by a caller rejects a
+// chunk.
+type refusingPutter struct{ err error }
+
+func (p refusingPutter) Put(context.Context, swarm.Chunk) error { return p.err }
+
+// TestSumKeepsReplicaPutError checks that Sum leaves the replica putter's error
+// reachable with errors.Is. Wrapping it with %s against err.Error() copied the
+// text and dropped the value, so a caller supplying its own putter could not
+// tell its own condition from a genuine storage failure (#337).
+func TestSumKeepsReplicaPutError(t *testing.T) {
+	t.Parallel()
+
+	// postage.ErrBucketFull is not decoration. It is the one cause that reaches
+	// here in production and is tested for by name: pkg/api/dirs.go, bzz.go and
+	// bytes.go each answer 402 Payment Required on it and 500 otherwise, and the
+	// pipeline hands the same stamping putter to the replica write
+	// (pkg/file/pipeline/builder/builder.go:38). So this subtest is what stands
+	// behind the claim that those routes move from 500 to 402.
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"a caller's own sentinel", errReplicaPut},
+		{"a full postage bucket", postage.ErrBucketFull},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertSumKeeps(t, tc.err)
+		})
+	}
+}
+
+func assertSumKeeps(t *testing.T, refuseWith error) {
+	t.Helper()
+
+	ch, err := cac.New(make([]byte, swarm.ChunkSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chData := ch.Data()
+	chSpan := chData[:swarm.SpanSize]
+	chAddr := ch.Address().Bytes()
+
+	// The level must be above NONE, which is the Go zero value. At NONE
+	// replicas.putter.Put returns nil at once, the failing line is never
+	// reached, and this test would pass whether or not Sum wraps correctly.
+	//
+	// Only NONE is vacuous. Both package defaults are above it, MEDIUM for
+	// upload and PARANOID for download, so the test works at either.
+	_, ht := newErasureHashTrieWriter(
+		ctx, inmemchunkstore.New(), redundancy.INSANE, false,
+		mock.NewChainWriter(), mock.NewChainWriter(), refusingPutter{err: refuseWith},
+	)
+
+	// 98 writes is what TestRedundancy uses for this level unencrypted: 97
+	// chunk references fill one chunk, plus the carrier chunk. One write is
+	// enough to reach the failing line, since a root exists at any size, so
+	// this is not a requirement. It is here to drive the trie through a level
+	// wrap and parity generation, which is the shape a real erasure-coded
+	// upload has when it reaches the replica put.
+	for range 98 {
+		a := &pipeline.PipeWriteArgs{Data: chData, Span: chSpan, Ref: chAddr}
+		if err := ht.ChainWrite(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err = ht.Sum()
+	if err == nil {
+		t.Fatal("expected Sum to fail when the replica put is refused, got nil")
+	}
+	if !errors.Is(err, refuseWith) {
+		t.Fatalf("errors.Is did not find %v in: %v", refuseWith, err)
 	}
 }

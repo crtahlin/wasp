@@ -238,16 +238,19 @@ The counter therefore wraps the putter, and three things follow:
   effort: an error from the wrapper propagates synchronously back out of the
   pipeline, and the replicas putter joins errors rather than swallowing them.
 - **It must report the condition out of band, not only as a wrapped error.**
-  A sentinel tested with `errors.Is` is not enough, because `hashtrie.Sum`
-  formats the dispersed-replica failure with `%s` against `err.Error()` rather
-  than `%w` (`pkg/file/pipeline/hashtrie/hashtrie.go:267`), so the chain is
-  discarded and `errors.Is` returns false. That put happens inside `Sum`, after
-  the whole body has been read, which is exactly where a large ingest crosses
-  its limit. So the handler asks the wrapper directly whether the limit was
-  exceeded when the pipeline returns any error, and that is robust against this
-  formatting and against any future wrapping. Filed separately as
-  [#337](https://github.com/crtahlin/wasp/issues/337), tagged
-  `affects-upstream`.
+  A sentinel tested with `errors.Is` was not enough, because `hashtrie.Sum`
+  formatted the dispersed-replica failure with `%s` against `err.Error()` rather
+  than `%w`, so the chain was discarded and `errors.Is` returned false. That put
+  happens inside `Sum`, after the whole body has been read, which is exactly
+  where a large ingest crosses its limit. So the handler asks the wrapper
+  directly whether the limit was exceeded when the pipeline returns any error,
+  and that is robust against this formatting and against any future wrapping.
+
+  **Since corrected.** [#337](https://github.com/crtahlin/wasp/issues/337),
+  tagged `affects-upstream`, changed that line to `%w`, so `errors.Is` would now
+  find a sentinel through it. The out-of-band report is kept anyway, for the
+  reason it was chosen: it does not depend on any single wrapping site staying
+  correct.
 
 **(d) The redundancy default is the upload one.** `pkg/api/bytes.go:48` uses
 `redundancy.DefaultUploadLevel`, which is `MEDIUM`; `pkg/api/pin.go:44` uses

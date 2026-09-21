@@ -195,11 +195,14 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 		reference, err = p(r.Context(), r.Body)
 	}
 	if err != nil {
-		// The limit is reported out of band rather than by errors.Is,
-		// because hashtrie.Sum formats the dispersed-replica failure with
-		// %s against err.Error() and so discards the chain. That put
-		// happens after the whole body has been read, which is exactly
-		// where a large ingest crosses its limit. See issue #337.
+		// The limit is reported out of band rather than by errors.Is. That
+		// was once forced: hashtrie.Sum formatted the dispersed-replica
+		// failure with %s against err.Error(), discarding the chain. Issue
+		// #337 fixed that line to use %w, so errors.Is would work here now.
+		// The out-of-band report is kept because it does not depend on any
+		// single wrapping site staying correct, and the put in question
+		// happens after the whole body has been read, which is exactly where
+		// a large ingest crosses its limit.
 		if counted.exceededLimit() {
 			// Read the usage again rather than reusing the figure from
 			// before the body: another ingest may have committed since.
