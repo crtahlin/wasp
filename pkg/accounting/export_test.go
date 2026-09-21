@@ -35,6 +35,17 @@ func (a *Accounting) RefreshDueForTest(threshold *big.Int, refreshTimestampMilli
 	}, time.UnixMilli(nowMillis))
 }
 
+// SetShadowReservedBalanceForTest sets the amount a peer is expected to be
+// debited soon, which settle subtracts before deciding a payment. It is
+// otherwise written only by settle itself when it queues one, so a test that
+// needs it non-zero going in has no other way to arrange it. See wasp #316.
+func (a *Accounting) SetShadowReservedBalanceForTest(peer swarm.Address, amount *big.Int) {
+	accountingPeer := a.getAccountingPeer(peer)
+	accountingPeer.lock.Lock()
+	defer accountingPeer.lock.Unlock()
+	accountingPeer.shadowReservedBalance.Set(amount)
+}
+
 // SetRefreshTimestampForTest sets when a peer was last refreshed, which is
 // otherwise only written by a completed refreshment.
 func (a *Accounting) SetRefreshTimestampForTest(peer swarm.Address, millis int64) {
@@ -49,4 +60,10 @@ func (a *Accounting) SafeAccrualCapForTest(threshold *big.Int) *big.Int {
 	return a.safeAccrualCap(&accountingPeer{
 		paymentThreshold: new(big.Int).Set(threshold),
 	})
+}
+
+// SettleRefreshDue exposes the allowance settle subtracts, so a test can pin it
+// without reimplementing the expression. See wasp #316.
+func (a *Accounting) SettleRefreshDue(peer swarm.Address, now time.Time) *big.Int {
+	return a.settleRefreshDue(a.getAccountingPeer(peer), now)
 }
