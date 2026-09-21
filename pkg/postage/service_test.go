@@ -314,11 +314,11 @@ func TestCrashRecovery(t *testing.T) {
 	issuer := newTestStampIssuer(t, 1000)
 	batchID := issuer.ID()
 
-	// Pick two random chunk addresses and compute their bucket indices.
-	chunkAddr0 := swarm.RandAddress(t)
-	chunkAddr1 := swarm.RandAddress(t)
-	bIdx0 := postage.ToBucket(issuer.BucketDepth(), chunkAddr0)
-	bIdx1 := postage.ToBucket(issuer.BucketDepth(), chunkAddr1)
+	// Pick two random chunk addresses in different collision buckets. The
+	// assertions below read the two buckets as though they were distinct, so
+	// the second address is chosen rather than hoped for: two independent
+	// random addresses share a bucket about 1 run in 256 at this bucket depth.
+	chunkAddr0, bIdx0, chunkAddr1, bIdx1 := twoAddressesInDifferentBuckets(t, issuer)
 
 	// Write StampItems directly, simulating stamps issued before a crash
 	// without the issuer bucket state being saved.
@@ -471,4 +471,68 @@ func TestUpdateIssuerLabel(t *testing.T) {
 			t.Fatalf("persisted label: got %q, want %q", item.Issuer.Label(), newLabel)
 		}
 	})
+}
+
+// maxBucketTries bounds twoAddressesInDifferentBuckets. At a bucket depth of 8
+// a single draw already avoids a given bucket 255 times in 256, so the bound
+// sits far past any plausible run of collisions: all 64 colliding has
+// probability 256^-64. Reaching it means address generation is broken, and
+// reporting that is more useful than looping until the test times out.
+const maxBucketTries = 64
+
+// twoAddressesInDifferentBuckets returns two random chunk addresses whose
+// collision buckets differ, each with its bucket index.
+//
+// It takes the issuer rather than a bucket depth, and returns the indices
+// rather than leaving the caller to work them out, so that there is no depth
+// for a caller to pass wrongly. StampIssuer.Depth and StampIssuer.BucketDepth
+// are adjacent methods returning uint8, and reaching for the first compiles
+// and silently restores the 1 in 256 failure this helper exists to remove.
+//
+// Both addresses must come from one call. Taking one address from each of two
+// calls restores that failure just as quietly.
+func twoAddressesInDifferentBuckets(t *testing.T, issuer *postage.StampIssuer) (swarm.Address, uint32, swarm.Address, uint32) {
+	t.Helper()
+
+	depth := issuer.BucketDepth()
+	first := swarm.RandAddress(t)
+	firstBucket := postage.ToBucket(depth, first)
+
+	for range maxBucketTries {
+		second := swarm.RandAddress(t)
+		if secondBucket := postage.ToBucket(depth, second); secondBucket != firstBucket {
+			return first, firstBucket, second, secondBucket
+		}
+	}
+
+	t.Fatalf("no second address outside bucket %d in %d tries", firstBucket, maxBucketTries)
+
+	return swarm.ZeroAddress, 0, swarm.ZeroAddress, 0
+}
+
+// TestTwoAddressesInDifferentBuckets pins what the helper promises: the two
+// addresses it returns never share a collision bucket.
+func TestTwoAddressesInDifferentBuckets(t *testing.T) {
+	t.Parallel()
+
+	issuer := newTestStampIssuer(t, 1000)
+
+	// A helper that drew the second address without checking would return a
+	// colliding pair at least once over this many draws with probability
+	// 1 - (255/256)^4096, leaving about 1 chance in 9,200,000 of passing even
+	// so. It also catches a helper that drew the second address once, outside
+	// the loop, which runs out of tries instead.
+	//
+	// It does not catch a helper that returned one cached pair on every call:
+	// a pair that does not collide never collides, however many times it is
+	// handed back. Nothing here covers that, and saying so is cheaper than
+	// implying a guarantee this loop cannot give.
+	const draws = 4096
+
+	for i := range draws {
+		_, firstBucket, _, secondBucket := twoAddressesInDifferentBuckets(t, issuer)
+		if firstBucket == secondBucket {
+			t.Fatalf("draw %d: both addresses landed in bucket %d", i, firstBucket)
+		}
+	}
 }
