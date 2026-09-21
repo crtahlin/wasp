@@ -85,6 +85,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#366](https://github.com/crtahlin/wasp/issues/366) | api: a malformed Swarm-Index-Document header returns 500 instead of 400 | open | - | - |
 | [#382](https://github.com/crtahlin/wasp/issues/382) | p2p: already-connected is decided per address, so a connect over an open connection runs a second handshake and reports as a dial | open | - | - |
 | [#387](https://github.com/crtahlin/wasp/issues/387) | postage: TestCrashRecovery assumes two random addresses land in different buckets, so it fails about 1 run in 256 | open | - | - |
+| [#399](https://github.com/crtahlin/wasp/issues/399) | Shutdown race: reserve worker iterates the store while it is being closed, SIGSEGV under pebble | done | `fix/399-shutdown-race` | [`dc9f69c6`](https://github.com/crtahlin/wasp/commit/dc9f69c6) |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
