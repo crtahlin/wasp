@@ -76,3 +76,17 @@ func (s *Service) PreferredAttemptsForTest(tb testing.TB) float64 {
 	}
 	return m.GetCounter().GetValue()
 }
+
+// FirstOverdraft exposes the retention clock helper for tests. See issue #392.
+func FirstOverdraft(since map[string]time.Time, peer swarm.Address, now time.Time) time.Time {
+	return firstOverdraft(since, peer, now)
+}
+
+// SetProviderCreditWait sets the retention window on one service. Every test
+// that depends on the window sets it rather than reading the shipped constant,
+// so a change to that constant, or making it a configuration option, does not
+// silently change what the tests assert or how long they take. Per service, so
+// parallel tests do not race.
+func (s *Service) SetProviderCreditWait(d time.Duration) {
+	s.providerWait = d
+}
