@@ -58,6 +58,11 @@ type Service interface {
 	// Address returns the address of the used chequebook contract.
 	Address() common.Address
 	// Issue a new cheque for the beneficiary with an cumulativePayout amount higher than the last.
+	//
+	// Calls for one beneficiary are serialized, so each cheque carries a
+	// cumulative payout strictly greater than the last one persisted for that
+	// beneficiary. Calls for different beneficiaries are not serialized by
+	// that. See wasp #317.
 	Issue(ctx context.Context, beneficiary common.Address, amount *big.Int, sendChequeFunc SendChequeFunc) (*big.Int, error)
 	// LastCheque returns the last cheque we issued for the beneficiary.
 	LastCheque(beneficiary common.Address) (*SignedCheque, error)
@@ -78,6 +83,28 @@ type service struct {
 	store               storage.StateStorer
 	chequeSigner        ChequeSigner
 	totalIssuedReserved *big.Int
+
+	// wasp #317: one lock per beneficiary, serializing the read, add and
+	// write of that beneficiary's cumulative payout in Issue.
+	//
+	// Not the service lock above. Issue sends the cheque over the network
+	// between reading the payout and persisting it, so holding a service-wide
+	// lock across that would queue every cheque this node issues behind every
+	// other. Keyed by beneficiary, independent peers are unaffected.
+	//
+	// Entries are never removed. A beneficiary is a peer's chequebook address,
+	// so the map is bounded by the peers this node has ever paid, and a
+	// sync.Mutex is small. Removing them would need reference counting to
+	// avoid dropping a lock another goroutine is holding, which is more
+	// machinery than the memory is worth.
+	beneficiaryLocks sync.Map
+}
+
+// beneficiaryLock returns the lock guarding this beneficiary's cumulative
+// payout, creating it on first use.
+func (s *service) beneficiaryLock(beneficiary common.Address) *sync.Mutex {
+	actual, _ := s.beneficiaryLocks.LoadOrStore(beneficiary, &sync.Mutex{})
+	return actual.(*sync.Mutex)
 }
 
 // New creates a new chequebook service for the provided chequebook contract.
@@ -187,7 +214,22 @@ func (s *service) unreserveTotalIssued(amount *big.Int) {
 // The cheque is considered sent and saved when sendChequeFunc succeeds.
 // The available balance which is available after sending the cheque is passed
 // to the caller for it to be communicated over metrics.
+//
+// Calls for one beneficiary are serialized, so each cheque carries a cumulative
+// payout strictly greater than the last one persisted for that beneficiary.
+// Calls for different beneficiaries are not serialized by this lock, though
+// they still meet the service lock inside reserveTotalIssued, which is
+// pre-existing and holds across two chain reads. See wasp #317.
 func (s *service) Issue(ctx context.Context, beneficiary common.Address, amount *big.Int, sendChequeFunc SendChequeFunc) (*big.Int, error) {
+	// Held across the read, the send and the write below. Two overlapping
+	// calls would otherwise read the same cumulative payout and send the same
+	// next value, and the later write could persist a value lower than what
+	// was sent, after which every later cheque to this beneficiary repeats a
+	// payout it has already credited and none is ever credited again.
+	release := s.beneficiaryLock(beneficiary)
+	release.Lock()
+	defer release.Unlock()
+
 	availableBalance, err := s.reserveTotalIssued(ctx, amount)
 	if err != nil {
 		return nil, err

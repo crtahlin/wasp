@@ -22,10 +22,10 @@ The service does have a mutex, but it covers only the reserved total: inside
 Two calls for one beneficiary that overlap would both read the same cumulative payout at
 step 1 and both send the same next value at step 4.
 
-## It is not reachable today, and that is stated first
+## No caller reaches it today, and that is stated first
 
-No caller can produce two overlapping calls for one beneficiary, checked rather than
-assumed:
+No caller produces two overlapping calls for one beneficiary in normal operation,
+checked rather than assumed:
 
 - **`Issue` has exactly one call path.** `grep` over `pkg/settlement` finds one:
   `swap.Pay` passes `s.chequebook.Issue` to `proto.EmitCheque`
@@ -33,11 +33,22 @@ assumed:
 - **`settle` starts a payment only when `paymentOngoing` is false**, sets the flag before
   starting and clears it when the payment is reported sent. The flag is on the per-peer
   accounting record, so one peer has at most one payment in flight.
-- **Two peers cannot share a beneficiary.** `Handshake` looks the beneficiary up in
-  reverse first, and when it already belongs to a different peer it calls `MigratePeer`,
-  which writes the beneficiary to the new peer and then deletes the old peer's entry.
+- **Two peers do not normally share a beneficiary.** `Handshake` looks the beneficiary
+  up in reverse first, and when it already belongs to a different peer it calls
+  `MigratePeer`.
 
-So this is a latent hazard, not a live defect. Nobody is losing payments to it.
+**Corrected after review: that third leg is not an invariant, and this spec first stated
+it as one.** `MigratePeer` writes the beneficiary to the new peer and *then* deletes the
+old peer's entry (`pkg/settlement/swap/addressbook.go:76-82`), with no transaction
+between them, so both peers resolve to it in the window. Worse, if the delete fails the
+function returns an error with the new mapping already persisted, so the double mapping
+**survives a restart**. And `paymentOngoing` is keyed by overlay, so a payment already in
+flight for the old peer is not cancelled by a migration.
+
+So the honest statement is: two peers cannot *durably* share a beneficiary under normal
+operation, but the gate is not a proof. The conclusion still holds, since nothing
+observable has been demonstrated and no operator has reported it, but it rests on the
+first two legs rather than on three.
 
 ## What it would cost if it became reachable
 
@@ -52,7 +63,7 @@ carrying the same payout give:
 
 The second does lasting damage. Every later cheque to that peer is computed from the
 persisted value, so every later cheque repeats a payout the receiver has already seen and
-none is credited. **Payment to that peer stops for good**, and nothing detects it or
+none is credited. **Payment to that peer never resumes**, and nothing detects it or
 recovers from it.
 
 ## The change
@@ -80,11 +91,12 @@ implementation makes rather than a precondition the caller must keep.
 
 ## Why this carries no upstream label
 
-The code is the same upstream, and the defect is equally unreachable there for the same
-three reasons. Rule 11 says to tag defects rather than preferences, and to leave a
-suspected problem untagged when it is reasoned from reading the code rather than
-reproduced. **A hazard that no caller can reach is not a defect in the running node**, so
-the label stays off, and the issue already records that.
+The code is the same upstream, and the same reasoning applies there: the same single
+caller, the same per-peer gate, and the same non-atomic migration. Rule 11 says to tag
+defects rather than preferences, and to leave a suspected problem untagged when it is
+reasoned from reading the code rather than reproduced. **No overlapping call has been
+demonstrated on a running node**, so the label stays off. If one is ever demonstrated,
+the label goes on and this paragraph is what should be revisited first.
 
 What would change it: a caller that can overlap two `Issue` calls for one beneficiary.
 [#303](https://github.com/crtahlin/wasp/issues/303) proposes exactly that, allowing more
@@ -93,8 +105,8 @@ after.
 
 ## Verification
 
-Unit tests only. There is nothing to measure on a node, because the condition cannot
-occur on one.
+Unit tests only. There is nothing to measure on a node, because no caller produces the
+condition there.
 
 - A test driving many concurrent `Issue` calls for **one** beneficiary and asserting that
   every cumulative payout sent is distinct and strictly increasing, and that the last
@@ -111,7 +123,7 @@ occur on one.
 ## Scope
 
 `pkg/settlement/swap/chequebook/chequebook.go` and its tests. No configuration, no wire
-change, and nothing an operator can observe while the hazard remains unreachable, so
+change, and nothing an operator has been shown to observe, so
 `docs/DIFFERENCES.md` gains no row. That is itself worth stating in the pull request: a
 change that fixes nothing observable today needs to say so plainly rather than imply a
 benefit it does not deliver.
