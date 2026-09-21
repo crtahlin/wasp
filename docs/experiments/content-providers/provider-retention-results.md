@@ -12,8 +12,11 @@ alike, and the reason is settlement rather than retention. That is the outcome
 the spec pre-registered as the negative, with one correction: the spec named
 `joiner.ReadAt` as the next suspect, and the read unit being all or nothing is
 indeed how the failure becomes a truncation, but it is not the cause. The cause
-is upstream of it, in whether the requester can issue more than one cheque
-during the download.
+is upstream of it. The requester spends its whole credit with the provider in
+**under one second**, issues one cheque, and then neither settlement path moves
+the debt back under the limit for about **thirty seconds**, during which
+nothing is outstanding and nothing arrives. The download that results is not
+slow, it is stopped.
 
 ## What was measured, and on which build
 
@@ -150,14 +153,42 @@ arm, with counters read before and after, gives the same signature: one cheque,
 464 provider hits of 475 attempts, 315 refusals, 732 chunk flights in 38.5
 seconds for a file of 13,890 chunks.
 
-The arithmetic says this is the whole story. Four hundred and seventy chunks in
-36.8 seconds is 12.8 chunks a second. The pseudosettle time allowance is
-4,500,000 units a second and the measured price is about 307,000 units a chunk,
-which is 14.7 chunks a second. **A download that issues one cheque runs at the
-rate of the time allowance alone**, within measurement error, for its whole
-length. At that rate 50 MB needs about 16 minutes, the read gives up long
-before, and because `joiner.ReadAt` reads a whole unit or none of it, what the
-caller sees is a truncation rather than a slow download.
+### The download does not run slowly, it stops
+
+A first reading of those numbers said the download runs at the pseudosettle
+time allowance for its whole length: 470 chunks in 36.8 seconds is 12.8 a
+second, and 4,500,000 units a second at about 307,000 a chunk is 14.7 a second.
+**That reading is withdrawn. It was an average over a wall clock that is almost
+entirely idle, and the agreement was a coincidence.**
+
+Sampling the requester's accounting for the provider every 500 ms through one
+such download, with the balance, the reserved balance, the shadow reserve and
+the cheque count read together:
+
+| Time | Balance | Reserved | Shadow reserve | Cheques |
+|---|---|---|---|---|
+| 0.03 s | 0 | 0 | 0 | 0 |
+| 0.56 s | -112,410,000 | 0 | 31,890,000 | 0 |
+| 1.10 s | -80,520,000 | 0 | 0 | 1 |
+| 1.6 s to 30.4 s | **-80,520,000, unchanged** | 0 | 0 | 1 |
+| 30.9 s | -610,000 | 0 | 0 | 1 |
+| 37.3 s | download returns 524,288 bytes | | | |
+
+The balance changed three times in thirty-seven seconds. **The whole download
+happens inside the first second**: debt reaches 112,410,000 by 560 ms, which at
+about 307,000 a chunk is roughly 366 chunks, and with the 31,890,000 then held
+in the shadow reserve accounts for the 470 the counters report. One cheque
+clears exactly that shadow reserve at 1.1 seconds. Then **nothing moves for
+about thirty seconds**: no cheque, no fall in the debt, and a reserved balance
+of zero throughout, so nothing is even outstanding against the provider. At
+30.9 seconds the debt clears in one step of 79,910,000 with the cheque count
+still at one, so that step is a refreshment rather than a cheque, and by then
+the read has already been abandoned.
+
+So the failure is a **stall**, not a slow rate. The requester spends its credit
+in under a second, and then neither settlement path moves the debt back under
+the limit for thirty seconds. Because `joiner.ReadAt` reads a whole unit or
+none of it, what the caller sees at the end is a truncation.
 
 So the failure is settlement starvation. The provider is healthy throughout:
 it served 464 of the 475 attempts it was actually asked, a 97.7 per cent hit
@@ -182,26 +213,41 @@ question is why none was attempted after the first.
 
 ### What is not yet known
 
-Why the second cheque does not follow the first is not established. Two
-suspects, both arithmetic rather than observed:
+Why nothing moves for thirty seconds is not established. The stall is the
+thing to explain, and the cheque count is a symptom of it rather than its
+cause.
 
-- `paymentOngoing` permits one cheque in flight per peer, so if the first
-  cheque's callback does not return, no further settlement can start for the
-  rest of the download.
-- The amount a cheque may pay is capped at
-  `debt - refreshDue - shadowReservedBalance`, and `shadowReservedBalance`
-  holds the reserved price of every chunk currently in flight. A download with
-  many concurrent fetches therefore carries a large shadow reserve, which can
-  push the capped amount below `minimumPayment` of 900,000 and suppress the
-  cheque entirely. At the settlement trigger of 6,750,000, with one second of
-  refresh due at 4,500,000, a shadow reserve above about 1,350,000 is enough,
-  which is roughly four chunks in flight.
+Thirty seconds is also `RetrieveChunkTimeout`, which bounds one peer attempt,
+and it is `providerCreditWait`, the retention window this change introduces.
+**The window is not the cause**: the control build, which has no such window,
+stalled for the same length in the same way, ending at 30.1, 35.7 and 36.5
+seconds. Both numbers being about thirty is noted so that the coincidence is
+not mistaken for a finding in either direction.
 
-The second would make the suppression self-sustaining: concurrency suppresses
-cheques, and without cheques the download is slow enough that debt never
-accumulates in the bursts that trigger one. It would also explain why the
-effect is a race rather than a property of a cold start, since it depends on
-where concurrency happens to be when the first settlement point is reached.
+**One suspect is refuted by the sampling and is withdrawn.** The amount a
+cheque may pay is capped at `debt - refreshDue - shadowReservedBalance`, and
+`shadowReservedBalance` holds the reserved price of every chunk in flight, so a
+download with real concurrency looked able to suppress its own cheques by
+carrying a large reserve. The measured reserve is **zero for the entire
+thirty-second stall**. Whatever declines the settlement, it is not the shadow
+reserve.
+
+`paymentOngoing`, which permits one cheque in flight per peer, survives as a
+suspect for why no second cheque is issued, but it does not explain the whole
+stall, because a refreshment needs no cheque and none happened either until the
+single step at 30.9 seconds.
+
+The remaining arithmetic worth checking against the code is
+[#316](https://github.com/crtahlin/wasp/issues/316), which reports that
+`refreshDue` in `settle` is computed **without** the one second cap that the
+equivalent term in `PrepareCredit` has. Read directly: `settle` uses
+`(now - refreshTimestampMilliseconds) / 1000 * refreshRate` uncapped, and
+`refreshTimestampMilliseconds` is written in one place only, when a refreshment
+completes. A term that grows without bound as the last refreshment recedes is
+the right shape for a settlement that declines for longer the longer it has
+already been declining, which is what the flat thirty seconds looks like. This
+is read from the code and consistent with the measurement, which is not the
+same as having watched the branch decline.
 
 **Neither has been observed directly, and the attempt to observe them failed.**
 Raising `node/accounting` and `node/settlement` to their highest verbosity
