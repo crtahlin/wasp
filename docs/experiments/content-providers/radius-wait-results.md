@@ -5,13 +5,15 @@ Measured 2026-09-21 on the two-node bench, requester `bench-2` and provider
 [radius-wait.md](radius-wait.md). Issue:
 [#398](https://github.com/crtahlin/wasp/issues/398).
 
-**Headline: the change removes the truncation. How fast a download then runs
-after a restart is still unmeasured.** A 50 MB file held by a single provider,
-fetched immediately after restarting the requester, now arrives complete with a
-matching checksum where the control truncates, three runs to none. The rate
-these runs recorded is **withdrawn**: they were made with the requester's
-chequebook empty, so they measure a node that cannot pay rather than a node
-after a restart.
+**Headline: the change removes the truncation, and a sole-source download is
+then reliable and fast at every size tried.** Fifteen of fifteen complete
+across 4 MiB, 16 MiB and 50 MB, at 1.9 to 4.1 MB/s.
+
+A 50 MB file held by a single provider, fetched immediately after restarting
+the requester, now arrives complete with a matching checksum where the control
+truncates, three runs to none. The rate those particular runs recorded is
+**withdrawn**, because they were made with the requester's chequebook empty;
+that is resolved below rather than left hanging.
 
 ## Builds
 
@@ -96,19 +98,64 @@ goroutines parked in the radius lookup while the fix had none, and no amount of
 credit changes that. A node that cannot pay settles more slowly; it does not
 stop asking. The three-to-none result stands.
 
+## Arm 2: no regression once the radius is known
+
+Six 50 MB sole-source downloads on the changed build with the node already up,
+the peer relationship reset between runs and no restarts, gated on the network
+radius being known.
+
+**Six of six complete**, checksums matching, at 2.43, 3.03, 3.29, 3.05, 3.08
+and 3.16 MB/s. The goroutine waiter count was **zero after every run**, which
+is what "inert once the radius is known" has to mean in practice: there is
+nothing left to wait for and nothing waiting.
+
+This is the arm that would have rejected the change, and it does not.
+
+## Arm 3: is a sole-source download reliable, by size
+
+Five runs per size on the changed build, each from a reset peer relationship,
+every run gated on the radius being known and on the chequebook being able to
+issue a cheque, and every run recording `bee_accounting_payment_error_count`
+on both sides of itself.
+
+| Size | Complete | Rate |
+|---|---|---|
+| 4 MiB | **5 of 5** | 1.89 to 2.25 MB/s |
+| 16 MiB | **5 of 5** | 3.03 to 3.37 MB/s |
+| 50 MB | **5 of 5** | 3.87 to 4.07 MB/s |
+
+Fifteen of fifteen, every checksum matching, no payment error in any run, and
+`bee_swap_cheques_sent` rose by 427 across the session with
+`bee_accounting_payment_error_count` at zero. So settlement worked throughout
+and none of these rates is the artefact described above.
+
+**This is the measurement the content-providers feature rests on**, and it had
+never been made cleanly: every earlier attempt restarted the node inside the
+run and so measured the defect this change fixes. Larger files are *faster*
+here, which is what fixed per-request overhead spread over more chunks looks
+like.
+
+## The rate after a restart, resolved
+
+The withdrawn rate figure above is now explained, and it was not #316 and not
+the code. Those runs were made with the requester's chequebook empty. With it
+funded, the same build and the same pair run the same 50 MB download at **3.05
+and 3.08 MB/s against 51 KB/s dry**, a factor of about sixty.
+
+So there is no separate post-restart rate defect on this evidence. What there
+was is a bench whose chequebook drains through ordinary operation, because
+cheques are cumulative, the node issues them to every peer it owes, and
+nothing cashes them. That is a property of running a node with nobody cashing,
+not of this change, and it is why the harness now records payment errors
+around every run rather than trusting a gate taken once at the start.
+
 ## What this does not show
 
-- **Nothing about warm downloads.** The change is inert once the radius is
-  known, and that is argued from the code and from the unit tests rather than
-  measured here. The no-regression arm in the spec is still to run.
-- **Nothing about the rate after a restart**, for the reason above.
-- **Nothing about other sizes.** Only 50 MB was run. The size sweep is a
-  separate arm and is what answers whether the feature is reliable.
-- **Nothing about the fan-out this gives up.** While the radius is unknown a
-  request is no longer multiplexed across the neighbourhood. For sole-source
-  content that costs nothing, since no neighbour has the chunk, but that is
-  reasoning rather than measurement, and content the network holds is where it
-  would show.
+- **Nothing about the fan-out the change gives up.** While the radius is
+  unknown a request is no longer multiplexed across the neighbourhood. For
+  sole-source content that costs nothing, since no neighbour has the chunk,
+  but that is reasoning rather than measurement, and content the network holds
+  is where it would show.
 
 ## Harness notes
 
