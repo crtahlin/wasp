@@ -81,6 +81,14 @@ from hundreds of refusals inside one download without any wait at all.
 So credit pressure is present and is **not** shown to be what ends these
 downloads. Something fails a read unit. What it is is now isolated, in [truncation-cause.md](truncation-cause.md); the rest of this document is left as it was written, before that.
 
+> **Later note, 2026-09-22.** Both that isolation and the rates in this document
+> have since moved. The readmit-count chain in `truncation-cause.md` turns on a
+> constant that no longer exists, and sole-source downloads now complete: six of
+> six, checksums matching, at between 2.19 and 2.96 MB/s. The per-peer baseline
+> quoted below is the **lookahead buffer 0** arm and those runs set no buffer at
+> all, so the two are not matched and should not be read as a ratio. See
+> [dial-race.md](dial-race.md).
+
 ### Why the baseline is four times slower than the same model predicts
 
 At buffer 0 a read unit is 8 leaves, which the in-flight model puts at about
