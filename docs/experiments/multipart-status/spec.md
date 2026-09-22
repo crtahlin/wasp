@@ -41,13 +41,26 @@ The issue asked whether `mime/multipart` has other caller-side failures. What
 | `multipart: boundary is empty` | yes | 500, fixed here |
 | `textproto.ProtocolError` | yes, a malformed part header | 500, fixed here |
 | `io.ErrUnexpectedEOF` | yes, a truncated body | already 400 via #409 |
-| `ErrMessageTooLarge` | **no** | lives in `formdata.go` and is returned by
-  `ReadForm`, which this code never calls |
+| `ErrMessageTooLarge` | **yes** | 500, still |
+| `multipart: expecting a new Part; got line ...` | **yes** | 500, still |
 
 The writer errors in `mime/multipart/writer.go` are not reachable: this code
 only reads.
 
-So the two cases below are the remainder, and after them the set is covered.
+> **Corrected at implementation.** The first draft of this table said
+> `ErrMessageTooLarge` was unreachable because it "lives in `formdata.go` and
+> is returned by `ReadForm`". Its *declaration* is there; its *return* is at
+> `mime/multipart/multipart.go:177`, inside `populateHeaders`, which
+> `NextPart` reaches. Reproduced with a part carrying more than 10000
+> headers. A second error, `fmt.Errorf("multipart: expecting a new Part; got
+> line %q")` at `:423`, was missed entirely, and was reproduced with a body
+> ending `--BOUNDARY` followed by a tab.
+>
+> **So the set is not covered by this change**, and the claim that it was is
+> withdrawn. The two cases below are fixed; the two above still answer 500
+> and are [#455](https://github.com/crtahlin/wasp/issues/455). One of them, `ErrMessageTooLarge`, is an exported
+> sentinel and so is cheaper to fix than anything here; the other is a bare
+> `fmt.Errorf` and has exactly the matching problem this issue was about.
 
 ## The change
 

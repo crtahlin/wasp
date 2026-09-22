@@ -41,6 +41,19 @@ func TestLocalIngestMultipartMalformed(t *testing.T) {
 		name: "index.html",
 	}})
 
+	// A valid first part, then a malformed header. Only a body that stores
+	// something before failing can detect a leaked collection, which is the
+	// caveat TestLocalIngestDirRejectsMalformedArchive records next to its own
+	// last case. Without this one the usage assertion below cannot fail: both
+	// bodies above stop on the FIRST part, so nothing is ever reserved and the
+	// usage reads zero whether the collection was released or not.
+	afterOneFile := []byte("--" + boundary + "\r\n" +
+		"Content-Disposition: form-data; name=\"f\"; filename=\"index.html\"\r\n" +
+		"Content-Type: text/html\r\n\r\n" +
+		"<h1>Swarm\r\n" +
+		"--" + boundary + "\r\nnot a header line\r\n\r\nbody\r\n" +
+		"--" + boundary + "--\r\n")
+
 	for _, tc := range []struct {
 		name        string
 		body        []byte
@@ -56,6 +69,12 @@ func TestLocalIngestMultipartMalformed(t *testing.T) {
 		{
 			name:        "part header line without a colon",
 			body:        []byte("--" + boundary + "\r\nnot a header line\r\n\r\nbody\r\n--" + boundary + "--\r\n"),
+			contentType: "multipart/form-data; boundary=" + boundary,
+			message:     "malformed multipart header",
+		},
+		{
+			name:        "malformed header after one stored file",
+			body:        afterOneFile,
 			contentType: "multipart/form-data; boundary=" + boundary,
 			message:     "malformed multipart header",
 		},
