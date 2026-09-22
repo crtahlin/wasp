@@ -91,14 +91,72 @@ answering".
 				}
 ```
 
-The loop condition is untouched, so every exit behaves as it does today.
+The loop condition is untouched. The exit *conditions* are therefore unchanged,
+but which exit a flight leaves through can change, and so can the error the
+caller sees. That is covered under "What it costs" and is not a detail.
+
+### Why this terminates, in two lines
+
+`candidates` never grows: `:340` rotates it, `:348` and `:353` shrink it. The
+decrement at `:464` requires `len(candidates) == 0`, and a preferred dispatch
+requires `len(candidates) > 0`. So once the budget has been spent even once, no
+further preferred dispatch is possible, and `preferredInflight` can only fall to
+zero and never rise again.
+
+It follows that `errorsLeft` can never reach zero while a preferred request is
+outstanding, which makes the `storage.ErrNotFound` exit at `:472` unreachable
+with a delivery in flight. That is the whole defect, closed by construction
+rather than by timing.
+
+The loop does not spin while it waits: once peers deplete, `:376` continues
+without calling `retry()` and the loop idles on `preemptiveTicker` at 1 Hz.
+
+### One window has to be closed for the counter to be safe
+
+`preferredInflight` is only sound if every dispatch eventually reports. It does,
+because `retrieveChunk` sends from a `defer` (`:492-505`), with one exception:
+the goroutine runs tracer code **before** entering it, and `safe.Go` recovers a
+panic at the top of the goroutine, so a failure there reports nothing at all.
+
+```go
+	safe.Go(s.logger, "retrieval-retrieve-preferred", func() {
+		span, _, ctx := s.tracer.FollowSpanFromContext(spanCtx, ...)
+		defer span.End()
+		s.retrieveChunk(ctx, quit, chunkAddr, peer, resultC, action, span, localOnlyHeaders(), true)
+	})
+```
+
+That window is narrow and it is not new, but this change makes it consequential.
+Today a lost report leaves `inflight` high, and the two `inflight == 0` exits
+already stall on it. Add the budget guard and `errorsLeft` stops falling too, so
+nothing ends the flight, and the flight context carries no deadline:
+`singleflight` builds it as `context.WithCancel(withoutCancel(ctx))`, which
+strips the deadline along with the cancellation.
+
+So the change includes hoisting the span out of the goroutine, leaving
+`retrieveChunk` as the only statement inside it:
+
+```go
+	span, _, ctx := s.tracer.FollowSpanFromContext(spanCtx, ...)
+	safe.Go(s.logger, "retrieval-retrieve-preferred", func() {
+		defer span.End()
+		s.retrieveChunk(ctx, quit, chunkAddr, peer, resultC, action, span, localOnlyHeaders(), true)
+	})
+```
+
+Three lines, no behavior change on any path that does not panic, and it removes
+the only way the counter can be left high inside a live flight. The equivalent
+window on the ordinary dispatch at `:417` is left alone: it is pre-existing, it
+is not made worse here, and widening this change to cover it would be the kind
+of scope creep the alternatives section already rejected once.
 
 ### It is provably inert without a hint
 
 `preferredPeers` is only populated for an origin request with providers on
-(`:201-202`, guarded by `if origin && s.providers.Load()`), a preferred peer is
-only dispatched from a non-empty candidate list, and `preferredInflight` only
-moves on that dispatch. So on a forwarder, and on any origin download carrying
+(`:200-204`, guarded by `if origin && s.providers.Load()` at `:200`), a
+preferred peer is only dispatched from a non-empty candidate list, and
+`preferredInflight` only moves on that dispatch. So on a forwarder, and on any
+origin download carrying
 no hint and with nothing discovered, `preferredInflight` is zero for the life of
 the flight and the guard reduces to the existing `len(candidates) == 0`.
 
@@ -116,7 +174,8 @@ designs for this area were specified without being run and both were wrong.
 - The failing arm above, 40 ordinary peers, returns the chunk after 3.0012 /
   3.0014 / 3.0009 s, three of three, where it failed at 502 ms before.
 - The control arm still passes.
-- The whole of `pkg/retrieval` passes, and passes under `-race`.
+- The whole of `pkg/retrieval` passes, and passes under `-race`, with the span
+  hoist applied as well as the guard.
 
 ## What it costs
 
@@ -127,7 +186,11 @@ returned after **30.001 s** with `no peer found`, which is
 `RetrieveChunkTimeout` (`:157`, 30 seconds) applied inside `retrieveChunk` at
 `:507`. One such timeout, once, at the end of a flight.
 
-Two limits keep that narrow:
+That bound is **per chunk**, not per download. A flight is one chunk, so a
+download whose provider stops answering pays it on each chunk still in flight,
+in parallel.
+
+Two limits keep it narrow:
 
 - It is reachable only on a download that named a provider or discovered one.
   Everything else is inert, as above.
@@ -135,12 +198,63 @@ Two limits keep that narrow:
   all, so the comparison is 30 seconds against a wrong answer, not against a
   fast right one.
 
-A chunk that genuinely does not exist is unaffected whenever no preferred
-request is outstanding, which is every hint-less download and every forwarder.
+### It does raise outbound requests, and other operators pay for that
 
-**No new cost to other operators.** The change starts no additional requests and
-does not extend a forwarder's flight, because `preferredInflight` cannot be
-non-zero on a forwarder. Outbound request volume is unchanged.
+An earlier draft of this section claimed "no new cost to other operators". **That
+was wrong** and is withdrawn. It reasoned only about forwarders.
+
+Keeping the budget unspent keeps the loop alive, and `retry()` at `:468` keeps
+dispatching. `closestPeer` with `origin` true returns early at `:603-605`
+without the "closer than me" filter, and each peer asked is skipped forever for
+that chunk at `:415`, so the walk continues across the **whole connected set**
+instead of stopping at `maxOriginErrors`. It fires whenever a provider takes
+longer than `preferredWait` to answer and the ordinary peers all miss, which is
+the sole-source hinted download this change exists to fix.
+
+This is the same amplification `docs/DIFFERENCES.md:157` already records for the
+existing `len(candidates) == 0` guard, and it is explicit that the cost is not
+ours:
+
+> the number of ordinary peers a single chunk may be asked for is no longer
+> capped at the error budget of 32 ... on a node with 150 peers that is roughly
+> a fourfold rise in outbound retrieval requests for that chunk, and each one
+> costs the peer that receives it a forward attempt into the network
+
+The black-hole measurement above corroborates it rather than contradicting it,
+and reading its error properly is what surfaced this: it returned
+**`no peer found`**, which is `topology.ErrNotFound`, reachable only from `:374`
+after every eligible peer has been asked and skipped. The sweep happened. The
+first draft quoted that result and did not read it.
+
+Whether the sweep should be capped in its own right is an open question already
+recorded against [#392](https://github.com/crtahlin/wasp/issues/392), and this
+change makes it more pressing without settling it. Measurement item 2 below
+exists to size it.
+
+### The error a caller sees can change, and one endpoint turns 404 into 500
+
+Because the flight now leaves through peer depletion rather than the budget, the
+error changes from `storage.ErrNotFound` (`:472`) to `topology.ErrNotFound`
+(`:374`). `pkg/storer/netstore.go:107` passes it through unwrapped, and
+`pkg/api/chunk.go:264-274` maps only `storage.ErrNotFound` to 404:
+
+```go
+		if errors.Is(err, storage.ErrNotFound) {
+			jsonhttp.NotFound(w, "chunk not found")
+			return
+		}
+		jsonhttp.InternalServerError(w, "read chunk failed")
+```
+
+So a hinted `GET /chunks/{addr}` whose provider accepts the stream and never
+answers returns **500 where it returns 404 today**. `pkg/api/bzz.go:785` maps
+both, so `/bzz` and `/bytes` are unaffected.
+
+This exit is already reachable today, on any download whose peers deplete before
+its budget does, so the change widens an existing case rather than creating one.
+That makes the API mapping its own defect rather than this one's, and it is
+filed separately. This spec's obligation is to state the change, test for it,
+and record it in `docs/DIFFERENCES.md`.
 
 ## Alternatives
 
@@ -181,13 +295,21 @@ matched. Acceptance is delivered bytes with a matching checksum.
 1. **No regression on content the network holds**, hinted and unhinted, within
    the spread of the control on the unmodified build. This is the arm that
    rejected `fix/392-wait-for-credit`.
-2. **Sole-source download rate not worse** than the six runs in
+2. **Size the peer sweep.** This is the arm that matters most, because it is the
+   cost other operators pay and it is currently only reasoned about. Record
+   ordinary requests per chunk on a sole-source hinted download, before and
+   after, and report the ratio rather than a pass or fail. If it is far above
+   the fourfold `docs/DIFFERENCES.md:157` already quotes, the sweep needs a cap
+   before this ships.
+3. **Sole-source download rate not worse** than the six runs in
    [dial-race.md](dial-race.md), 2.19 to 2.96 MB/s.
-3. **A reference nobody holds still fails quickly** with a hint naming a peer
+4. **A reference nobody holds still fails quickly** with a hint naming a peer
    that does not have it, rather than waiting out a timeout per chunk.
 
 Counters each run: `bee_retrieval_preferred_attempts`, `preferred_hits`,
-`request_failure_count`, `request_success_count`, `total_retrieved`.
+`request_failure_count`, `request_success_count`, `total_retrieved`, and, for
+item 2, `bee_retrieval_request_attempts` (the `totalRetrieveAttempts` histogram
+observed at `:218`) and `bee_retrieval_peer_request_count`.
 
 ## Tests
 
@@ -208,6 +330,13 @@ test fails. A test that passes both ways is this repository's usual failure mode
 - **Hint-less behavior is byte-identical**: a download with no preferred set
   spends the budget exactly as before. This must fail if `preferredInflight` is
   ever incremented outside the preferred dispatch.
+- **The ordinary request count per flight is asserted**, not just the outcome.
+  That is the quantity this change moves, and no existing test in the package
+  measures it, so nothing would catch the sweep growing.
+- **The error identity is pinned.** A flight leaving through peer depletion
+  returns `topology.ErrNotFound`, not `storage.ErrNotFound`. Asserting which one
+  makes the 404-to-500 change on `GET /chunks` visible to a later reader rather
+  than a surprise.
 
 ## Rollout and rollback
 
@@ -240,8 +369,13 @@ human decision and authorises no contact with ethersphere.
 
 - `pkg/retrieval/retrieval.go`: the declaration near `:281`, the preferred
   dispatch at `:353-354`, the result arm at `:431`, and the guard at `:464`.
+- `pkg/retrieval/preferred.go`: hoisting the span out of the dispatch goroutine
+  at `:256-263`.
 - `pkg/retrieval/preferred_test.go`, or a new test file alongside it.
-- `docs/DIFFERENCES.md`: a new row for the behavior change, and the top-of-file
+- `docs/DIFFERENCES.md`: a new row covering both the retrieval change and the
+  error a caller can now see, `topology.ErrNotFound` where it was
+  `storage.ErrNotFound`, with the 404-to-500 effect on `GET /chunks` named
+  explicitly. Also the top-of-file
   "wasp described" commit and date. The existing `Wasp-Providers` row at `:157`
   needs its scope checked rather than rewritten: its guarantee that a hint-less
   download is unaffected still holds, and the new guard should be named there as
