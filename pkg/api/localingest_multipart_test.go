@@ -78,6 +78,37 @@ func TestLocalIngestMultipartMalformed(t *testing.T) {
 			contentType: "multipart/form-data; boundary=" + boundary,
 			message:     "malformed multipart header",
 		},
+		{
+			// wasp #455 on this route. ErrMessageTooLarge is an exported
+			// sentinel, so identity reaches it. This body stops on the first
+			// part, so nothing is reserved and the usage assertion below
+			// cannot fail for it, which the next case covers instead.
+			name:        "a part with more headers than mime/multipart allows",
+			body:        tooManyPartHeaders(boundary),
+			contentType: "multipart/form-data; boundary=" + boundary,
+			message:     "multipart part headers are too large",
+		},
+		{
+			// wasp #455 on this route, and the case the sentinel exists
+			// for: "expecting a new Part" is a bare fmt.Errorf carrying the
+			// caller's own bytes, reachable by neither errors.Is nor
+			// errors.As.
+			//
+			// The trailing "x" is load bearing, because skipLWSPChar strips
+			// a lone tab and the line would be a valid delimiter. The body
+			// stores one file before it fails, so this is also the case
+			// that makes the usage assertion below meaningful: it answers
+			// through ow, and a case answering through the plain writer
+			// would leave the collection behind.
+			name: "garbage where a new part was expected",
+			body: []byte("--" + boundary + "\r\n" +
+				"Content-Disposition: form-data; name=\"f\"; filename=\"index.html\"\r\n" +
+				"Content-Type: text/html\r\n\r\n" +
+				"<h1>Swarm\r\n" +
+				"--" + boundary + "\tx\r\n"),
+			contentType: "multipart/form-data; boundary=" + boundary,
+			message:     "malformed multipart body",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

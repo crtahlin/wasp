@@ -256,6 +256,22 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 			logger.Debug("local ingest: archive ends early", "error", err)
 			jsonhttp.BadRequest(ow, "archive ends before it is complete")
 			return
+		case errors.Is(err, multipart.ErrMessageTooLarge):
+			// wasp #455: one part carrying more than 10000 header lines, or
+			// more than 10 MB of them. An exported sentinel, so identity
+			// reaches it, unlike the case below.
+			logger.Debug("local ingest: multipart part headers too large", "error", err)
+			jsonhttp.BadRequest(ow, "multipart part headers are too large")
+			return
+		case errors.Is(err, errMalformedMultipart):
+			// wasp #455: anything else mime/multipart refused in the caller's
+			// body. Last among the multipart cases so the more precise
+			// messages above keep winning. Like every case here it answers
+			// through ow, so the collection is released rather than left on
+			// disk until the next restart.
+			logger.Debug("local ingest: malformed multipart body", "error", err)
+			jsonhttp.BadRequest(ow, "malformed multipart body")
+			return
 		}
 		logger.Debug("local ingest: split write all failed", "error", err)
 		logger.Error(nil, "local ingest: split write all failed")

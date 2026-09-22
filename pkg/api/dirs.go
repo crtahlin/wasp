@@ -46,6 +46,12 @@ var (
 	// error, so it is caught before the reader is built rather than matched
 	// afterwards.
 	errNoBoundary = errors.New("content type declares no multipart boundary")
+	// wasp #455: mime/multipart builds "expecting a new Part" and its sibling
+	// with fmt.Errorf and the caller's own bytes, so neither errors.Is nor
+	// errors.As can reach them. multipartReader.Next attaches this instead,
+	// which is sound because that function calls nothing but NextPart. See
+	// the comment there.
+	errMalformedMultipart = errors.New("malformed multipart body")
 )
 
 // dirUploadHandler uploads a directory supplied as a tar in an HTTP request
@@ -135,6 +141,20 @@ func (s *Service) dirUploadHandler(
 			// through exactly that wrap, which is why the match is not
 			// narrowed to the reader. If one ever appears, narrow it.
 			jsonhttp.BadRequest(w, "archive ends before it is complete")
+		case errors.Is(err, multipart.ErrMessageTooLarge):
+			// wasp #455: one part carrying more than 10000 header lines, or
+			// more than 10 MB of them. An exported sentinel, so this is
+			// reachable by identity, unlike the case below. It is a limit on
+			// one part's headers and not on the upload, so a well-formed
+			// upload of any size never reaches it.
+			jsonhttp.BadRequest(w, "multipart part headers are too large")
+		case errors.Is(err, errMalformedMultipart):
+			// wasp #455: anything else mime/multipart refused in the caller's
+			// body. Last among the multipart cases, so the more precise
+			// messages above keep winning: a malformed part header carries
+			// both this and textproto.ProtocolError, and the order is what
+			// decides which of the two the caller is told.
+			jsonhttp.BadRequest(w, "malformed multipart body")
 		default:
 			jsonhttp.InternalServerError(w, errDirectoryStore)
 		}
@@ -337,7 +357,30 @@ type multipartReader struct {
 func (m *multipartReader) Next() (*FileInfo, error) {
 	part, err := m.r.NextPart()
 	if err != nil {
-		return nil, err
+		if errors.Is(err, io.EOF) {
+			// The normal end of the parts, which storeDir's loop tests for,
+			// so it is passed through unwrapped: a sentinel has no business
+			// in the chain of something that is not an error. Note that
+			// mime/multipart also reports several malformed bodies this way,
+			// wrapping a read error as "multipart: NextPart: %w"; those
+			// already answer 400 through errEmptyDir and are unaffected.
+			return nil, err
+		}
+		// wasp #455: every other error from NextPart comes from parsing the
+		// bytes the caller sent or from reading the caller's body. That is a
+		// property of this call site, which calls nothing else, rather than
+		// of any individual error, which is why the sentinel can be attached
+		// here and could not be inferred from the errors themselves. One of
+		// them, "expecting a new Part", is a bare fmt.Errorf with the
+		// caller's own bytes quoted into it and is reachable no other way.
+		//
+		// If this function ever grows a second call, to this node's own
+		// storage for example, the sentinel stops being a statement about
+		// the caller and must be narrowed.
+		//
+		// Two %w verbs, so the chains the handler already matches stay
+		// reachable through the wrap and keep their more precise messages.
+		return nil, fmt.Errorf("%w: %w", errMalformedMultipart, err)
 	}
 
 	filePath := part.FileName()
