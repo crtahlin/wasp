@@ -253,6 +253,15 @@ const (
 	// workers. Three seconds is the historical value; see Options.ShutdownTimeout
 	// for why it is now overridable.
 	defaultShutdownTimeout = 3 * time.Second
+	// drainTimeout is how long each shutdown drain waits for its workers.
+	//
+	// This is the window #399 relies on. The store is not closed until both
+	// drains have returned OR GIVEN UP, so shortening it closes the store
+	// under live reserve work sooner, which is the pebble segfault #399
+	// exists to prevent. An earlier draft of #428 shortened it to
+	// ShutdownTimeout and would have narrowed the window from five seconds to
+	// three without saying so.
+	drainTimeout = 5 * time.Second
 
 	defaultOpenFilesLimit         = uint64(256)
 	defaultBlockCacheCapacity     = uint64(32 * 1024 * 1024)
@@ -715,6 +724,11 @@ type DB struct {
 	syncer           Syncer
 	reserveOptions   reserveOpts
 	shutdownTimeout  time.Duration
+	// drainWindow is how long each shutdown drain waits. Zero means
+	// drainTimeout. A field rather than a bare constant so a test can
+	// shorten it per store, instead of mutating package state that
+	// parallel tests would race. See #428.
+	drainWindow time.Duration
 	// reserveHasLimiter bounds concurrent ReserveHas lookups. Nil when
 	// unbounded, which is the default.
 	reserveHasLimiter chan struct{}
@@ -990,51 +1004,68 @@ func (db *DB) Close() error {
 	// Idempotent: TriggerQuit (tests) and a double Close share this guard.
 	db.quitOnce.Do(func() { close(db.quit) })
 
-	bgReserveWorkersClosed := make(chan struct{})
+	// wasp #428: Close used to give up on ShutdownTimeout, three seconds by
+	// default, while each drain waited five. A drain between the two made
+	// Close return while dbCloser.Close had not run, so the store was left
+	// open and the next start replayed the write-ahead log.
+	//
+	// The fix is that Close WAITS for the close, not that the drains are
+	// shortened. Shortening them to ShutdownTimeout was the first draft and it
+	// silently narrowed the #399 window from five seconds to three; the drain
+	// keeps its own bound, and ShutdownTimeout may only extend it.
+	drain := db.drainWindow
+	if drain <= 0 {
+		drain = drainTimeout
+	}
+	if db.shutdownTimeout > drain {
+		drain = db.shutdownTimeout
+	}
+
+	reserveDrained := make(chan bool, 1)
 	go func() {
-		defer close(bgReserveWorkersClosed)
-		if !syncutil.WaitWithTimeout(&db.inFlight, 5*time.Second) {
-			db.logger.Warning("db shutting down with running goroutines")
-		}
+		reserveDrained <- syncutil.WaitWithTimeout(&db.inFlight, drain)
 	}()
 
-	bgCacheWorkersClosed := make(chan struct{})
+	cacheDrained := make(chan bool, 1)
 	go func() {
-		defer close(bgCacheWorkersClosed)
-		if !syncutil.WaitWithTimeout(&db.cacheLimiter.wg, 5*time.Second) {
-			db.logger.Warning("cache goroutines still running after the wait timeout; force closing")
-			db.cacheLimiter.cancel()
-		}
+		cacheDrained <- syncutil.WaitWithTimeout(&db.cacheLimiter.wg, drain)
 	}()
+
+	// Both waits are bounded by the same window, so this returns within it.
+	reserveOK, cacheOK := <-reserveDrained, <-cacheDrained
+	if !reserveOK {
+		db.logger.Warning("db shutting down with running goroutines")
+	}
+	if !cacheOK {
+		db.logger.Warning("cache goroutines still running after the wait timeout; force closing")
+		db.cacheLimiter.cancel()
+	}
 
 	// Close the underlying store only after the workers that use it have
 	// stopped. Closing it while a reserve scan is still iterating pulls the
 	// store out from under a live iterator, which segfaults under pebble.
 	// See issue #399.
-	var err error
-	closerDone := make(chan struct{})
-	go func() {
-		defer close(closerDone)
-		<-bgReserveWorkersClosed
-		<-bgCacheWorkersClosed
-		err = db.dbCloser.Close()
-	}()
+	//
+	// A drain that timed out still reaches here, exactly as before: the wait
+	// reports failure but returns either way. What changed is that Close now
+	// waits for the close rather than returning while it happens.
+	// The store's own Close is NOT given a timer. Bounding it and returning
+	// early is the defect this issue is about, just with a different number:
+	// an earlier draft used five seconds and CI found a real store on Windows
+	// takes longer than that, so Close reported the store as unclosed while it
+	// was still closing and the test could not delete its files.
+	//
+	// The drains above are bounded, so this is the last step and nothing is
+	// racing it. A pathological store close blocks shutdown, which is visible,
+	// and cmd/bee still exits on a second interrupt. That is a better failure
+	// than reporting either success or failure while the store is open.
+	err := db.dbCloser.Close()
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		<-closerDone
-	}()
-
-	shutdownTimeout := db.shutdownTimeout
-	if shutdownTimeout <= 0 {
-		shutdownTimeout = defaultShutdownTimeout
-	}
-
-	select {
-	case <-done:
-	case <-time.After(shutdownTimeout):
-		return fmt.Errorf("storer closed with bg goroutines running after %s", shutdownTimeout)
+	if !reserveOK || !cacheOK {
+		return errors.Join(
+			fmt.Errorf("storer closed, but bg goroutines were still running after %s", drain),
+			err,
+		)
 	}
 
 	return err
