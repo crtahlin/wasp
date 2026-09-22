@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -1296,7 +1297,23 @@ func NewBee(
 		}
 	}
 
-	pseudosettleService := pseudosettle.New(p2ps, logger, stateStore, acc, new(big.Int).Set(enforcedRefreshRate), big.NewInt(lightRefreshRate), p2ps)
+	// wasp #444, bench only, on an experiment branch that is not for main.
+	// The rate a node GRANTS as creditor and the rate it EXPECTS as debtor come
+	// from one constant. Only the grant is overridden here, and only for a full
+	// node: raising what this node expects would have every stock peer blocklist
+	// it for failing to meet the expectation.
+	grantRate := new(big.Int).Set(enforcedRefreshRate)
+	if v := os.Getenv("WASP_EXPERIMENT_GRANT_RATE"); v != "" && o.FullNodeMode {
+		if n, ok := new(big.Int).SetString(v, 10); ok && n.Sign() > 0 {
+			grantRate = n
+			logger.Warning("wasp #444 experiment: pseudosettle grant rate overridden",
+				"grant_rate", grantRate, "expectation_rate", enforcedRefreshRate)
+		} else {
+			logger.Warning("wasp #444 experiment: ignoring unusable grant rate", "value", v)
+		}
+	}
+
+	pseudosettleService := pseudosettle.New(p2ps, logger, stateStore, acc, grantRate, big.NewInt(lightRefreshRate), p2ps)
 	if err = p2ps.AddProtocol(pseudosettleService.Protocol()); err != nil {
 		return nil, fmt.Errorf("pseudosettle service: %w", err)
 	}
