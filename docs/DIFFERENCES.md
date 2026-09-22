@@ -7,9 +7,8 @@ is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
   on 2026-09-10.
-- **wasp described:** the tip of `fix/455-multipart-part-errors`, 2026-09-22,
-  the last commit that changes what a node does. Replaced by the merge commit
-  in the follow-up ledger change, as the #428 pair did. The latest wasp release is v0.1.3.
+- **wasp described:** commit `ca413858`, 2026-09-22, the last commit that
+  changes what a node does. The latest wasp release is v0.1.3.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
 
 The comparison is always with the latest **released** Bee, never with upstream

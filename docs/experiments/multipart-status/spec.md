@@ -62,8 +62,10 @@ only reads.
 > character after the tab to reach `:423`.
 >
 > **So the set is not covered by this change**, and the claim that it was is
-> withdrawn. The two cases below are fixed; the two above still answer 500
-> and are [#455](https://github.com/crtahlin/wasp/issues/455). One of them, `ErrMessageTooLarge`, is an exported
+> withdrawn. The two cases below are fixed; the two above were fixed by
+> [#455](https://github.com/crtahlin/wasp/issues/455), merged as `ca413858`,
+> so the set is covered now and this note records how it was found rather
+> than a gap that is still open. One of them, `ErrMessageTooLarge`, is an exported
 > sentinel and so is cheaper to fix than anything here; the other is a bare
 > `fmt.Errorf` and has exactly the matching problem this issue was about.
 
