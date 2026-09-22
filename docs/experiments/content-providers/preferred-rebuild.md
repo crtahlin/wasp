@@ -67,8 +67,14 @@ if peers := preferredSet.Peers(); len(peers) > 0 {
 ```
 
 `offered` is a per-flight set seeded with the initial candidates.
-`preferredSet` is only read here when it is non-nil, which the enclosing
-`origin && s.providers.Load()` block already establishes.
+
+**The nil test is load bearing**, and an earlier revision of this spec said the
+opposite, that the enclosing `origin && s.providers.Load()` block already
+establishes it. That block does not enclose the retry loop. `withProviders`
+returns early when providers are disabled (`pkg/api/providers.go:71-74`), and
+`POST /pins`, `GET /soc` and the access-control paths reach `RetrieveChunk` as
+origin without ever calling it, so a set really can be absent here and removing
+the test would dereference nil.
 
 Reading `preferredSet.Peers()` rather than the `preferredPeers` snapshot is
 what closes the discovery gap, and it is the reason the rebuild is not simply a
@@ -79,7 +85,7 @@ flight started is visible. `Peers` also drops peers currently demoted for
 repeated misses, which the snapshot path never re-evaluated either.
 
 The combined skip is the same expression ordinary selection already uses a few
-lines below (`retrieval.go:370`), so this is not a new idea about what to
+lines below (`retrieval.go:445`), so this is not a new idea about what to
 exclude, only the same one applied to the preferred list, which line 232 never
 did.
 
@@ -140,11 +146,20 @@ is small in every case measured so far and it is not a fixed ceiling. If the
 walk-widening arm shows it matters, the cap belongs on the set rather than on
 the rebuild, because a set that large is a problem for the first build too.
 
-**These are two independent guards over the same hazard, and the mutation
-matrix says so rather than this spec asserting a hierarchy.** Removing either
-one alone changes no test; removing both makes the termination test run until
-its context expires. An earlier revision of this spec called `offered` "the
-load-bearing half", which the measurement does not support.
+**These two overlap, and the mutation matrix is what says how.** Removing
+either one alone changes no test; removing both fails the termination test.
+An earlier revision called `offered` "the load-bearing half" and then, after
+the first matrix, called the two "independent", and **neither is right**.
+`offered` strictly dominates: `skip.Forever` covers dispatched peers, and
+`offered` covers those and the credit-refused peer whose `overDraftRefresh`
+expires.
+
+**And removing both does not produce a livelock**, which an earlier revision
+also claimed. Measured, it fails on the attempt count in well under a second,
+because a third guard stops it: `PreferredSet` demotes a peer after
+`demoteAfterMisses = 16` misses and `Peers` then omits it. So the flight always
+ends; what the two guards buy is that it ends after one attempt rather than
+sixteen.
 
 `offered` does cover one case the skip list does not, and **that case has no
 test**, which is recorded here rather than left to be found later. A peer
@@ -170,7 +185,7 @@ the #324 and #392 retention window ending, which is what it is for.
 
 **The ordinary peer walk gets wider, and other operators pay for it.** The
 error budget is suspended while a preferred candidate is present
-(`retrieval.go:461-466`), so a rebuild that finds a candidate extends the
+(`retrieval.go:557`), so a rebuild that finds a candidate extends the
 window in which a chunk keeps being asked of ordinary peers.
 `docs/DIFFERENCES.md` already records roughly a fourfold rise in outbound
 retrieval requests for a chunk on a 150-peer node for the neighbouring guard,
@@ -251,11 +266,28 @@ In `pkg/retrieval`, mutation checked.
 - **A reference nobody holds still fails quickly**, from a fresh relationship
   and a warm one, which is the guard against trading a 404 for a hang.
 
-Mutations that must each break a named test: remove the rebuild; rebuild from
-the snapshot rather than the live set; drop the `offered` check; drop the
-per-flight `skip` from the combined skip; rebuild unconditionally rather than
-only when the list is empty. A mutation that fails to compile proves nothing
-and is redone.
+The mutation matrix, run rather than predicted, with the survivors reported:
+
+| mutation | result |
+|---|---|
+| remove the rebuild | fails both defect tests |
+| rebuild from the snapshot rather than the live set | fails the discovery test |
+| drop the `offered` check | **survives** |
+| drop the per-flight `skip` from the combined skip | **survives** |
+| drop **both** of the above | fails the termination test |
+| drop the per-chunk cap from the entry test | **survives** |
+| drop the per-chunk cap from the append loop | **survives** |
+| drop **both** cap tests | fails the cap test |
+| drop the `PreferredRebuilds` increment | fails the counter test |
+| rebuild unconditionally rather than only when the list is empty | **survives** |
+
+Four survivors, in two pairs plus one. Each pair is two guards that overlap, so
+removing either alone leaves the other; the paired mutation is the
+discriminating one. The last, rebuilding unconditionally, is an equivalent
+mutant for behaviour: it appends the same peers earlier and changes only cost,
+which no functional test can see.
+
+A mutation that fails to compile proves nothing and is redone.
 
 ## Measurement
 
@@ -280,7 +312,7 @@ Arm 1 is the one that fails today, 404 in every failing run recorded in
 
 **Arm 4 needs a metric this repository does not yet have.**
 `peer_request_count` is incremented at the top of the retry branch
-(`retrieval.go:303`), before the candidates block, so it counts **loop
+(`retrieval.go:319`), before the candidates block, so it counts **loop
 iterations** and not outbound requests to ordinary peers. A preferred dispatch
 and a dropped candidate each consume one, so the ratio moves under this change
 for reasons that are not a wider walk. `flight-exit-results.md` used the same

@@ -49,9 +49,10 @@ type metrics struct {
 	// PreferredReadmits counts preferred peers kept for a later attempt after
 	// an overdraft, rather than dropped for that chunk.
 	PreferredReadmits prometheus.Counter
-	// PreferredRebuilds counts flights whose candidate list was rebuilt from
-	// the live preferred set after running out, and found at least one peer
-	// the flight had not already offered. See issue #435.
+	// PreferredRebuilds counts REBUILDS that added a peer, not flights. One
+	// flight can raise it more than once, up to the per-chunk cap, so it must
+	// not be divided by a flight count. Measured at two for a single flight
+	// over a six-peer set. See issue #435.
 	//
 	// No existing counter can show this path: PreferredCandidatesSelected is
 	// once per flight and fires on the first build, and PreferredAttempts is
@@ -174,7 +175,7 @@ func newMetrics() metrics {
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
 			Name:      "preferred_rebuilds",
-			Help:      "Flights whose preferred candidate list was rebuilt and found a new peer.",
+			Help:      "Rebuilds of a preferred candidate list that found a peer not already offered.",
 		}),
 		LocalOnlyMisses: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,

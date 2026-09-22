@@ -334,16 +334,37 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 				// chunks already in flight.
 				//
 				// The set is read only when it has peers. withProviders
-				// builds one for every origin download, usually empty, so a
-				// nil check would run this on every iteration of every
-				// unhinted download; an empty set costs a mutex and a
+				// attaches one to most origin downloads, usually empty, so a
+				// presence check alone would run this on every iteration of
+				// every unhinted download; an empty set costs a mutex and a
 				// zero-length slice, a non-empty one costs a Kademlia lookup
 				// per peer.
-				if preferredSet != nil && len(candidates) == 0 {
+				//
+				// Most, not all: withProviders returns early when providers
+				// are disabled, and /pins, /soc and the access-control paths
+				// reach here as origin with no set at all. So the nil test is
+				// load bearing and not decoration.
+				// The rebuild does NOT raise the per-chunk cap. Without this
+				// test it would: maxPreferredAttempts bounds the FIRST build
+				// only, so rebuilding until the set runs out turns a bound of
+				// two into a bound of however many providers are known.
+				// Measured at six attempts for a six-peer set against two
+				// without the rebuild, and every one of those is an outbound
+				// local-only request that the provider pays for, in a handler
+				// invocation, a miss-limiter slot and a debit attempt.
+				//
+				// Keeping the cap still fixes the defect, because the case it
+				// is about starts with an EMPTY list: nothing has been offered
+				// when the provider connects, so the whole budget is available
+				// to it.
+				if preferredSet != nil && len(candidates) == 0 && len(offered) < maxPreferredAttempts {
 					if peers := preferredSet.Peers(); len(peers) > 0 {
 						fresh := s.preferredCandidates(peers, chunkAddr,
 							append(skip.ChunkPeers(chunkAddr), s.errSkip.ChunkPeers(chunkAddr)...))
 						for _, p := range fresh {
+							if len(offered) >= maxPreferredAttempts {
+								break
+							}
 							if _, seen := offered[p.ByteString()]; seen {
 								continue
 							}

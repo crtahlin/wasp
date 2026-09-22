@@ -77,6 +77,22 @@ func (s *Service) PreferredAttemptsForTest(tb testing.TB) float64 {
 	return m.GetCounter().GetValue()
 }
 
+// PreferredRebuildsForTest reports the rebuild counter. It counts rebuilds
+// that added a peer, not flights, which is the thing its Help string got wrong
+// once and which a test should therefore be able to see. See issue #435.
+func (s *Service) PreferredRebuildsForTest(tb testing.TB) float64 {
+	tb.Helper()
+	var m dto.Metric
+	if err := s.metrics.PreferredRebuilds.Write(&m); err != nil {
+		tb.Fatalf("reading the counter: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+// MaxPreferredAttemptsForTest exposes the per-chunk cap, so a test can assert
+// the rebuild does not raise it without hard-coding the number. See #435.
+const MaxPreferredAttemptsForTest = maxPreferredAttempts
+
 // FirstOverdraft exposes the retention clock helper for tests. See issue #392.
 func FirstOverdraft(since map[string]time.Time, peer swarm.Address, now time.Time) time.Time {
 	return firstOverdraft(since, peer, now)

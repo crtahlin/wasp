@@ -153,7 +153,7 @@ func TestProviderDiscoveredMidFlightStillServesTheChunk(t *testing.T) {
 	provider.SetProvidersEnabled(true)
 
 	// Empty at the start, which is what a download with no hint carries, and
-	// what withProviders builds for every origin request.
+	// what withProviders attaches to most origin requests.
 	set := retrieval.NewPreferredSet()
 
 	// Wrapped before the provider's spec joins the map, for the reason given
@@ -257,12 +257,152 @@ func TestRebuildDoesNotOfferTheSamePeerTwice(t *testing.T) {
 	}
 }
 
+// TestRebuildDoesNotRaiseThePerChunkCap is the cost guard, and it is the test
+// this change most needed.
+//
+// maxPreferredAttempts bounds the FIRST build of the candidate list, because
+// preferredCandidates truncates to it. Rebuilding until the preferred set runs
+// out quietly turns that bound into "however many providers are known":
+// measured at six preferred attempts for a six-peer set against two without
+// the rebuild. Every one of those is an outbound local-only request that the
+// PROVIDER pays for, in a handler invocation, a miss-limiter slot and a debit
+// attempt, which is the cost rule 8 asks to be stated for the operator who is
+// not the one choosing it.
+//
+// Nobody holds the chunk, so every attempt misses and the flight keeps trying
+// until its guards stop it. The cap is what must stop it.
+func TestRebuildDoesNotRaiseThePerChunkCap(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ordinary  = 40
+		providers = 6
+	)
+
+	var (
+		chunk      = testingc.FixtureChunk("0033")
+		clientAddr = swarm.RandAddress(t)
+		pricer     = pricermock.NewMockService(defaultPrice, defaultPrice)
+		asked      atomic.Int32
+	)
+
+	ring := peersByDistance(t, chunk.Address(), ordinary+providers)
+	emptyAddrs, providerAddrs := ring[:ordinary], ring[ordinary:]
+
+	specs := failingPeers(t, emptyAddrs, 0)
+	for _, pa := range providerAddrs {
+		p := createRetrieval(t, pa, &testStorer{ChunkStore: inmemchunkstore.New()},
+			nil, nil, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+		p.SetProvidersEnabled(true)
+
+		spec := p.Protocol()
+		inner := spec.StreamSpecs[0].Handler
+		spec.StreamSpecs[0].Handler = func(ctx context.Context, peer p2p.Peer, s p2p.Stream) error {
+			asked.Add(1)
+			return inner(ctx, peer, s)
+		}
+		specs[pa.String()] = spec
+	}
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(specs),
+	)
+
+	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		topologymock.NewTopologyDriver(topologymock.WithPeers(ring...)), log.Noop,
+		accountingmock.NewAccounting(), pricer, nil, false)
+	client.SetProvidersEnabled(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(providerAddrs...))
+
+	if _, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress); err == nil {
+		t.Fatal("a chunk nobody holds was retrieved")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the flight did not end on its own")
+	}
+
+	if n := int(asked.Load()); n > retrieval.MaxPreferredAttemptsForTest {
+		t.Fatalf("asked %d providers for one chunk, want at most %d: the rebuild must not raise "+
+			"the per-chunk cap, because every extra attempt is an outbound request the provider pays for",
+			n, retrieval.MaxPreferredAttemptsForTest)
+	}
+}
+
+// TestRebuildCounterCountsRebuildsNotFlights pins what the counter means.
+//
+// Its Help string said "flights" once, and it is not: one flight can raise it
+// more than once, up to the per-chunk cap. An operator dividing it by a flight
+// count would get a ratio above one and conclude something was wrong.
+func TestRebuildCounterCountsRebuildsNotFlights(t *testing.T) {
+	t.Parallel()
+
+	const ordinary = 40
+
+	var (
+		chunk      = testingc.FixtureChunk("0033")
+		clientAddr = swarm.RandAddress(t)
+		pricer     = pricermock.NewMockService(defaultPrice, defaultPrice)
+	)
+
+	ring := peersByDistance(t, chunk.Address(), ordinary+1)
+	emptyAddrs, providerAddr := ring[:ordinary], ring[ordinary]
+
+	st := &testStorer{ChunkStore: inmemchunkstore.New()}
+	if err := st.Put(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	provider := createRetrieval(t, providerAddr, st, nil, nil, log.Noop,
+		accountingmock.NewAccounting(), pricer, nil, false)
+	provider.SetProvidersEnabled(true)
+
+	driver := topologymock.NewTopologyDriver(topologymock.WithPeers(emptyAddrs...))
+
+	specs := failingPeers(t, emptyAddrs, 0)
+	onNthRequest(specs, 2, func() { driver.AddPeers(providerAddr) })
+	specs[providerAddr.String()] = provider.Protocol()
+
+	recorder := streamtest.New(
+		streamtest.WithBaseAddr(clientAddr),
+		streamtest.WithPeerProtocols(specs),
+	)
+
+	client := createRetrieval(t, clientAddr, &testStorer{ChunkStore: inmemchunkstore.New()}, recorder,
+		driver, log.Noop, accountingmock.NewAccounting(), pricer, nil, false)
+	client.SetProvidersEnabled(true)
+
+	if before := client.PreferredRebuildsForTest(t); before != 0 {
+		t.Fatalf("the counter started at %v, want 0", before)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ctx = retrieval.WithPreferredPeers(ctx, retrieval.NewPreferredSet(providerAddr))
+
+	if _, err := client.RetrieveChunk(ctx, chunk.Address(), swarm.ZeroAddress); err != nil {
+		t.Fatal(err)
+	}
+
+	// One flight, and the rebuild is what found the provider, so the counter
+	// must have moved. Without this the increment can be deleted and nothing
+	// notices.
+	if got := client.PreferredRebuildsForTest(t); got < 1 {
+		t.Fatalf("the counter reads %v after a flight the rebuild served, want at least 1", got)
+	}
+}
+
 // TestNoPreferredSetLeavesTheWalkUnchanged is the guard for everybody else.
 //
-// withProviders builds a preferred set for every origin download, usually
+// withProviders attaches a preferred set to most origin downloads, usually
 // empty, so the rebuild must cost an unhinted download nothing and must not
-// change how far its walk goes. A forwarder never reaches this path at all,
-// because origin is false for it.
+// change how far its walk goes. Not all: it returns early when providers are
+// disabled, and /pins, /soc and the access-control paths reach retrieval as
+// origin with no set, which is why the nil test in the loop is load bearing.
+// A forwarder never reaches this path at all, because origin is false for it,
+// and no test here exercises that.
 func TestNoPreferredSetLeavesTheWalkUnchanged(t *testing.T) {
 	t.Parallel()
 
