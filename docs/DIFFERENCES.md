@@ -7,7 +7,7 @@ is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
   on 2026-09-10.
-- **wasp described:** commit `2bd2d08c`, 2026-09-22, the last commit that
+- **wasp described:** commit `4f88343c`, 2026-09-22, the last commit that
   changes what a node does. The latest wasp release is v0.1.3.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
 
