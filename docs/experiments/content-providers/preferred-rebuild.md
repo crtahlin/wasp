@@ -116,8 +116,29 @@ the list the candidate builder was not reading.
 
 **`offered` makes it monotone**: at most one entry per peer in the preferred
 set ever enters the loop, so the number of rebuilds that add anything is
-bounded by the size of that set, at most `maxProviderHints = 8` for an explicit
-hint and about `lookupCandidates = 16` once discovery has run.
+bounded by the size of that set.
+
+**How big that set can get is worth stating exactly, because an earlier
+revision of this spec got it wrong.** It said "at most 8 for an explicit hint
+and about 16 once discovery has run", as though those were alternatives with a
+small ceiling. They are not:
+
+- An explicit hint is capped, at `maxProviderHints = 8`
+  (`pkg/api/providers.go:31`).
+- A discovered set is **not** capped. `Discover` runs once per download, adds
+  up to `lookupCandidates = 16` (`pkg/providers/providers.go:35`), and
+  `PreferredSet.Add` appends anything not already present with no size limit.
+  The set is **shared by every download of the same content key** while it
+  lives (`providerSet`, with a time to live), so successive downloads whose
+  lookups return different providers accumulate into one set.
+- A hinted download can also discover, so the two add rather than exclude.
+
+So the honest bound is the size of the live preferred set, which is 8 for a
+hint-only download and, for a discovery-backed one, however many distinct
+providers discovery has returned for that key within the set's lifetime. That
+is small in every case measured so far and it is not a fixed ceiling. If the
+walk-widening arm shows it matters, the cap belongs on the set rather than on
+the rebuild, because a set that large is a problem for the first build too.
 
 **These are two independent guards over the same hazard, and the mutation
 matrix says so rather than this spec asserting a hierarchy.** Removing either
