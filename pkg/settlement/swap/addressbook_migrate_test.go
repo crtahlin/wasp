@@ -105,19 +105,51 @@ func TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair(t *testing.T) {
 		chequebook  = common.HexToAddress("0xbeef")
 	)
 
+	// MigratePeer makes SIX store mutations, in this order:
+	//
+	//   1 PUT    swap_peer_beneficiary_<new>     PutBeneficiary, forward
+	//   2 PUT    swap_beneficiary_peer_<ba>      PutBeneficiary, reverse
+	//   3 DELETE swap_peer_beneficiary_<old>
+	//   4 PUT    swap_chequebook_peer_<new>      PutChequebook, forward
+	//   5 PUT    swap_peer_chequebook_<cb>       PutChequebook, reverse
+	//   6 DELETE swap_chequebook_peer_<old>
+	//
+	// The wrapper matches on a substring of the key, so it can fail 1, 3, 4
+	// and 6. The two reverse puts, 2 and 5, share no distinguishing substring
+	// with anything else this test can target and are not reached here. That
+	// is worth naming rather than glossing, because write 2 is the one whose
+	// position relative to write 3 is the whole invariant.
 	for _, tc := range []struct {
-		name       string
-		failPut    string
-		failDelete string
+		name string
+		// wantNewChequebook is whether the new peer holds the chequebook once
+		// the recovery has run.
+		//
+		// It is not always true, and that is the point of asserting it. The
+		// recovery repairs the BENEFICIARY mapping only. Handshake re-runs
+		// MigratePeer just when the reverse beneficiary mapping still names
+		// somebody else, so a migration that failed AFTER the beneficiary half
+		// completed looks settled to the handshake and the chequebook half is
+		// never finished. That leaves the new peer with no chequebook, which
+		// ReceiveCheque treats as "not known" and repairs from the next cheque
+		// it accepts, so it is a gap that closes rather than a wrong value.
+		//
+		// Asserting the true case is also what catches a reordering of the
+		// chequebook pair on its own, which leaves the new peer unmapped where
+		// the shipped order has already written it.
+		wantNewChequebook bool
+		failPut           string
+		failDelete        string
 	}{
 		{
 			// The discriminating case. Under the shipped order the failed put
 			// is the FIRST store operation, so nothing has changed and the
-			// retry is clean. Under a delete-first order the old forward
-			// mapping is already gone while the reverse mapping still names
-			// the old peer, which is the wedge described above.
-			name:    "the new beneficiary write fails",
-			failPut: "peer_beneficiary",
+			// retry is clean and completes the whole migration. Under a
+			// delete-first order the old forward mapping is already gone while
+			// the reverse mapping still names the old peer, which is the state
+			// that wedges the handshake.
+			name:              "the new beneficiary write fails",
+			failPut:           "peer_beneficiary",
+			wantNewChequebook: true,
 		},
 		{
 			name:       "the old beneficiary delete fails",
@@ -125,9 +157,11 @@ func TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair(t *testing.T) {
 		},
 		{
 			// "swap_chequebook_peer_" is the peer to chequebook key, so this
-			// matches that delete and not the beneficiary one.
-			name:       "the old chequebook delete fails",
-			failDelete: "chequebook_peer",
+			// matches that delete and not the beneficiary one, and not the
+			// "swap_peer_chequebook_" reverse key either.
+			name:              "the old chequebook delete fails",
+			failDelete:        "chequebook_peer",
+			wantNewChequebook: true,
 		},
 		{
 			name:    "the new chequebook write fails",
@@ -192,7 +226,83 @@ func TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair(t *testing.T) {
 				t.Fatalf("the reverse mapping names %v known=%v, want the new peer %v",
 					gotPeer, known, newPeer)
 			}
+
+			// The chequebook half moves on the same argument and in the same
+			// order, and without this the chequebook pair could be reordered
+			// on its own and nothing would notice.
+			gotCb, known, err := book.Chequebook(newPeer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if known != tc.wantNewChequebook {
+				t.Fatalf("the new peer's chequebook is known=%v, want %v",
+					known, tc.wantNewChequebook)
+			}
+			if known && gotCb != chequebook {
+				t.Fatalf("chequebook %v, want %v", gotCb, chequebook)
+			}
 		})
+	}
+}
+
+// TestMigratePeerRefusesAnUnknownOldPeer pins the guard whose error message the
+// whole of #430 turns on. MigratePeer returns "old beneficiary not known" when
+// the old peer has no forward mapping, Handshake returns that error, and libp2p
+// disconnects on it. Without this, the guard could be removed and the migration
+// would silently write a zero beneficiary for the new peer instead.
+func TestMigratePeerRefusesAnUnknownOldPeer(t *testing.T) {
+	t.Parallel()
+
+	var (
+		oldPeer = swarm.MustParseHexAddress("aabb")
+		newPeer = swarm.MustParseHexAddress("ccdd")
+	)
+
+	book := swap.NewAddressbook(mockstore.NewStateStore())
+
+	if err := book.MigratePeer(oldPeer, newPeer); err == nil {
+		t.Fatal("migrating a peer with no beneficiary succeeded, want an error")
+	}
+
+	if _, known, _ := book.Beneficiary(newPeer); known {
+		t.Fatal("the refused migration still mapped the new peer, which would be a zero beneficiary")
+	}
+	if _, known, _ := book.BeneficiaryPeer(common.Address{}); known {
+		t.Fatal("the refused migration wrote a reverse mapping for the zero beneficiary")
+	}
+}
+
+// TestMigratePeerWithoutAChequebookMovesOnlyTheBeneficiary pins the other
+// guard. A peer whose chequebook is not known must not acquire a zero one:
+// Chequebook(newPeer) would then report known with a zero address, and
+// ReceiveCheque compares against it, so every later cheque from that peer would
+// be refused as the wrong chequebook.
+func TestMigratePeerWithoutAChequebookMovesOnlyTheBeneficiary(t *testing.T) {
+	t.Parallel()
+
+	var (
+		oldPeer     = swarm.MustParseHexAddress("aabb")
+		newPeer     = swarm.MustParseHexAddress("ccdd")
+		beneficiary = common.HexToAddress("0xfeed")
+	)
+
+	book := swap.NewAddressbook(mockstore.NewStateStore())
+
+	if err := book.PutBeneficiary(oldPeer, beneficiary); err != nil {
+		t.Fatal(err)
+	}
+	if err := book.MigratePeer(oldPeer, newPeer); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, known, _ := book.Beneficiary(newPeer); !known {
+		t.Fatal("the beneficiary did not move")
+	}
+	if got, known, _ := book.Chequebook(newPeer); known {
+		t.Fatalf("the new peer acquired a chequebook it never had: %v", got)
+	}
+	if _, known, _ := book.ChequebookPeer(common.Address{}); known {
+		t.Fatal("the migration wrote a reverse mapping for the zero chequebook")
 	}
 }
 
