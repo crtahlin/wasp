@@ -85,9 +85,21 @@ The result arm is unchanged. A delivery that arrives returns the chunk; a
 failure decrements `inflight`, and when it reaches zero with no budget left the
 loop ends exactly as it does today.
 
-This terminates. Once `errorsLeft` is zero, `inflight` only decreases, because
-nothing dispatches. It cannot spin, because the only arms that fire are the
-guarded ones, which fall straight back to the select.
+This terminates, and the argument does not rest on inspection of the happy path.
+`retrieveChunk` sends its result from a **`defer`** (`:492-505`), so every exit
+from it reports back, including the early returns for a failed stream, a failed
+write, a failed read and an invalid chunk. The whole call is bounded by
+`RetrieveChunkTimeout` at `:507`. So once `errorsLeft` is zero, `inflight` only
+decreases and reaches zero within one such timeout of the last dispatch. It
+cannot spin either: the only arms that still fire are the guarded ones, which
+fall straight back to the select.
+
+There is a second consequence worth naming, because it is the real repair.
+`close(quit)` is deferred to the end of the flight, and the flight no longer
+ends with work outstanding, so `close(quit)` now runs only after every result is
+in. The `case <-quit` branch in `retrieveChunk`'s defer stops being reachable
+while a delivery is pending. The discard is made **structurally impossible**
+rather than merely less likely.
 
 ## What it costs
 
