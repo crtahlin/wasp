@@ -57,8 +57,10 @@ Type: fix.
 > `swap_chequebook` prefix. So the wedge does have a clearing path: an operator
 > restarting the node with a new `target-neighborhood`
 > (`pkg/node/node.go:540-559`). `bee db nuke` is not one, because `Nuke`
-> preserves the whole `swap` prefix, but `bee db nuke --forget-overlay` removes
-> the statestore directory outright and is.
+> preserves the whole `swap` prefix, but `bee db nuke --forget-overlay` empties the
+> statestore directory and is. (`removeContent` deletes the directory's
+> contents rather than the directory itself, and returns before `Nuke` is
+> reached, `cmd/bee/cmd/db.go:829-839`.)
 >
 > None of that is a repair a node performs for itself, so the substance stands:
 > nothing the node does on its own recovers from the wedge.
@@ -71,30 +73,47 @@ Type: fix.
 > the beneficiary case fail with `old beneficiary not known`, which is the
 > mutation that decides this.
 >
-> **`MigratePeer` makes six store mutations, not four**, and the test reaches
-> four of them:
+> **`MigratePeer` makes six store mutations, not four**, and the test fails
+> each of them in turn:
 >
-> | | write | reached by the test |
+> | | write | injected by |
 > |---|---|---|
-> | 1 | `PUT swap_peer_beneficiary_<new>` | yes |
-> | 2 | `PUT swap_beneficiary_peer_<ba>` | no |
-> | 3 | `DELETE swap_peer_beneficiary_<old>` | yes |
-> | 4 | `PUT swap_chequebook_peer_<new>` | yes |
-> | 5 | `PUT swap_peer_chequebook_<cb>` | no |
-> | 6 | `DELETE swap_chequebook_peer_<old>` | yes |
+> | 1 | `PUT swap_peer_beneficiary_<new>` | `failPut: "peer_beneficiary"` |
+> | 2 | `PUT swap_beneficiary_peer_<ba>` | `failPut: "beneficiary_peer"` |
+> | 3 | `DELETE swap_peer_beneficiary_<old>` | `failDelete: "peer_beneficiary"` |
+> | 4 | `PUT swap_chequebook_peer_<new>` | `failPut: "chequebook_peer"` |
+> | 5 | `PUT swap_peer_chequebook_<cb>` | `failPut: "peer_chequebook"` |
+> | 6 | `DELETE swap_chequebook_peer_<old>` | `failDelete: "chequebook_peer"` |
 >
-> The wrapper selects a write by a substring of its key, and the two reverse
-> puts share no substring that distinguishes them from the forward ones. Write
-> 2 is the one whose position relative to write 3 is the entire invariant, so
-> this gap is named rather than left to be discovered.
+> **A second correction belongs here, for the same reason as the first.** An
+> earlier version of this section said the two reverse puts, 2 and 5, "share no
+> substring that distinguishes them from the forward ones" and left them
+> untested on that basis. That is false: the prefixes are mirrored, so
+> `peer_beneficiary` selects write 1 and `beneficiary_peer` selects write 2,
+> and the chequebook pair works the same way round. The test already relied on
+> exactly that discrimination to select writes 1 and 4.
+>
+> Write 2 then turned out to be the most valuable case of the six, because
+> failing it produces the wedge by the shortest route: the new peer's forward
+> mapping is written while the reverse mapping still names the old peer. The
+> shipped order survives it, because the old peer's forward mapping has not
+> been deleted yet and the next handshake finishes the job. Failing write 5
+> catches a reordering of the two writes inside `PutChequebook`, which nothing
+> else did.
 >
 > **The recovery repairs the beneficiary mapping only.** `Handshake` re-runs
 > `MigratePeer` just when the reverse beneficiary mapping still names somebody
 > else, so a migration that failed after the beneficiary half completed looks
 > settled and the chequebook half is never finished. The new peer is then left
 > with no chequebook, which `ReceiveCheque` treats as not known and fills in
-> from the next cheque it accepts. That is a gap which closes, not a wrong
-> value, and the test asserts it per case rather than assuming it.
+> from the next cheque it accepts (`swap.go:110-115`). That is a gap which
+> closes, not a wrong value, and the test asserts it per case rather than
+> assuming it.
+>
+> That last clause is the whole reason the unfinished half is acceptable, and
+> it was itself untested: deleting the `if !known` branch from `ReceiveCheque`
+> left every package under `pkg/settlement` passing.
+> `TestReceiveChequeRecordsAnUnknownChequebook` now pins it.
 >
 > **So the issue is closed without a code change**, and what remains of it is
 > recorded rather than dropped:
@@ -114,13 +133,24 @@ Type: fix.
 >   The bulk path needs its own sentence, since it deletes both keys.
 >   `collectKeysExcept` iterates with `storage.Query` carrying no `Order`, and
 >   `KeyAscendingOrder` is that field's zero value
->   (`pkg/storage/storage.go:68-69`), so the keys come back sorted and
->   `swap_beneficiary_peer_` sorts before `swap_peer_beneficiary_`. `deleteKeys`
->   then deletes them in that order, one at a time with no batch. A crash part
->   way through therefore loses the reverse key first, which is the harmless
->   direction. **That is incidental and nothing enforces it**: renaming either
->   prefix reverses the sort and makes the wedge reachable through an
->   interrupted hop, and no test covers the dependency.
+>   (`pkg/storage/storage.go:68-69`). A zero value alone does not establish
+>   that the production store sorts, so the rest of the chain was checked too:
+>   `leveldbstore.Iterate` uses `nextF := iter.Next` and only reverses for
+>   `KeyDescendingOrder` (`pkg/storage/leveldbstore/store.go:305`), goleveldb's
+>   iterator is key-ordered, `cache.Cache` does not override `Iterate` so it
+>   passes through, and `InitStateStore` always builds a leveldbstore. So the
+>   keys do come back sorted, and `swap_beneficiary_peer_` sorts before
+>   `swap_peer_beneficiary_`. `deleteKeys` then deletes them in that order, one
+>   at a time with no batch, so a crash part way through loses the reverse key
+>   first, which is the harmless direction.
+>
+>   **That is incidental and nothing enforces it**: renaming either prefix
+>   reverses the sort and makes the wedge reachable through an interrupted hop,
+>   and no test covers the dependency. The preserve entry that saves
+>   `swap_chequebook_peer_` is incidental in the same way, since its intended
+>   target is the single key `swap_chequebook`
+>   (`pkg/settlement/swap/chequebook/init.go:25`) and the peer mapping survives
+>   only by sharing that prefix.
 >
 >   So the ordering is load-bearing in two places, undocumented in both, and
 >   unrecoverable by the node if violated. That is hardening rather than a

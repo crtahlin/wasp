@@ -32,7 +32,7 @@ commits below are wasp's own.
   column's job is to find the issue.
 
 Derived from the experiment ledger ([`experiments/INDEX.md`](experiments/INDEX.md))
-and the git history on 2026-09-17, against the upstream base
+and the history, last revised 2026-09-22, against the upstream base
 `v2.8.2`. Three issues (#73, #76, #430) were closed not planned. Wasp issue
 numbers can collide with upstream Bee pull-request numbers in the shared
 history, so the commits here were resolved from fork-only merges, not by issue
