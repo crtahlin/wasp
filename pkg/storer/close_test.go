@@ -110,7 +110,6 @@ func TestCloseIsIdempotent(t *testing.T) {
 	}
 }
 
-
 // orderingCloser records whether any background work was still in flight at
 // the moment the store was closed. That is #399's property, and review of the
 // #428 fix found nothing in the repository pinned it: an implementation that

@@ -262,9 +262,6 @@ const (
 	// ShutdownTimeout and would have narrowed the window from five seconds to
 	// three without saying so.
 	drainTimeout = 5 * time.Second
-	// closeGrace bounds the store's own Close, the one step neither the drain
-	// window nor ShutdownTimeout covers. See #428.
-	closeGrace = 5 * time.Second
 
 	defaultOpenFilesLimit         = uint64(256)
 	defaultBlockCacheCapacity     = uint64(32 * 1024 * 1024)
@@ -1052,22 +1049,17 @@ func (db *DB) Close() error {
 	// A drain that timed out still reaches here, exactly as before: the wait
 	// reports failure but returns either way. What changed is that Close now
 	// waits for the close rather than returning while it happens.
-	var err error
-	closerDone := make(chan struct{})
-	go func() {
-		defer close(closerDone)
-		err = db.dbCloser.Close()
-	}()
-
-	select {
-	case <-closerDone:
-	case <-time.After(closeGrace):
-		// The drains are bounded above, so the only unbounded step left is the
-		// store's own Close. This is the one case where the store really was
-		// not closed, and it is reported as such rather than as goroutines
-		// still running.
-		return fmt.Errorf("storer was not closed: its own close did not finish within %s", closeGrace)
-	}
+	// The store's own Close is NOT given a timer. Bounding it and returning
+	// early is the defect this issue is about, just with a different number:
+	// an earlier draft used five seconds and CI found a real store on Windows
+	// takes longer than that, so Close reported the store as unclosed while it
+	// was still closing and the test could not delete its files.
+	//
+	// The drains above are bounded, so this is the last step and nothing is
+	// racing it. A pathological store close blocks shutdown, which is visible,
+	// and cmd/bee still exits on a second interrupt. That is a better failure
+	// than reporting either success or failure while the store is open.
+	err := db.dbCloser.Close()
 
 	if !reserveOK || !cacheOK {
 		return errors.Join(

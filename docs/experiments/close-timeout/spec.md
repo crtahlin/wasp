@@ -88,10 +88,15 @@ What is implemented instead:
   shorten it.
 - `Close` **waits for the close** rather than racing it. That is the whole fix:
   the defect was returning early, not the length of the drain.
-- The store's own `Close` gets a named grace, since neither the drain window nor
-  `ShutdownTimeout` covers it. That is a second number and the spec no longer
-  pretends otherwise; what it is not is a second number in a *race* with the
-  first, which is what caused the defect.
+- The store's own `Close` gets **no timer at all**. A first implementation gave
+  it a five second grace and CI found a real store on Windows takes longer than
+  that, so `Close` reported the store as unclosed while it was still closing
+  and the test could not delete its files. Bounding this step and returning
+  early is the defect itself with a different number. The drains above are
+  bounded, so this is the last step and nothing races it; a pathological store
+  close blocks shutdown, which is visible, and `cmd/bee` still exits on a
+  second interrupt. That is better than reporting either outcome while the
+  store is open, and it leaves exactly one number in the change.
 - The two failures are reported differently: a drain that did not finish is not
   the same as a store that was not closed, and the message says which.
 
@@ -125,8 +130,8 @@ was still pending. Making `Close` wait fixes it for every value of both.
 **Shutdown can take longer than it does today, by design.** Today `Close`
 returns after three seconds and the process exits with the store open; after
 this it waits for the store to be closed. That is the point, and it is bounded:
-the drains cannot exceed the drain window, so the worst case is that window
-plus the grace.
+the drains cannot exceed the drain window, and the store's own close is then
+waited for rather than raced.
 
 Nothing changes for a clean shutdown, where the drains return immediately, and
 that is pinned by a test rather than asserted.

@@ -158,8 +158,8 @@ func NewForCloseTest(t *testing.T, dbCloser io.Closer, drainWindow time.Duration
 	t.Cleanup(cancel)
 
 	return &DB{
-		logger:          log.Noop,
-		quit:            make(chan struct{}),
+		logger:      log.Noop,
+		quit:        make(chan struct{}),
 		dbCloser:    dbCloser,
 		drainWindow: drainWindow,
 		cacheLimiter: cacheLimiter{
@@ -178,7 +178,6 @@ func HoldInFlight(db *DB) func() {
 	var once sync.Once
 	return func() { once.Do(db.inFlight.Done) }
 }
-
 
 // HoldCacheWork adds one unit of cache work and returns the release, so a test
 // can make the cache drain time out. See #428.
