@@ -14,14 +14,16 @@ commits below are wasp's own.
   `neutral` no measurable effect). A `done` row carrying neither word is merged
   but not yet measured, so the issue itself can still be open. `open` means no
   wasp change has merged for it yet. `not planned` means the issue was closed
-  without a wasp change. `(via #N)` or `(bundled with #N)` means the fix
+  without a wasp change to node behaviour. `(via #N)` or `(bundled with #N)` means the fix
   landed inside another issue's pull request.
 - **Branch** is the fork branch the work was built on. Fork branches are never
   deleted, so each one still exists. A dash means the issue has no branch of its
   own: the fix shared another issue's branch, the issue is still open, or no
   wasp change was made.
 - **Commit** links the merge commit on `main`. A dash means no wasp change has
-  merged.
+  merged. A `not planned` row can still carry one: what landed there is
+  whatever the fork did keep, which may be only the tests and the record of
+  why no fix was made.
 - **Title** follows the issue's own title, with punctuation normalized to ASCII
   under the writing rules. Some older issue titles contain em-dashes; those read
   as commas here. This reverses an earlier instruction not to edit titles in
@@ -38,7 +40,7 @@ numbers can collide with upstream Bee pull-request numbers in the shared
 history, so the commits here were resolved from fork-only merges, not by issue
 number alone.
 
-**#430 keeps its label although wasp made no change, and the reason is worth
+**#430 keeps its label although wasp landed no behaviour change, and the reason is worth
 stating**, because "not planned" would otherwise read as "not a real problem".
 `MigratePeer` is byte for byte the same upstream, and a failure between its
 writes does leave two peers mapped to one beneficiary there as here. What
@@ -119,7 +121,7 @@ whether upstream has the problem. See
 | [#438](https://github.com/crtahlin/wasp/issues/438) | retrieval: a flight ends on the error budget while a request is still in flight, so the delivery is thrown away | done | `fix/438-flight-exit` | [`4f88343c`](https://github.com/crtahlin/wasp/commit/4f88343c) |
 | [#440](https://github.com/crtahlin/wasp/issues/440) | api: GET /chunks answers 500 when the peer walk is exhausted, where /bzz answers 404 | done | `fix/440-chunk-notfound` | [`15a2d874`](https://github.com/crtahlin/wasp/commit/15a2d874) |
 | [#449](https://github.com/crtahlin/wasp/issues/449) | api: POST /pins answers 500 when the peer walk is exhausted, the same defect as #440 on a second endpoint | done | `fix/449-pin-notfound` | [`726c5b35`](https://github.com/crtahlin/wasp/commit/726c5b35) |
-| [#430](https://github.com/crtahlin/wasp/issues/430) | swap: MigratePeer is not atomic, so a failed delete leaves two peers sharing one beneficiary | not planned | `fix/430-migratepeer` | - |
+| [#430](https://github.com/crtahlin/wasp/issues/430) | swap: MigratePeer is not atomic, so a failed delete leaves two peers sharing one beneficiary | not planned | `fix/430-migratepeer` | [`b0fb7d82`](https://github.com/crtahlin/wasp/commit/b0fb7d82) |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
