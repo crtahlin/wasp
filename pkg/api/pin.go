@@ -16,6 +16,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
 	"github.com/ethersphere/bee/v2/pkg/traversal"
 	"github.com/gorilla/mux"
 	"golang.org/x/sync/semaphore"
@@ -114,7 +115,11 @@ func (s *Service) pinRootHash(w http.ResponseWriter, r *http.Request) {
 
 	if err := errors.Join(err, errTraverse); err != nil {
 		logger.Error(errors.Join(err, putter.Cleanup()), "pin collection failed")
-		if errors.Is(err, storage.ErrNotFound) {
+		// wasp #449, the same as #440 on GET /chunks: traversal wraps the
+		// getter's error with %w, so a depleted peer walk arrives here as
+		// topology.ErrNotFound. That is a statement about the network rather
+		// than about this node, so it belongs with the other 404s.
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound) {
 			jsonhttp.NotFound(w, "pin collection failed")
 			return
 		}
