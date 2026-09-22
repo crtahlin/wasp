@@ -8,9 +8,9 @@ Measured 2026-09-22 on the two-node bench, `bench-1` as the provider and
 `t435-corr.sh` and `t435-which.sh`, outside this repository.
 
 Two mechanisms have already been proposed for this issue and both were
-withdrawn. This document does not propose a third. It reports what six
-measurements say, and the mechanism that follows from them is the one that fits
-every number, including the number that fitted nothing before.
+withdrawn. This document does not propose a third. It reports what the
+measurements below say, and the mechanism that follows from them is the one
+that fits every number, including the number that fitted nothing before.
 
 ## The symptom is unchanged by #438
 
@@ -38,7 +38,10 @@ connected set. `preferredCandidates` keeps a peer only when
 is the set `GET /topology` reports under `connectedPeers`. They are different
 sets and a dial enters one before the other.
 
-Polling both, three trials, identical to two decimal places in all three:
+Polling both at 100 ms, three trials, identical to two decimal places in all
+three. `dial-race.md` records that identical readings can be measuring the poll
+interval rather than the event, so the figures below are resolved to about
+0.1 s and no finer; the argument needs only that 0.38 s is far short of 2.34 s.
 
 | | provider appears |
 |---|---|
@@ -70,6 +73,15 @@ sole-source at redundancy NONE:
 | 4 | aged 90 s | yes | 200, 4 MiB, checksum matches | +1043 | +1041 |
 
 Age does nothing. Connection state at the moment the request starts decides it.
+
+**One number in that table is not understood and is flagged rather than passed
+over**, since this document's whole argument is that a figure fitting nothing
+must be chased. Arms 2 and 4 record 1,038 and 1,041 preferred hits on an object
+of **1,033** chunks. `dial-race.md` and `flight-exit-results.md` both record the
+invariant 1,035 attempts and 1,033 hits for the same object, over ten runs
+between them. Hits above the chunk count are unexplained. They do not bear on
+the 404 against 200 result, which is what these arms exist to separate, but
+they are not noise either.
 
 ## The 14 attempts are not the download
 
@@ -129,6 +141,15 @@ Our chunk was asked of more than thirty ordinary peers, every one answering
 `storage: not found`, and **never once of the provider**, which was connected
 in Kademlia from 0.38 s and holding it throughout.
 
+**The log alone does not carry that conclusion, and the counter does.**
+`pkg/retrieval` logs a peer when a result arrives, not when a request is
+dispatched, so a request whose result is discarded on `quit` leaves no line,
+which is exactly #438's mechanism. `PreferredAttempts` is incremented at
+dispatch (`preferred.go:254`) and moved by exactly 14, matching the fourteen
+log lines one for one. So no fifteenth dispatch is hidden behind a discarded
+result, and the absence of our chunk from the provider's fourteen is a fact
+about dispatches rather than about logging.
+
 The 14 are a different set of chunks, and they are different chunks each run:
 two consecutive runs with different content gave 14 addresses each and **zero
 overlap**, spread close to uniformly across the address space.
@@ -146,26 +167,46 @@ and never rebuilt inside it (`pkg/retrieval/retrieval.go:232`), and
 - For sole-source content the first chunk is the root, and without the root
   there is nothing else to fetch, which is why the answer is 404 rather than a
   truncated body.
-- Chunks whose flights begin **after** 0.38 s do get a non-empty list, and they
-  are the 14. They are refused because the provider does not hold them.
+- Chunks whose flights begin **after** 0.38 s would get a non-empty list. That
+  is consistent with fourteen attempts existing at all, but this document does
+  **not** claim the 14 are those flights: the only identification it tried is
+  withdrawn above, and nothing else here establishes what they are. They are refused because the provider does not hold them.
 - Run B succeeds because the provider is already connected when the content
   chunk's flight starts.
 - Age is irrelevant because nothing here depends on the store.
 - #438's fix does not help because the delivery is not discarded. It is never
   requested.
 
-**What the 14 chunks are is not yet confirmed, and is recorded as open rather
-than asserted.** They are not content: constant at 14 across three content
-sizes, different addresses for different content, uniformly spread, and refused
-as not held. That shape matches the provider index and record lookups this fork
-performs for a hinted request, which are SOC addresses derived from a content
-key and a window (`pkg/providers/keys.go`, `Slots = 8` per content key per
-window), and those would not be held by a provider reached through an explicit
-hint rather than through discovery. **Confirming it takes one step and no
-guesswork:** compute the slot and record addresses for the reference and the
-current and previous windows with the repository's own `SlotID` and
-`RecordID`, and compare them with the 14. Until that is done the identification
-is a strong fit, not a finding.
+**What the 14 chunks are is unexplained, and the one explanation this document
+first offered is withdrawn.** They are not content: constant at 14 across three
+content sizes, different addresses for different content, uniformly spread, and
+refused as not held.
+
+An earlier revision proposed that they are the provider index and record
+lookups this fork performs for a hinted request, and called it a strong fit.
+**Review refuted it against the code it cited, on three independent grounds**,
+and the withdrawal is recorded rather than the paragraph quietly rewritten:
+
+- `Discover` is called with the preferred set deliberately set to nil,
+  `s.providers.Discover(retrieval.WithPreferredPeers(ctx, nil), ...)`
+  (`pkg/api/providers.go:114-119`), precisely so that a lookup's own reads do
+  not go to the download's preferred peers. So a slot or record read cannot
+  become a preferred attempt at all.
+- `Lookup` reads **one** window, `w := WindowAt(now)`
+  (`pkg/providers/providers.go:306`). With `Slots = 8` the hypothesis predicts
+  eight reads, not fourteen.
+- Discovery only starts after `discoverAfterChunks = 64` fetches
+  (`pkg/api/providers.go:35`). The failing runs die on the root chunk, and the
+  one-chunk correlation run makes about one fetch, so discovery almost
+  certainly never began.
+
+The document had `Slots = 8` in hand, did not multiply it, and did not read the
+call site. That is the failure rule 11 exists for, and it is named here rather
+than removed.
+
+So the 14 are unidentified. What is established about them stands on its own:
+they are not the download's chunks, they do not scale with the content, and the
+provider refuses them.
 
 It does not change the mechanism above either way. The 14 are noise with
 respect to the download, and the defect is the content chunk being asked of
@@ -212,10 +253,17 @@ provider was disconnected from the requester with `DELETE /peers` before each
 run A and the disconnect confirmed in both connected sets before the request
 was issued.
 
-Rule 7 asks for three runs per condition with the spread. The three-trial table
-and the size table meet that; the 2x2 and the correlation are one run per cell
-and are labelled as such. They are included because each is a qualitative
+Rule 7 asks for three runs per condition with the spread. **Only the
+three-trial table meets that.** The size table is one run at each of three
+sizes, which is three conditions at one run each and not three runs per
+condition, and an earlier revision of this paragraph said otherwise. The 2x2
+and the correlation are one run per cell and are labelled so where they appear. They are included because each is a qualitative
 question, 404 against 200 and zero against fourteen, not a rate, and the 404
-arms have now reproduced in every one of the fifteen runs recorded here.
+arms have now reproduced in every failing run recorded here: three in the
+three-trial table, three in the size table, two in the 2x2, and one each in the
+log capture, the holds check and the two correlation runs, which is twelve
+distinct runs. The three-trial table and the dial table are the same three
+runs seen through two instruments, not six, and an earlier revision counted
+them twice.
 
 Generated with help of AI.

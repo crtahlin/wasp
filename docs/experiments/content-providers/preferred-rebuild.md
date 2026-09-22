@@ -5,8 +5,12 @@ Type: fix.
 
 ## Problem
 
-Measured, in
-[`preferred-cold-start.md`](preferred-cold-start.md): on the first hinted
+[`preferred-refresh.md`](preferred-refresh.md) recorded the previous design's
+withdrawal and said no change was proposed yet, and that the mechanism was not
+established. **This spec supersedes it on both counts**, with the measurement
+in [`preferred-cold-start.md`](preferred-cold-start.md).
+
+Measured there: on the first hinted
 download after a disconnect, **the download's own chunk is asked of more than
 thirty ordinary peers and never once of the provider**, which is connected in
 Kademlia from 0.38 s of a 2.34 s request and holding the content throughout.
@@ -44,10 +48,12 @@ Rebuild the candidate list when it runs out, from the **live** preferred set,
 and never offer the same peer twice in one flight.
 
 ```go
-// when len(candidates) == 0, before falling through to ordinary selection
-if preferredSet != nil {
+// when len(candidates) == 0, before falling through to ordinary selection.
+// peers is the live set; an empty one is the common case on a
+// providers-enabled node and must not cost a rebuild. See the guard note.
+if peers := preferredSet.Peers(); len(peers) > 0 {
     fresh := s.preferredCandidates(
-        preferredSet.Peers(),                    // live, so Discover is visible
+        peers,                                   // live, so Discover is visible
         chunkAddr,
         append(skip.ChunkPeers(chunkAddr), s.errSkip.ChunkPeers(chunkAddr)...),
     )
@@ -61,6 +67,8 @@ if preferredSet != nil {
 ```
 
 `offered` is a per-flight set seeded with the initial candidates.
+`preferredSet` is only read here when it is non-nil, which the enclosing
+`origin && s.providers.Load()` block already establishes.
 
 Reading `preferredSet.Peers()` rather than the `preferredPeers` snapshot is
 what closes the discovery gap, and it is the reason the rebuild is not simply a
@@ -71,9 +79,21 @@ flight started is visible. `Peers` also drops peers currently demoted for
 repeated misses, which the snapshot path never re-evaluated either.
 
 The combined skip is the same expression ordinary selection already uses a few
-lines below (`retrieval.go:369`), so this is not a new idea about what to
+lines below (`retrieval.go:370`), so this is not a new idea about what to
 exclude, only the same one applied to the preferred list, which line 232 never
 did.
+
+**The singleflight key is not recomputed, and that is deliberate.**
+`flightRoute` embeds a fingerprint of `preferredPeers` taken before the flight
+(`retrieval.go:206-211`), so reading the live set inside the loop makes the key
+describe a set the flight no longer has. `preferred-refresh.md` raised this
+against the earlier design and it is answered here rather than left: the key's
+job is to join concurrent requests for the same chunk with the same hint, and
+joining a request that started with a narrower set to one that has since
+discovered more is the outcome that serves the caller. Recomputing the key
+mid-flight would instead split a flight from itself. The implementation must
+not move the fingerprint, and a test should pin that two requests with the same
+hint still share one flight after a rebuild.
 
 ### Why this terminates, which is where the previous design failed
 
@@ -103,7 +123,9 @@ would be throttled by `overDraftRefresh` rather than spinning, but it would
 keep a preferred candidate present indefinitely, and that has a cost described
 below. `offered` removes the question: **at most one entry per peer in the
 preferred set ever enters the loop**, so the number of rebuilds that add
-anything is bounded by the size of that set, which for a hint is a handful.
+anything is bounded by the size of that set: at most `maxProviderHints = 8`
+for an explicit hint, and about `lookupCandidates = 16` once discovery has
+run.
 
 A third guard comes free and is worth naming because it is easy to remove by
 accident: `Peers` already excludes peers demoted for repeated misses, so a
@@ -129,10 +151,24 @@ rebuild, so **this cost has to be measured here and not inherited.**
 The bound is what makes it arguable rather than open ended: the extra candidates
 are at most the preferred set, once each.
 
-**A request carrying no hint is untouched.** `preferredSet` is nil unless the
-request carried `Wasp-Providers` or discovery found something, so a forwarder
-and an ordinary download run exactly as before, and a stock Bee peer sees no
-difference.
+**The guard is about the set's contents, not its presence**, and an earlier
+revision of this spec had that wrong. It said `preferredSet` is nil unless the
+request carried `Wasp-Providers` or discovery found something. It is not:
+`withProviders` builds one unconditionally (`pkg/api/providers.go:93-98`) and
+attaches it to every origin download, so on a providers-enabled node the set is
+present and usually empty. A guard on `preferredSet != nil` would therefore run
+the rebuild on every retry iteration of every unhinted download.
+
+What that costs is small but must be stated rather than assumed: one mutex
+acquisition and one zero-length allocation per iteration for an empty set, and
+for a non-empty one a `connectedFullNode` call per peer, which is a Kademlia
+lookup. With `maxOriginErrors = 32` and the preemptive ticker that is tens of
+lookups per chunk in the worst case. The rebuild therefore runs only when the
+set actually has peers.
+
+**A forwarder is untouched** whatever the guard: `origin` is false for it, so
+`preferredPeers` is never populated and no preferred path runs. A stock Bee
+peer sees no difference either way.
 
 ## Rejected: wait for the dial before retrieval starts
 
@@ -205,11 +241,22 @@ itself a case where counters pointed away from the defect twice.
 | 1 | Does the first hinted download after a disconnect complete? 4 MiB sole-source, redundancy NONE, three runs | any run returns 404 |
 | 2 | Is a warm hinted download unchanged? Same content, provider already connected | rate outside the control's spread |
 | 3 | Is an unhinted download unchanged? Network-held 16 MiB | rate outside the control's spread |
-| 4 | How much wider is the ordinary walk? `peer_request_count` over `request_attempts_count`, hinted, both builds | recorded, not a reject; a large rise reopens the cap question |
+| 4 | How much wider is the ordinary walk? See the note below on what this can and cannot measure | recorded, not a reject; a large rise reopens the cap question |
 | 5 | Does a reference nobody holds still fail fast? Fresh and warm relationship | any run hangs past the control |
 
-Arm 1 is the one that fails today, 404 in every one of the fifteen runs
-recorded in `preferred-cold-start.md`.
+Arm 1 is the one that fails today, 404 in every failing run recorded in
+`preferred-cold-start.md`.
+
+**Arm 4 needs a metric this repository does not yet have.**
+`peer_request_count` is incremented at the top of the retry branch
+(`retrieval.go:303`), before the candidates block, so it counts **loop
+iterations** and not outbound requests to ordinary peers. A preferred dispatch
+and a dropped candidate each consume one, so the ratio moves under this change
+for reasons that are not a wider walk. `flight-exit-results.md` used the same
+ratio, in a build with no rebuild, where that confound did not arise. So arm 4
+either counts ordinary dispatches separately, which is a counter the
+implementation should add next to `PreferredRebuilds`, or it is reported with
+that caveat and treated as an upper bound.
 
 ## Rollout and rollback
 
