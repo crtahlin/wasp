@@ -3,6 +3,82 @@
 Issue: [#430](https://github.com/crtahlin/wasp/issues/430).
 Type: fix.
 
+> ## Withdrawn at implementation: the reordering is worse than the defect
+>
+> **The change this spec proposes was implemented, reviewed, measured against
+> the code, and withdrawn before it reached `main`.** It is not a smaller
+> improvement than claimed. It replaces a failure the node recovers from with
+> one it cannot recover from at all. Everything below the withdrawal is the
+> original argument, kept because the reasoning is what turned out to be
+> wrong and deleting it would hide that.
+>
+> **What the spec missed.** The whole argument rests on one sentence, that a
+> beneficiary mapped to nobody "is an availability gap that the next
+> announcement repairs, because `PutBeneficiary` is the same call that
+> established it". The announcement never reaches `PutBeneficiary`.
+> `pkg/settlement/swap/swap.go:255-271` reads the **reverse** mapping first:
+>
+> ```go
+> oldPeer, known, err := s.addressbook.BeneficiaryPeer(beneficiary)
+> if known && !peer.Equal(oldPeer) {
+>     return s.addressbook.MigratePeer(oldPeer, peer)   // taken every time
+> }
+> _, known, err = s.addressbook.Beneficiary(peer)
+> if !known {
+>     return s.addressbook.PutBeneficiary(peer, beneficiary)  // never reached
+> }
+> ```
+>
+> `MigratePeer` deletes only the forward key and **nothing in the repository
+> ever deletes `beneficiaryPeerKey`**. So after a delete-first migration whose
+> put fails, the reverse key still names the old peer while the old peer's
+> forward key is gone. Every later handshake takes the migrate branch and
+> `MigratePeer` returns `old beneficiary not known` from its own guard at
+> `addressbook.go:67-69`.
+>
+> **That is not a missed payment.** `Handshake` is the swap protocol's
+> `ConnectIn` **and** `ConnectOut` (`swapprotocol.go:100-101`), and libp2p
+> disconnects the peer when either returns an error
+> (`pkg/p2p/libp2p/libp2p.go:693` inbound, `:1220` outbound). The node can
+> never complete a swap handshake with that peer again, across restarts, and
+> no code path repairs it.
+>
+> **The shipped order recovers from every one of these failures**, which is
+> what the spec should have checked and did not.
+> `TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair` injects a
+> failure at each of the four writes in turn and then asks the real
+> `swap.Service.Handshake` to put the addressbook right. It does, in all four
+> cases. Reapplying the reordering makes the first case fail with
+> `old beneficiary not known`, which is the mutation that decides this.
+>
+> **So the issue is closed without a code change**, and what remains of it is
+> recorded rather than dropped:
+>
+> - The double mapping the issue describes is real, but its original
+>   consequence has already been removed by
+>   [#317](https://github.com/crtahlin/wasp/issues/317)'s per-beneficiary lock
+>   around the cumulative payout, as the *Relationship to #317* section below
+>   already said. What is left is two overlays resolving to one chequebook,
+>   which the per-beneficiary lock serializes correctly.
+> - The wedge state is **not reachable on the shipped order**, and this spec
+>   says so rather than leaving the withdrawal sounding like a bug report.
+>   `addressbook.go:80` is the only delete of a forward beneficiary key in the
+>   repository, and the reverse key is never deleted anywhere, so the put that
+>   moves the reverse mapping always precedes the delete. What is wrong is that
+>   this ordering is load-bearing, undocumented, and unrecoverable if violated,
+>   which is hardening rather than a defect. That is
+>   [#462](https://github.com/crtahlin/wasp/issues/462), with the reproduction
+>   from here.
+> - The tests are kept. They pin the recovery property, and they cover the two
+>   reverse mappings, which had no coverage at all: deleting the reverse write
+>   from `PutBeneficiary` left the whole package passing.
+>
+> **The general lesson, since this is the second withdrawal in this area.** The
+> spec argued from which *state* a failure leaves behind and never asked which
+> states the node can *get out of*. For anything without a transaction that is
+> the only question that matters, and it is answered by driving the real
+> recovery path, not by reading the write order.
+
 ## Problem
 
 `MigratePeer` moves a beneficiary from one peer to another with separate
