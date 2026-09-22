@@ -89,10 +89,11 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#399](https://github.com/crtahlin/wasp/issues/399) | Shutdown race: reserve worker iterates the store while it is being closed, SIGSEGV under pebble | done | `fix/399-shutdown-race` | [`dc9f69c6`](https://github.com/crtahlin/wasp/commit/dc9f69c6) |
 | [#407](https://github.com/crtahlin/wasp/issues/407) | Reserve worker's evict and unreserve store operations are not interrupted on shutdown | done | `fix/407-shutdown-interrupt` | [`735f8613`](https://github.com/crtahlin/wasp/commit/735f8613) |
 | [#409](https://github.com/crtahlin/wasp/issues/409) | api: a directory upload with a non-tar body returns 500 instead of 400 | done | `fix/409-non-tar-body-status` | [`167a8d7a`](https://github.com/crtahlin/wasp/commit/167a8d7a) |
-| [#424](https://github.com/crtahlin/wasp/issues/424) | api: two malformed multipart directory uploads return 500 instead of 400 | open | - | - |
+| [#424](https://github.com/crtahlin/wasp/issues/424) | api: two malformed multipart directory uploads return 500 instead of 400 | done | `fix/424-multipart-status` | [`05672a98`](https://github.com/crtahlin/wasp/commit/05672a98) |
+| [#455](https://github.com/crtahlin/wasp/issues/455) | api: two more malformed multipart bodies answer 500, which #424 did not cover | open | - | - |
 | [#438](https://github.com/crtahlin/wasp/issues/438) | retrieval: a flight ends on the error budget while a request is still in flight, so the delivery is thrown away | done | `fix/438-flight-exit` | [`4f88343c`](https://github.com/crtahlin/wasp/commit/4f88343c) |
 | [#440](https://github.com/crtahlin/wasp/issues/440) | api: GET /chunks answers 500 when the peer walk is exhausted, where /bzz answers 404 | done | `fix/440-chunk-notfound` | [`15a2d874`](https://github.com/crtahlin/wasp/commit/15a2d874) |
-| [#449](https://github.com/crtahlin/wasp/issues/449) | api: POST /pins answers 500 when the peer walk is exhausted, the same defect as #440 on a second endpoint | open | - | - |
+| [#449](https://github.com/crtahlin/wasp/issues/449) | api: POST /pins answers 500 when the peer walk is exhausted, the same defect as #440 on a second endpoint | done | `fix/449-pin-notfound` | [`726c5b35`](https://github.com/crtahlin/wasp/commit/726c5b35) |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
