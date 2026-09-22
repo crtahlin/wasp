@@ -22,6 +22,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
 	"github.com/gorilla/mux"
 )
 
@@ -263,8 +264,13 @@ func (s *Service) chunkGetHandler(w http.ResponseWriter, r *http.Request) {
 
 	chunk, err := s.storer.Download(cache).Get(r.Context(), address)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			loggerV1.Debug("chunk not found", "address", address)
+		// wasp #440: topology.ErrNotFound means retrieval ran out of peers to
+		// ask, which is a statement about the network rather than about this
+		// node, so it is a 404 like any other chunk that could not be fetched.
+		// bzz.go has always mapped both; only this endpoint answered 500, and
+		// a caller talking to both had to special-case it.
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound) {
+			loggerV1.Debug("chunk not found", "address", address, "error", err)
 			jsonhttp.NotFound(w, "chunk not found")
 			return
 
