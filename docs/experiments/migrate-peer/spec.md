@@ -29,27 +29,72 @@ Type: fix.
 > }
 > ```
 >
-> `MigratePeer` deletes only the forward key and **nothing in the repository
-> ever deletes `beneficiaryPeerKey`**. So after a delete-first migration whose
-> put fails, the reverse key still names the old peer while the old peer's
-> forward key is gone. Every later handshake takes the migrate branch and
-> `MigratePeer` returns `old beneficiary not known` from its own guard at
-> `addressbook.go:67-69`.
+> `MigratePeer` deletes only the forward key, so after a delete-first migration
+> whose put fails, the reverse key still names the old peer while the old
+> peer's forward key is gone. Call that state **the wedge**: a reverse mapping
+> naming a peer that has no forward mapping. Every later handshake takes the
+> migrate branch and `MigratePeer` returns `old beneficiary not known` from its
+> own guard at `addressbook.go:67-69`.
 >
-> **That is not a missed payment.** `Handshake` is the swap protocol's
-> `ConnectIn` **and** `ConnectOut` (`swapprotocol.go:100-101`), and libp2p
-> disconnects the peer when either returns an error
-> (`pkg/p2p/libp2p/libp2p.go:693` inbound, `:1220` outbound). The node can
-> never complete a swap handshake with that peer again, across restarts, and
-> no code path repairs it.
+> **That is not a missed payment.** `Handshake` is reached from
+> `swapprotocol`'s `init`, which is registered as both `ConnectOut` and
+> `ConnectIn` (`swapprotocol.go:101-102`, calling `Handshake` at `:109`), and
+> libp2p disconnects the peer when either returns an error
+> (`pkg/p2p/libp2p/libp2p.go:693` inbound, `:1220` outbound). The node cannot
+> complete a swap handshake with that peer again, across restarts.
+>
+> **Correction, found by review of this withdrawal.** An earlier version of
+> this section said "nothing in the repository ever deletes
+> `beneficiaryPeerKey`" and that `addressbook.go:80` is "the only delete of a
+> forward beneficiary key in the repository". **Both are false**, and saying so
+> here matters more than usual, because the lesson this withdrawal draws is
+> that the original spec asserted something about the code without checking it.
+>
+> `ClearForHopping` (`pkg/statestore/storeadapter/storeadapter.go:201-217`)
+> preserves only `swap_chequebook`, `batchstore` and `transaction`, and
+> bulk-deletes the rest. It therefore deletes **both** beneficiary keys, and
+> `swap_chequebook_peer_` survives only because the preserve list carries the
+> `swap_chequebook` prefix. So the wedge does have a clearing path: an operator
+> restarting the node with a new `target-neighborhood`
+> (`pkg/node/node.go:540-559`). `bee db nuke` is not one, because `Nuke`
+> preserves the whole `swap` prefix, but `bee db nuke --forget-overlay` removes
+> the statestore directory outright and is.
+>
+> None of that is a repair a node performs for itself, so the substance stands:
+> nothing the node does on its own recovers from the wedge.
 >
 > **The shipped order recovers from every one of these failures**, which is
 > what the spec should have checked and did not.
-> `TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair` injects a
-> failure at each of the four writes in turn and then asks the real
-> `swap.Service.Handshake` to put the addressbook right. It does, in all four
-> cases. Reapplying the reordering makes the first case fail with
-> `old beneficiary not known`, which is the mutation that decides this.
+> `TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair` injects a store
+> failure and then asks the real `swap.Service.Handshake` to put the
+> addressbook right. It does, in every case. Reapplying the reordering makes
+> the beneficiary case fail with `old beneficiary not known`, which is the
+> mutation that decides this.
+>
+> **`MigratePeer` makes six store mutations, not four**, and the test reaches
+> four of them:
+>
+> | | write | reached by the test |
+> |---|---|---|
+> | 1 | `PUT swap_peer_beneficiary_<new>` | yes |
+> | 2 | `PUT swap_beneficiary_peer_<ba>` | no |
+> | 3 | `DELETE swap_peer_beneficiary_<old>` | yes |
+> | 4 | `PUT swap_chequebook_peer_<new>` | yes |
+> | 5 | `PUT swap_peer_chequebook_<cb>` | no |
+> | 6 | `DELETE swap_chequebook_peer_<old>` | yes |
+>
+> The wrapper selects a write by a substring of its key, and the two reverse
+> puts share no substring that distinguishes them from the forward ones. Write
+> 2 is the one whose position relative to write 3 is the entire invariant, so
+> this gap is named rather than left to be discovered.
+>
+> **The recovery repairs the beneficiary mapping only.** `Handshake` re-runs
+> `MigratePeer` just when the reverse beneficiary mapping still names somebody
+> else, so a migration that failed after the beneficiary half completed looks
+> settled and the chequebook half is never finished. The new peer is then left
+> with no chequebook, which `ReceiveCheque` treats as not known and fills in
+> from the next cheque it accepts. That is a gap which closes, not a wrong
+> value, and the test asserts it per case rather than assuming it.
 >
 > **So the issue is closed without a code change**, and what remains of it is
 > recorded rather than dropped:
@@ -60,13 +105,26 @@ Type: fix.
 >   around the cumulative payout, as the *Relationship to #317* section below
 >   already said. What is left is two overlays resolving to one chequebook,
 >   which the per-beneficiary lock serializes correctly.
-> - The wedge state is **not reachable on the shipped order**, and this spec
->   says so rather than leaving the withdrawal sounding like a bug report.
->   `addressbook.go:80` is the only delete of a forward beneficiary key in the
->   repository, and the reverse key is never deleted anywhere, so the put that
->   moves the reverse mapping always precedes the delete. What is wrong is that
->   this ordering is load-bearing, undocumented, and unrecoverable if violated,
->   which is hardening rather than a defect. That is
+> - The wedge is **not reachable on the shipped order**, and this spec says so
+>   rather than leaving the withdrawal sounding like a bug report.
+>   `MigratePeer` is the only code that deletes a forward beneficiary key by
+>   key, and it always writes the reverse mapping before that delete, so it
+>   cannot produce the wedge.
+>
+>   The bulk path needs its own sentence, since it deletes both keys.
+>   `collectKeysExcept` iterates with `storage.Query` carrying no `Order`, and
+>   `KeyAscendingOrder` is that field's zero value
+>   (`pkg/storage/storage.go:68-69`), so the keys come back sorted and
+>   `swap_beneficiary_peer_` sorts before `swap_peer_beneficiary_`. `deleteKeys`
+>   then deletes them in that order, one at a time with no batch. A crash part
+>   way through therefore loses the reverse key first, which is the harmless
+>   direction. **That is incidental and nothing enforces it**: renaming either
+>   prefix reverses the sort and makes the wedge reachable through an
+>   interrupted hop, and no test covers the dependency.
+>
+>   So the ordering is load-bearing in two places, undocumented in both, and
+>   unrecoverable by the node if violated. That is hardening rather than a
+>   defect, and it is
 >   [#462](https://github.com/crtahlin/wasp/issues/462), with the reproduction
 >   from here.
 > - The tests are kept. They pin the recovery property, and they cover the two

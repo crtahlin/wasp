@@ -42,14 +42,24 @@ number alone.
 stating**, because "not planned" would otherwise read as "not a real problem".
 `MigratePeer` is byte for byte the same upstream, and a failure between its
 writes does leave two peers mapped to one beneficiary there as here. What
-differs is the consequence. Wasp already serializes the cumulative payout with
-a per-beneficiary lock, merged for
+differs is the consequence. Wasp serializes the cumulative payout with a
+per-beneficiary lock, merged for
 [#317](https://github.com/crtahlin/wasp/issues/317), so two overlays resolving
-to one chequebook settle correctly. Upstream has no such lock, so there the
-same state is a lost update on the cumulative payout rather than a harmless
-duplicate. Wasp closed the issue because the fix it proposed, reordering the
-writes, was measured to be worse than the defect; that finding is about the
-fix, not about whether upstream has the problem. See
+to one chequebook settle correctly. Upstream's `chequebook.Issue` has no such
+lock.
+
+**The difference in consequence is reasoned, not reproduced**, and rule 11 asks
+for that to be said. What is checked is the code on both sides: wasp's
+`Issue` takes `beneficiaryLocks` around the read of the last cheque and the
+write of the new one (`pkg/settlement/swap/chequebook/chequebook.go:229-231`,
+`:240`, `:278`), and `git show upstream/v2.8.2:pkg/settlement/swap/chequebook/chequebook.go`
+has no equivalent. What is **not** demonstrated is a lost update: that needs
+two concurrent `Issue` calls for one beneficiary from two overlays, and no
+measurement here produced one.
+
+Wasp closed the issue because the fix it proposed, reordering the writes, was
+shown to be worse than the defect. That finding is about the fix, not about
+whether upstream has the problem. See
 [`experiments/migrate-peer/spec.md`](experiments/migrate-peer/spec.md).
 
 **Table: wasp issues that also apply to upstream Bee, with how each was handled**
