@@ -237,6 +237,22 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		if len(candidates) > 0 {
 			s.metrics.PreferredCandidatesSelected.Inc()
 		}
+		// wasp #435: every preferred peer this flight has offered for this
+		// chunk, so a rebuild below can never offer one twice.
+		//
+		// This is what makes the rebuild terminate, and it is deliberately
+		// not left to the skip lists. A peer that is DISPATCHED is recorded
+		// by skip.Forever before it goes out (preferred.go), so the skip list
+		// would exclude it; but a peer refused credit is recorded only for
+		// overDraftRefresh, so once that expires it would become offerable
+		// again, and a peer dropped past its providerWait window would then
+		// be offered and dropped on a cycle. With this set the rebuild is
+		// monotone: at most one entry per peer in the preferred set ever
+		// enters the loop.
+		offered := make(map[string]struct{}, len(candidates))
+		for _, p := range candidates {
+			offered[p.ByteString()] = struct{}{}
+		}
 		var (
 			preferredTimer  *time.Timer
 			preferredTimerC <-chan time.Time
@@ -301,6 +317,44 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 
 				totalRetrieveAttempts++
 				s.metrics.PeerRequestCounter.Inc()
+
+				// wasp #435: the list above is built once, before this loop,
+				// and keeps only peers already connected in KADEMLIA. A
+				// hinted download starts its first chunk's flight before the
+				// dial the same request began has landed, measured at 0.38 s
+				// against a 2.34 s request, so that list is empty and stays
+				// empty for the chunk's whole retry budget. For sole-source
+				// content the first chunk is the root, so the download
+				// returns nothing while the provider sits connected and
+				// holding it.
+				//
+				// Rebuilding from preferredSet.Peers() rather than from the
+				// pre-flight snapshot is also what lets a provider that
+				// Discover appended part way through a download be used by
+				// chunks already in flight.
+				//
+				// The set is read only when it has peers. withProviders
+				// builds one for every origin download, usually empty, so a
+				// nil check would run this on every iteration of every
+				// unhinted download; an empty set costs a mutex and a
+				// zero-length slice, a non-empty one costs a Kademlia lookup
+				// per peer.
+				if preferredSet != nil && len(candidates) == 0 {
+					if peers := preferredSet.Peers(); len(peers) > 0 {
+						fresh := s.preferredCandidates(peers, chunkAddr,
+							append(skip.ChunkPeers(chunkAddr), s.errSkip.ChunkPeers(chunkAddr)...))
+						for _, p := range fresh {
+							if _, seen := offered[p.ByteString()]; seen {
+								continue
+							}
+							offered[p.ByteString()] = struct{}{}
+							candidates = append(candidates, p)
+						}
+						if len(candidates) > 0 {
+							s.metrics.PreferredRebuilds.Inc()
+						}
+					}
+				}
 
 				if len(candidates) > 0 {
 					peer := candidates[0]

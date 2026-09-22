@@ -114,18 +114,28 @@ returns it for the rest of the flight. The withdrawn design did not see this
 because line 232 passes only `s.errSkip`; the peer was recorded all along, in
 the list the candidate builder was not reading.
 
-**`offered` makes it monotone anyway, and that is the load-bearing half.**
-Relying on the skip list alone would not be enough: a peer refused credit is
-added with `overDraftRefresh` rather than for ever (`preferred.go:245`), so it
-becomes re-offerable once that expires, and a peer dropped past its
-`providerWait` window would then be re-offered and dropped again on a cycle. It
-would be throttled by `overDraftRefresh` rather than spinning, but it would
-keep a preferred candidate present indefinitely, and that has a cost described
-below. `offered` removes the question: **at most one entry per peer in the
-preferred set ever enters the loop**, so the number of rebuilds that add
-anything is bounded by the size of that set: at most `maxProviderHints = 8`
-for an explicit hint, and about `lookupCandidates = 16` once discovery has
-run.
+**`offered` makes it monotone**: at most one entry per peer in the preferred
+set ever enters the loop, so the number of rebuilds that add anything is
+bounded by the size of that set, at most `maxProviderHints = 8` for an explicit
+hint and about `lookupCandidates = 16` once discovery has run.
+
+**These are two independent guards over the same hazard, and the mutation
+matrix says so rather than this spec asserting a hierarchy.** Removing either
+one alone changes no test; removing both makes the termination test run until
+its context expires. An earlier revision of this spec called `offered` "the
+load-bearing half", which the measurement does not support.
+
+`offered` does cover one case the skip list does not, and **that case has no
+test**, which is recorded here rather than left to be found later. A peer
+refused credit is added with `overDraftRefresh` rather than for ever
+(`preferred.go:245`), so once that expires the skip list would let it back, and
+a peer already dropped past its `providerWait` window would then be re-offered
+and dropped again on a cycle, throttled by `overDraftRefresh` rather than
+spinning. Covering it needs a test that drives a credit refusal and then
+advances past `overDraftRefresh`, which the accounting mock in this package
+does not make convenient. Until such a test exists, `offered` is justified by
+reading the code and not by a failing test, and it is kept because the hazard
+it covers is real even though the cheaper guard happens to mask it today.
 
 A third guard comes free and is worth naming because it is easy to remove by
 accident: `Peers` already excludes peers demoted for repeated misses, so a
