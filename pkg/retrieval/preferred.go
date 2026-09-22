@@ -253,16 +253,11 @@ func (s *Service) retrievePreferred(
 	skip.Forever(chunkAddr, peer)
 	s.metrics.PreferredAttempts.Inc()
 
-	// The span is built HERE rather than inside the goroutine. safe.Go recovers
-	// a panic at the top of the goroutine, so anything that runs before
-	// retrieveChunk can fail without its defer ever reporting a result. The
-	// flight counts this dispatch and waits for that result, and its context
-	// carries no deadline, so a lost report would stall the flight. See #438.
-	span, _, ctx := s.tracer.FollowSpanFromContext(spanCtx, "retrieve-chunk", s.logger, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
-		attribute.String("swarm.chunk.address", chunkAddr.String()),
-		attribute.Bool("swarm.chunk.preferred", true),
-	))
 	safe.Go(s.logger, "retrieval-retrieve-preferred", func() {
+		span, _, ctx := s.tracer.FollowSpanFromContext(spanCtx, "retrieve-chunk", s.logger, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
+			attribute.String("swarm.chunk.address", chunkAddr.String()),
+			attribute.Bool("swarm.chunk.preferred", true),
+		))
 		defer span.End()
 		s.retrieveChunk(ctx, quit, chunkAddr, peer, resultC, action, span, localOnlyHeaders(), true)
 	})

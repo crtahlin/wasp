@@ -111,6 +111,24 @@ rather than by timing.
 The loop does not spin while it waits: once peers deplete, `:376` continues
 without calling `retry()` and the loop idles on `preemptiveTicker` at 1 Hz.
 
+### Correction, at implementation: the span hoist below is NOT done
+
+> Review of the implementation showed the hoist is a bad trade and it was
+> dropped. `safe.Go` **recovers** a panic at the top of the goroutine. Moving
+> the tracer call outside it does not make that panic harmless, it moves it into
+> the flight loop, which runs in a `singleflight` goroutine with no recover
+> anywhere above it, so an unrecovered panic there ends the process. The stall
+> it was meant to prevent is also milder than stated below: `singleflight`
+> cancels the flight context once the last caller has gone, so a lost report
+> leaks a goroutine for the caller's lifetime rather than forever. Trading a
+> bounded leak for a crash is the wrong way round. The section below is kept
+> because the window it describes is real and someone will propose this again.
+>
+> Which test items were implemented is recorded in the pull request rather than
+> guessed at here: the preferred black hole bound and the ordinary black hole
+> were not written, and the request count is asserted rather than only logged,
+> which reverses what this spec asked for and is the better call.
+
 ### One window has to be closed for the counter to be safe
 
 `preferredInflight` is only sound if every dispatch eventually reports. It does,
