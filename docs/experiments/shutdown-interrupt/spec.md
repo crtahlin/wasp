@@ -1,8 +1,8 @@
 # Spec: stop the evict and unreserve loops on the quit signal
 
 Issue: [#407](https://github.com/crtahlin/wasp/issues/407). Type: fix. Area: storage.
-Affects upstream: to be decided by the reproducing test, as [#291](https://github.com/crtahlin/wasp/issues/291)
-was. See "Upstream" below.
+Affects upstream: **yes**, decided by the reproducing test, as [#291](https://github.com/crtahlin/wasp/issues/291)
+was, and with a difference worth reading. See "Upstream" below.
 
 ## Problem
 
@@ -54,8 +54,17 @@ is withdrawn rather than patched.
 ## The change
 
 Give both loops the prompt exit the scan already has: check the quit signal at a safe
-point between chunks or between batches and stop with `ErrDBQuit`, so the drain finishes
-quickly instead of timing out.
+point between batches and stop with `ErrDBQuit`, so a shutdown between batches finishes
+the drain instead of running past it.
+
+**Between batches, not between chunks, and that bounds what this fixes.** Evicting one
+batch is a single call to `evictBatch`, and `EvictBatchBin` beneath it iterates the whole
+batch prefix with no quit check of its own. So a slow evict made up of one large batch is
+as exposed after this change as before. On a full reserve that is a likely shape, which
+is why the claim here is "a shutdown between batches" rather than "the drain finishes".
+Pushing the check down into `EvictBatchBin` is the complete version and is a larger
+change: that function is shared with the ordinary eviction path, where returning early
+would leave a batch half evicted.
 
 **The alternative, and why it is not taken here.** #399 mentioned making the store
 reject new operations once closing has begun, which would make this whole class
@@ -104,10 +113,32 @@ whether the next start replays the log, so `docs/DIFFERENCES.md` gains a row per
 
 ## Upstream
 
-`pkg/storer/storer.go` **is** modified in this fork, by #399 among others, so a
-file-level diff proves nothing and the question has to be asked of upstream's own copy:
-whether its evict and unreserve loops check a quit signal, and whether its `Close` has
-the same drain-then-close ordering at all. That check belongs in the implementation,
-with the answer recorded, and the label goes on only if the reproducing test reproduces
-against unmodified upstream code. Per rule 11 the label is a marker for a later human
-decision and nothing more.
+**Checked in upstream's own copy, and the answer is more interesting than expected.**
+
+The loops are the same: `evictExpiredBatches` at `upstream/v2.8.2:pkg/storer/reserve.go:188`
+has no quit check, and neither does `unreserve`. The reproducing test fails there for the
+same reason it fails here, so **the label goes on**.
+
+But upstream's `Close` does **not** wait for the drains at all
+(`upstream/v2.8.2:pkg/storer/storer.go:652-657`):
+
+```go
+closerDone := make(chan struct{})
+go func() {
+	defer close(closerDone)
+	err = db.dbCloser.Close()
+}()
+```
+
+It closes the store immediately, concurrently with the drains. The
+`<-bgReserveWorkersClosed` wait this fork has is the #399 fix and is fork-only.
+
+So the exposure is **wider upstream, not narrower**: there the store closes while an
+evict or unreserve is running whether or not that operation is slow, rather than only
+when it outlasts a five second drain. The defect this fixes is upstream's, and the fix
+that makes it rare here, #399's ordering, is not upstream's. That belongs in the issue,
+because someone reading the label later would otherwise assume the wasp patch transplants
+and it does not: upstream needs #399's ordering first, or the quit checks alone leave the
+concurrent close in place.
+
+Per rule 11 the label is a marker for a later human decision and nothing more.

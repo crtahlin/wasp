@@ -87,6 +87,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#382](https://github.com/crtahlin/wasp/issues/382) | p2p: already-connected is decided per address, so a connect over an open connection runs a second handshake and reports as a dial | open | - | - |
 | [#387](https://github.com/crtahlin/wasp/issues/387) | postage: TestCrashRecovery assumes two random addresses land in different buckets, so it fails about 1 run in 256 | done | `fix/387-crash-recovery-buckets` | [`3a83199c`](https://github.com/crtahlin/wasp/commit/3a83199c) |
 | [#399](https://github.com/crtahlin/wasp/issues/399) | Shutdown race: reserve worker iterates the store while it is being closed, SIGSEGV under pebble | done | `fix/399-shutdown-race` | [`dc9f69c6`](https://github.com/crtahlin/wasp/commit/dc9f69c6) |
+| [#407](https://github.com/crtahlin/wasp/issues/407) | Reserve worker's evict and unreserve store operations are not interrupted on shutdown | open | - | - |
 | [#409](https://github.com/crtahlin/wasp/issues/409) | api: a directory upload with a non-tar body returns 500 instead of 400 | done | `fix/409-non-tar-body-status` | [`167a8d7a`](https://github.com/crtahlin/wasp/commit/167a8d7a) |
 | [#424](https://github.com/crtahlin/wasp/issues/424) | api: two malformed multipart directory uploads return 500 instead of 400 | open | - | - |
 
