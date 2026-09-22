@@ -3,6 +3,17 @@
 Issue: [#343](https://github.com/crtahlin/wasp/issues/343), step 1 of
 [retrieval-rate.md](retrieval-rate.md).
 
+> **Superseded in part, 2026-09-22.** The chain below turns on
+> `maxOverdraftReadmits = 8`, and that constant no longer exists in non-test
+> code. [#392](https://github.com/crtahlin/wasp/issues/392) replaced the count
+> of tries with a time window, `providerCreditWait = 30 * time.Second`
+> (`pkg/retrieval/retrieval.go:179`). Re-measured on build `2bd2d08c`, six
+> completed sole-source downloads recorded between 36 and 244 overdrafts each
+> and **zero overdrafts not readmitted**, so no candidate was dropped from any
+> chunk and this chain did not run. The section below headed "The bound is the
+> lever" is the part most affected: that lever has been replaced rather than
+> tuned. See [dial-race.md](dial-race.md).
+
 Measured 2026-09-18 on the two-node bench, `bench-1` as the provider and
 `bench-2` as the requester. Harnesses `cp290/t12b.sh` through `t12e.sh`,
 outside this repository. Sole-source content from local ingest

@@ -239,7 +239,12 @@ arm contributes.
 to connected peers, so a first request can be made before the provider is usable.
 That is the likeliest cause and it is **correlational, not established**: it
 would take a run that disconnects the provider deliberately and then makes one
-hinted request to settle it. The gated pass had the root 3 of 3 and six
+hinted request to settle it. **That run was made on 2026-09-22 and settles it in
+favour of this hypothesis**: three trials, the hinted request after a deliberate
+disconnect returned 404 with zero preferred hits in all three, and the same
+reference five seconds later returned the complete object with 1,033 preferred
+hits in all three. Filed as [#435](https://github.com/crtahlin/wasp/issues/435),
+measured in [dial-race.md](dial-race.md). The gated pass had the root 3 of 3 and six
 root-only runs were 6 of 6, two of them with `preferred_overdrafts` rising by 12
 and by 3 and both still serving, because a refusal falls through to ordinary
 selection.
