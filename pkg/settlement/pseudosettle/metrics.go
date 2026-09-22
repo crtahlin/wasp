@@ -19,6 +19,13 @@ type metrics struct {
 	SentPseudoSettlements           prometheus.Counter
 	ReceivedPseudoSettlementsErrors prometheus.Counter
 	SentPseudoSettlementsErrors     prometheus.Counter
+
+	// wasp #444, bench only: which term bound peerAllowance. If the debt binds
+	// far more often than the rate, raising the grant rate changes nothing and
+	// the experiment ends here.
+	AllowanceRateBound prometheus.Counter
+	AllowanceDebtBound prometheus.Counter
+	AllowanceTooSoon   prometheus.Counter
 }
 
 func newMetrics() metrics {
@@ -36,6 +43,24 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "total_sent_pseudosettlements",
 			Help:      "Amount of  of time settlements sent to peers (costs paid by the node)",
+		}),
+		AllowanceRateBound: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "allowance_rate_bound",
+			Help:      "Grants where elapsed times the refresh rate was the smaller term",
+		}),
+		AllowanceDebtBound: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "allowance_debt_bound",
+			Help:      "Grants where the peer's debt was the smaller term",
+		}),
+		AllowanceTooSoon: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "allowance_too_soon",
+			Help:      "Refreshment requests refused for arriving within the same second",
 		}),
 		ReceivedPseudoSettlements: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,

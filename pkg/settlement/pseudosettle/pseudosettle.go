@@ -154,6 +154,7 @@ func (s *Service) peerAllowance(peer swarm.Address, fullNode bool) (limit *big.I
 
 	currentTime := s.timeNow().Unix()
 	if currentTime == lastTime.Timestamp {
+		s.metrics.AllowanceTooSoon.Inc()
 		return nil, 0, ErrSettlementTooSoon
 	}
 
@@ -173,9 +174,11 @@ func (s *Service) peerAllowance(peer swarm.Address, fullNode bool) (limit *big.I
 	}
 
 	if peerDebt.Cmp(maxAllowance) >= 0 {
+		s.metrics.AllowanceRateBound.Inc()
 		return maxAllowance, currentTime, nil
 	}
 
+	s.metrics.AllowanceDebtBound.Inc()
 	return peerDebt, currentTime, nil
 }
 
