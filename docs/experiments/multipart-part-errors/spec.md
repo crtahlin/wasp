@@ -235,12 +235,23 @@ In `pkg/api`, on both endpoints, mutation checked.
   moved above `errors.As(err, &protoErr)`.
 - **A well-formed multipart upload still succeeds**, which is what catches a
   wrap that swallows `io.EOF`.
-- **A node-side failure still answers 500.** This is a standing regression
-  guard rather than a mutation-checked test: the sentinel is attached at one
-  call site and none of the mutations below moves it, so nothing in the list
-  makes this test fail. The mutation that would is attaching the sentinel to
-  `storeDir`'s own `read dir stream` or `store dir file` wrap instead, which is
-  the mistake it exists to catch.
+- **A node-side failure still answers 500**, driven by a chunk store that
+  refuses every write, so the failure is the node's and the request is
+  well formed. This is the guard against the sentinel being attached too
+  widely, and it **is** mutation checked: moving the sentinel onto
+  `storeDir`'s `store dir file` wrap makes it fail.
+
+  A useful distinction came out of running that mutation. Attaching the
+  sentinel to the `read dir stream` wrap instead does **not** break this test,
+  because that wrap carries reader errors rather than the node's. It is still
+  the wrong place, and not merely a near-equivalent one: `reader` there is the
+  `dirReader` interface, so that wrap covers `tarReader.Next` as well, and a
+  sentinel named for multipart would label tar failures as multipart ones.
+  Nothing catches that today, and no reachable `tarReader.Next` error escapes
+  the existing `tar.ErrHeader` and `io.ErrUnexpectedEOF` cases, so it is a
+  hazard reasoned about rather than reproduced. `store dir file` is the wrap
+  that carries the pipeline, which is where the node's own failures come from,
+  and that is the widening the test guards.
 - **A refused body leaves nothing reserved**, carried from #424: the assertion
   is only meaningful for a body that stores a file before it fails, because a
   body that stops on its first part never reserves anything and the usage reads

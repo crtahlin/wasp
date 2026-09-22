@@ -15,6 +15,7 @@ import (
 	"net/textproto"
 	"path"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/ethersphere/bee/v2/pkg/api"
@@ -802,23 +803,90 @@ func TestDirsMultipartMalformed(t *testing.T) {
 			code:        http.StatusBadRequest,
 			message:     "malformed multipart header",
 		},
+		{
+			// wasp #455: this used to answer 500. The message matters as
+			// much as the status: the body also carries the general
+			// sentinel, so a case placed above this one would answer 400
+			// with "malformed multipart body" instead and a status-only
+			// assertion would not notice.
+			name:        "a part with more headers than mime/multipart allows",
+			body:        tooManyPartHeaders(boundary),
+			contentType: "multipart/form-data; boundary=" + boundary,
+			code:        http.StatusBadRequest,
+			message:     "multipart part headers are too large",
+		},
+		{
+			// wasp #455: this used to answer 500, and it is the case the
+			// sentinel exists for. mime/multipart builds "expecting a new
+			// Part" with fmt.Errorf and the caller's own bytes, so neither
+			// errors.Is nor errors.As can reach it.
+			//
+			// The trailing "x" is load bearing. isBoundaryDelimiterLine
+			// calls skipLWSPChar, so a tab alone is stripped and the line
+			// is a VALID delimiter: without a further non-whitespace
+			// character this body uploads successfully and the test would
+			// assert nothing.
+			name:        "garbage where a new part was expected",
+			body:        []byte("--" + boundary + "\r\nContent-Disposition: form-data; name=\"f\"; filename=\"i.html\"\r\n\r\nhello\r\n--" + boundary + "\tx\r\n"),
+			contentType: "multipart/form-data; boundary=" + boundary,
+			code:        http.StatusBadRequest,
+			message:     "malformed multipart body",
+		},
+		{
+			// The guard against the wrap swallowing the end of the parts.
+			// storeDir ends its loop on errors.Is(err, io.EOF), and two %w
+			// verbs keep io.EOF in the chain, so this passes either way;
+			// it is a standing regression guard rather than a
+			// mutation-checked test, which the spec records.
+			name:        "a well formed body still succeeds",
+			body:        complete.Bytes(),
+			contentType: "multipart/form-data; boundary=" + boundary,
+			code:        http.StatusCreated,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			jsonhttptest.Request(t, client, http.MethodPost, "/bzz", tc.code,
+			opts := []jsonhttptest.Option{
 				jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
 				jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
 				jsonhttptest.WithRequestBody(bytes.NewReader(tc.body)),
 				jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "True"),
-				jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+				jsonhttptest.WithRequestHeader(api.ContentTypeHeader, tc.contentType),
+			}
+			// A case with no message is the success one, which answers with
+			// a reference rather than a status response.
+			if tc.message != "" {
+				opts = append(opts, jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
 					Message: tc.message,
 					Code:    tc.code,
-				}),
-				jsonhttptest.WithRequestHeader(api.ContentTypeHeader, tc.contentType),
-			)
+				}))
+			}
+
+			jsonhttptest.Request(t, client, http.MethodPost, "/bzz", tc.code, opts...)
 		})
 	}
+}
+
+// tooManyPartHeaders builds a multipart body whose single part carries more
+// header lines than mime/multipart will parse, which is wasp #455.
+//
+// maxMIMEHeaders() returns 10000 unless the multipartmaxheaders GODEBUG says
+// otherwise, and exceeding it makes readMIMEHeader report "message too large",
+// which populateHeaders replaces with the exported ErrMessageTooLarge. The
+// limit is on one part's headers rather than on the upload, so no well-formed
+// upload reaches it however large it is.
+func tooManyPartHeaders(boundary string) []byte {
+	var b strings.Builder
+
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString("Content-Disposition: form-data; name=\"f\"; filename=\"index.html\"\r\n")
+	for i := 0; i < 10001; i++ {
+		fmt.Fprintf(&b, "X-Wasp-%d: v\r\n", i)
+	}
+	b.WriteString("\r\n<h1>Swarm\r\n--" + boundary + "--\r\n")
+
+	return []byte(b.String())
 }
 
 // tarShorterThanHeader is the nine byte body the pre-#409 test used, kept so
