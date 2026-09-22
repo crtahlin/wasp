@@ -253,6 +253,9 @@ const (
 	// workers. Three seconds is the historical value; see Options.ShutdownTimeout
 	// for why it is now overridable.
 	defaultShutdownTimeout = 3 * time.Second
+	// closeGrace bounds the store's own Close, which runs after the drains
+	// and is the only step Options.ShutdownTimeout does not cover. See #428.
+	closeGrace = 5 * time.Second
 
 	defaultOpenFilesLimit         = uint64(256)
 	defaultBlockCacheCapacity     = uint64(32 * 1024 * 1024)
@@ -990,51 +993,67 @@ func (db *DB) Close() error {
 	// Idempotent: TriggerQuit (tests) and a double Close share this guard.
 	db.quitOnce.Do(func() { close(db.quit) })
 
-	bgReserveWorkersClosed := make(chan struct{})
-	go func() {
-		defer close(bgReserveWorkersClosed)
-		if !syncutil.WaitWithTimeout(&db.inFlight, 5*time.Second) {
-			db.logger.Warning("db shutting down with running goroutines")
-		}
-	}()
-
-	bgCacheWorkersClosed := make(chan struct{})
-	go func() {
-		defer close(bgCacheWorkersClosed)
-		if !syncutil.WaitWithTimeout(&db.cacheLimiter.wg, 5*time.Second) {
-			db.logger.Warning("cache goroutines still running after the wait timeout; force closing")
-			db.cacheLimiter.cancel()
-		}
-	}()
-
-	// Close the underlying store only after the workers that use it have
-	// stopped. Closing it while a reserve scan is still iterating pulls the
-	// store out from under a live iterator, which segfaults under pebble.
-	// See issue #399.
-	var err error
-	closerDone := make(chan struct{})
-	go func() {
-		defer close(closerDone)
-		<-bgReserveWorkersClosed
-		<-bgCacheWorkersClosed
-		err = db.dbCloser.Close()
-	}()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		<-closerDone
-	}()
-
 	shutdownTimeout := db.shutdownTimeout
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = defaultShutdownTimeout
 	}
 
+	// wasp #428: the drains take the shutdown budget rather than a hardcoded
+	// five seconds. They used to outlast it, so a drain between the budget and
+	// five seconds made Close return while dbCloser.Close had not run: the
+	// store was left open, the unclean-shutdown marker stayed, and the next
+	// start replayed the write-ahead log. Two numbers that had to be kept in
+	// the right order by hand were not, so now there is one.
+	reserveDrained := make(chan bool, 1)
+	go func() {
+		reserveDrained <- syncutil.WaitWithTimeout(&db.inFlight, shutdownTimeout)
+	}()
+
+	cacheDrained := make(chan bool, 1)
+	go func() {
+		cacheDrained <- syncutil.WaitWithTimeout(&db.cacheLimiter.wg, shutdownTimeout)
+	}()
+
+	// Both waits are bounded by the same budget, so this returns within it.
+	reserveOK, cacheOK := <-reserveDrained, <-cacheDrained
+	if !reserveOK {
+		db.logger.Warning("db shutting down with running goroutines")
+	}
+	if !cacheOK {
+		db.logger.Warning("cache goroutines still running after the wait timeout; force closing")
+		db.cacheLimiter.cancel()
+	}
+
+	// Close the underlying store only after the workers that use it have
+	// stopped. Closing it while a reserve scan is still iterating pulls the
+	// store out from under a live iterator, which segfaults under pebble.
+	// See issue #399.
+	//
+	// A drain that timed out still reaches here, exactly as before: the wait
+	// reports failure but returns either way. What changed is that Close now
+	// waits for the close rather than returning while it happens.
+	var err error
+	closerDone := make(chan struct{})
+	go func() {
+		defer close(closerDone)
+		err = db.dbCloser.Close()
+	}()
+
 	select {
-	case <-done:
-	case <-time.After(shutdownTimeout):
-		return fmt.Errorf("storer closed with bg goroutines running after %s", shutdownTimeout)
+	case <-closerDone:
+	case <-time.After(closeGrace):
+		// The drains are bounded above, so the only unbounded step left is the
+		// store's own Close. This is the one case where the store really was
+		// not closed, and it is reported as such rather than as goroutines
+		// still running.
+		return fmt.Errorf("storer was not closed: its own close did not finish within %s", closeGrace)
+	}
+
+	if !reserveOK || !cacheOK {
+		return errors.Join(
+			fmt.Errorf("storer closed, but bg goroutines were still running after %s", shutdownTimeout),
+			err,
+		)
 	}
 
 	return err

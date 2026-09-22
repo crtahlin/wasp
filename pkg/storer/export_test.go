@@ -6,8 +6,13 @@ package storer
 
 import (
 	"context"
+	"io"
 	"math/big"
+	"sync"
+	"testing"
+	"time"
 
+	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/events"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
 	"github.com/prometheus/client_golang/prometheus"
@@ -138,3 +143,38 @@ func (db *DB) TriggerQuit() { db.quitOnce.Do(func() { close(db.quit) }) }
 func (db *DB) EvictExpiredBatches(ctx context.Context) error { return db.evictExpiredBatches(ctx) }
 
 func (db *DB) Unreserve(ctx context.Context) error { return db.unreserve(ctx) }
+
+// NewForCloseTest builds the smallest DB whose Close is meaningful: the store's
+// own closer, the shutdown budget, and the two drains Close waits on. A full
+// store is not needed and would make the timings depend on real work.
+//
+// The budget is passed rather than taken from the default so a test can use a
+// short one; #428 is about the relationship between that budget and the drains,
+// so it has to be settable.
+func NewForCloseTest(t *testing.T, dbCloser io.Closer, shutdownTimeout time.Duration) *DB {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	return &DB{
+		logger:          log.Noop,
+		quit:            make(chan struct{}),
+		dbCloser:        dbCloser,
+		shutdownTimeout: shutdownTimeout,
+		cacheLimiter: cacheLimiter{
+			sem:    make(chan struct{}, 1),
+			ctx:    ctx,
+			cancel: cancel,
+		},
+	}
+}
+
+// HoldInFlight adds one unit of background work and returns the release, so a
+// test can make a drain outlast the shutdown budget. Calling the release is
+// what lets the test's goroutine finish; Close does not wait for it.
+func HoldInFlight(db *DB) func() {
+	db.inFlight.Add(1)
+	var once sync.Once
+	return func() { once.Do(db.inFlight.Done) }
+}
