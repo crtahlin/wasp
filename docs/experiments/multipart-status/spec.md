@@ -54,7 +54,12 @@ only reads.
 > `NextPart` reaches. Reproduced with a part carrying more than 10000
 > headers. A second error, `fmt.Errorf("multipart: expecting a new Part; got
 > line %q")` at `:423`, was missed entirely, and was reproduced with a body
-> ending `--BOUNDARY` followed by a tab.
+> ending `--BOUNDARY`, a tab, and a further character. **Corrected while
+> specifying [#455](https://github.com/crtahlin/wasp/issues/455):** this note
+> originally said "followed by a tab", and a tab alone does not reproduce it.
+> `isBoundaryDelimiterLine` calls `skipLWSPChar`, so `--BOUNDARY` and a tab is
+> a valid delimiter and the upload succeeds. It takes a non-whitespace
+> character after the tab to reach `:423`.
 >
 > **So the set is not covered by this change**, and the claim that it was is
 > withdrawn. The two cases below are fixed; the two above still answer 500
