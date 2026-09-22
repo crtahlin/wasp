@@ -32,10 +32,35 @@ commits below are wasp's own.
   column's job is to find the issue.
 
 Derived from the experiment ledger ([`experiments/INDEX.md`](experiments/INDEX.md))
-and the git history on 2026-09-17, against the upstream base
-`v2.8.2`. Two issues (#73, #76) were closed not planned. Wasp issue numbers can
-collide with upstream Bee pull-request numbers in the shared history, so the
-commits here were resolved from fork-only merges, not by issue number alone.
+and the history, last revised 2026-09-22, against the upstream base
+`v2.8.2`. Three issues (#73, #76, #430) were closed not planned. Wasp issue
+numbers can collide with upstream Bee pull-request numbers in the shared
+history, so the commits here were resolved from fork-only merges, not by issue
+number alone.
+
+**#430 keeps its label although wasp made no change, and the reason is worth
+stating**, because "not planned" would otherwise read as "not a real problem".
+`MigratePeer` is byte for byte the same upstream, and a failure between its
+writes does leave two peers mapped to one beneficiary there as here. What
+differs is the consequence. Wasp serializes the cumulative payout with a
+per-beneficiary lock, merged for
+[#317](https://github.com/crtahlin/wasp/issues/317), so two overlays resolving
+to one chequebook settle correctly. Upstream's `chequebook.Issue` has no such
+lock.
+
+**The difference in consequence is reasoned, not reproduced**, and rule 11 asks
+for that to be said. What is checked is the code on both sides: wasp's
+`Issue` takes `beneficiaryLocks` around the read of the last cheque and the
+write of the new one (`pkg/settlement/swap/chequebook/chequebook.go:229-231`,
+`:240`, `:278`), and `git show upstream/v2.8.2:pkg/settlement/swap/chequebook/chequebook.go`
+has no equivalent. What is **not** demonstrated is a lost update: that needs
+two concurrent `Issue` calls for one beneficiary from two overlays, and no
+measurement here produced one.
+
+Wasp closed the issue because the fix it proposed, reordering the writes, was
+shown to be worse than the defect. That finding is about the fix, not about
+whether upstream has the problem. See
+[`experiments/migrate-peer/spec.md`](experiments/migrate-peer/spec.md).
 
 **Table: wasp issues that also apply to upstream Bee, with how each was handled**
 
@@ -94,6 +119,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#438](https://github.com/crtahlin/wasp/issues/438) | retrieval: a flight ends on the error budget while a request is still in flight, so the delivery is thrown away | done | `fix/438-flight-exit` | [`4f88343c`](https://github.com/crtahlin/wasp/commit/4f88343c) |
 | [#440](https://github.com/crtahlin/wasp/issues/440) | api: GET /chunks answers 500 when the peer walk is exhausted, where /bzz answers 404 | done | `fix/440-chunk-notfound` | [`15a2d874`](https://github.com/crtahlin/wasp/commit/15a2d874) |
 | [#449](https://github.com/crtahlin/wasp/issues/449) | api: POST /pins answers 500 when the peer walk is exhausted, the same defect as #440 on a second endpoint | done | `fix/449-pin-notfound` | [`726c5b35`](https://github.com/crtahlin/wasp/commit/726c5b35) |
+| [#430](https://github.com/crtahlin/wasp/issues/430) | swap: MigratePeer is not atomic, so a failed delete leaves two peers sharing one beneficiary | not planned | `fix/430-migratepeer` | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
