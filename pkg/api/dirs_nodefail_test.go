@@ -37,16 +37,21 @@ func (f failingPutChunkStore) Put(context.Context, swarm.Chunk) error {
 // TestDirsNodeSideFailureAnswers500 is the standing guard for wasp #455.
 //
 // That change gives multipartReader.Next a sentinel and answers 400 for
-// anything carrying it. The sentinel is sound only because Next calls nothing
-// but NextPart, so every error it can return is the caller's. If it were ever
-// attached higher up, at storeDir's own "read dir stream" or "store dir file"
-// wrap, it would start claiming the node's failures as the caller's too, and
-// this node would answer 400 for its own broken disk.
+// anything carrying it. The sentinel is sound only because NextPart is the
+// only call in Next whose error is returned, so every error Next returns is
+// the caller's. If it were ever attached higher up, at storeDir's own
+// "store dir file" wrap, it would start claiming the node's failures as the
+// caller's too, and this node would answer 400 for its own broken disk.
 //
-// None of the mutations in the spec's list moves the sentinel, so nothing
-// there makes this test fail, and the spec says so rather than pretending it
-// is mutation checked. Attaching the sentinel at either of those wraps is the
-// mutation it does catch.
+// The mutation it catches is exactly that: move the sentinel onto storeDir's
+// "store dir file" wrap and this test fails with 400 where it wants 500.
+//
+// Moving it onto the "read dir stream" wrap instead does NOT fail this test,
+// and that is correct, because that wrap carries reader errors rather than the
+// node's. It is still the wrong place, for a reason no test here catches: the
+// reader is the dirReader interface, so that wrap covers tarReader.Next too,
+// and a sentinel named for multipart would label tar failures as multipart
+// ones.
 func TestDirsNodeSideFailureAnswers500(t *testing.T) {
 	t.Parallel()
 

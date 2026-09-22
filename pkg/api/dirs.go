@@ -49,8 +49,8 @@ var (
 	// wasp #455: mime/multipart builds "expecting a new Part" and its sibling
 	// with fmt.Errorf and the caller's own bytes, so neither errors.Is nor
 	// errors.As can reach them. multipartReader.Next attaches this instead,
-	// which is sound because that function calls nothing but NextPart. See
-	// the comment there.
+	// which is sound because NextPart is the only call in that function
+	// whose error is returned. See the comment there.
 	errMalformedMultipart = errors.New("malformed multipart body")
 )
 
@@ -368,15 +368,24 @@ func (m *multipartReader) Next() (*FileInfo, error) {
 		}
 		// wasp #455: every other error from NextPart comes from parsing the
 		// bytes the caller sent or from reading the caller's body. That is a
-		// property of this call site, which calls nothing else, rather than
-		// of any individual error, which is why the sentinel can be attached
-		// here and could not be inferred from the errors themselves. One of
-		// them, "expecting a new Part", is a bare fmt.Errorf with the
-		// caller's own bytes quoted into it and is reachable no other way.
+		// property of this call site rather than of any individual error,
+		// which is why the sentinel can be attached here and could not be
+		// inferred from the errors themselves. One of them, "expecting a new
+		// Part", is a bare fmt.Errorf with the caller's own bytes quoted into
+		// it and is reachable no other way.
 		//
-		// If this function ever grows a second call, to this node's own
-		// storage for example, the sentinel stops being a statement about
-		// the caller and must be narrowed.
+		// Precisely: NextPart is the only call in this function whose error
+		// is returned. The others either cannot fail or, in ParseInt's case,
+		// have their error discarded. It is that, and not a claim that this
+		// function calls nothing else, which makes the attribution sound.
+		//
+		// Two further things would break it. If this function ever returns an
+		// error from a second call, to this node's own storage for example,
+		// the sentinel stops being a statement about the caller. And if the
+		// server ever gains a read deadline on the body, node.go sets only
+		// ReadHeaderTimeout today and no MaxBytesReader is used here, a
+		// timeout would arrive through NextPart looking like the caller's
+		// fault.
 		//
 		// Two %w verbs, so the chains the handler already matches stay
 		// reachable through the wrap and keep their more precise messages.
