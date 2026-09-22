@@ -1,50 +1,22 @@
-# Refreshing the preferred candidates of a chunk in flight
+# Why the first hinted request fails, and two designs withdrawn
 
 Issue: [#435](https://github.com/crtahlin/wasp/issues/435).
-Type: fix.
+Type: investigation. **No change is proposed yet, deliberately.**
 
-**The issue proposed the wrong fix and this spec does not implement it.** #435
-suggested waiting for the hinted dial before retrieval begins, on the reasoning
-that the download finishes before the dial lands. Measured, the dial lands after
-**0.22 seconds** while the failing request runs for **3.1 seconds**. Waiting
-would work by accident. The defect is elsewhere and is described below. The
-issue is corrected rather than followed.
+This document was written as a spec for a fix. Review showed the fix would
+livelock, and that the mechanism it was built on does not fit the evidence. Both
+are recorded here rather than removed, because the measurement is worth keeping
+and because the second design was mine and was wrong for reasons worth writing
+down.
 
-## The defect
-
-`candidates` is computed once per flight, before the retry loop, and is never
-refreshed inside it:
-
-```go
-// pkg/retrieval/retrieval.go:232
-		candidates := s.preferredCandidates(preferredPeers, chunkAddr, s.errSkip.ChunkPeers(chunkAddr))
-```
-
-`preferredCandidates` keeps only peers already in the connected set
-(`pkg/retrieval/preferred.go:202`). A hinted download starts the dial to its
-provider in a background goroutine and returns at once
-(`pkg/providers/providers.go:411-445`, `pkg/api/providers.go:100-103`), so the
-first chunk is issued while the provider is still unconnected. Its candidate
-list is empty, and it stays empty for that chunk's whole retry budget even after
-the provider connects a fifth of a second later.
-
-For sole-source content the first chunk is the root of the reference. It spends
-its budget on ordinary peers that never held it, returns not found, and the API
-answers 404. Nothing else is attempted, because without the root there is
-nothing to attempt.
-
-The same gap applies to discovery. `Discover` adds providers to the preferred
-set part way through a download (`pkg/api/providers.go:115-119`, after
-`discoverAfterChunks`). Chunks already in flight cannot see them either.
-
-## Evidence
+## What is measured
 
 Five runs, `cp290/t435-dialtime.sh`. Each ingests fresh sole-source content on
 the provider, disconnects the provider from the requester, then starts a poller
 and issues one hinted download. The poller samples the requester's peer list
 every 100 ms and records when the provider appears.
 
-| run | request | dial landed |
+| run | request | provider in peer list |
 |---|---|---|
 | 1 | 404, 36 bytes, 3.127 s | 0.22 s |
 | 2 | 404, 36 bytes, 3.099 s | 0.22 s |
@@ -52,182 +24,185 @@ every 100 ms and records when the provider appears.
 | 4 | 404, 36 bytes, 3.116 s | 0.22 s |
 | 5 | 404, 36 bytes, 3.100 s | 0.22 s |
 
-The poller and the request run concurrently in the same run, so this is not two
-measurements laid side by side. **The provider was connected for about 2.9 of
-the request's 3.1 seconds and was not used.** That is what rules out the
-explanation in #435: there was ample time, and the request had a connected
-provider holding every chunk it needed.
+The poller and the request run concurrently in the same run, so this is one
+measurement rather than two laid side by side.
 
-Five of five, with no spread worth reporting at 0.22 s.
+**Three limits on that table, all of which matter:**
 
-### What this does not establish
+- **0.22 s is an upper bound on a 100 ms grid**, not a stable value. It is the
+  third poll in every run, so the connection landed somewhere in (0.11, 0.22].
+  Five identical readings measure the poll interval.
+- **The harness records no counters**, so it cannot attribute the connection to
+  the hint. Kademlia's own connection loop could have dialed the peer after the
+  `DELETE /peers`. `bee_providers_hinted_connects_started` exists and was not
+  sampled. In [dial-race.md](dial-race.md) the attribution is supported by
+  `bee_providers_connects_dialed` rising by one; here it is not.
+- **`/peers` is libp2p's set; candidate selection reads kademlia's.**
+  `connectedFullNode` asks `peerSuggester.ClosestPeer`
+  (`pkg/retrieval/preferred.go:222-228`). Appearing in `/peers` is not the same
+  event as becoming eligible, and the gap between them is not measured.
 
-In the three trials in [dial-race.md](dial-race.md), the failing run recorded 14
-preferred attempts with zero hits. If no chunk ever saw a candidate, there
-should have been none at all. Fourteen attempts with `maxPreferredAttempts = 2`
-means at least seven chunks reached a non-empty list and still did not produce a
-hit. That is not explained here. It does not affect the change below, whose
-acceptance test is whether the download completes, but it should not be written
-up as understood when it is not.
+What the table does establish is that the request had **about 2.9 seconds** left
+to run after the provider was connected, and still returned 404. Whatever the
+cause, it is not that the download finished before the connection existed.
 
-## The change
+## Why ordinary selection did not use the provider either
 
-Refresh the candidate list from the preferred set when it runs out, inside the
-retry loop, instead of only once before it.
+Worth stating, because it is the first thing a reader asks. Once the provider is
+connected it is an ordinary peer too, and `allowUpstream` is set for an origin
+request, so nothing about proximity excludes it. It was still not used.
+
+`closestPeer` (`pkg/retrieval/retrieval.go:585-597`) asks for
+`Select{Reachable: true, Healthy: true}` first and only falls back to
+`Select{Reachable: true}`, and then to a bare `Select{}`, when the previous ask
+returns `ErrNotFound`. A peer connected a fifth of a second ago is not yet
+marked reachable or healthy, and the fallback never runs while other reachable
+peers remain. `connectedFullNode` uses a bare `Select{}`, so the preferred path
+would see a peer that ordinary selection cannot.
+
+That asymmetry is what makes the preferred path the one that has to work here.
+
+## Design 1, from the issue: wait for the dial. Withdrawn
+
+#435 proposed waiting for the hinted dial before retrieval begins, reasoning
+that the download finishes before the dial lands. The measurement above refutes
+the reasoning: there were about 2.9 seconds in hand. A wait would have made this
+case pass without addressing why a connected provider went unused, and it would
+block every hinted request including the common one where the provider is
+already connected and the correct wait is zero.
+
+## Design 2, mine: refresh the candidate list. Withdrawn
+
+`candidates` is computed once per flight and never refreshed
+(`pkg/retrieval/retrieval.go:232`). The four writes to it inside the loop are
+the overdraft rotation (`:340`), the default-arm drop (`:348`) and the
+successful-dispatch trim (`:353`). I proposed rebuilding the list when it runs
+out, with a set of peers already dropped in this flight so the rebuild could not
+re-add them.
+
+Review found four reasons that does not work. All four are verified in the code.
+
+**It livelocks on a hint naming a peer that does not hold the content.** The
+dropped set I specified was scoped to the default arm. A peer that is
+successfully dispatched is removed at `:353` instead, and a preferred miss
+returns through
 
 ```go
-			case <-retryC:
-				if len(candidates) == 0 {
-					candidates = s.preferredCandidates(preferredPeers, chunkAddr, dropped(...))
+				if res.preferred {
+					// a miss at a preferred peer is not a peer error: it does
+					// not use up an allowed error, and it does not skip the
+					// peer for other chunks
+					retry()
+					continue
 				}
 ```
 
-The chunk then picks up a provider that became connected, or was discovered,
-after its flight began.
+which is reached **before** both `errorsLeft--` and
+`s.errSkip.Add(chunkAddr, res.peer, skiplistDur)`. So a preferred miss spends no
+error budget and is recorded in neither skip list. The cycle is: dispatch,
+list empties, miss, retry, rebuild finds the same peer again, forever. The only
+exit is the request context. Today this case fails fast. The change would remove
+that, which is the same class of regression that ended
+`fix/392-wait-for-credit` ([wait-for-credit.md](wait-for-credit.md)).
 
-### The hazard this has to avoid
-
-A peer that fails is dropped from the list by a plain slice trim, and **nothing
-records that it was dropped**:
+**It does not fix discovery, which I claimed it did.** `preferredPeers` is a
+snapshot taken before the flight:
 
 ```go
-// pkg/retrieval/retrieval.go:348, the default arm
-						candidates = candidates[1:]
-						retry()
-						continue
+// pkg/retrieval/retrieval.go:201-202
+		if preferredSet = PreferredPeers(ctx); preferredSet != nil {
+			preferredPeers = preferredSet.Peers()
+		}
 ```
 
-`skip` and `s.errSkip` are consulted when the list is built, but this arm writes
-to neither. A naive refresh would therefore re-add the peer that was just
-dropped, on every retry, and a provider failing fast would spin against the
-error budget instead of falling through to ordinary selection.
+`Peers()` builds a fresh slice (`pkg/retrieval/preferred.go:88-98`). `Discover`
+appends to the set, not to the snapshot, so rebuilding from `preferredPeers`
+cannot see a discovered provider. Closing that gap means re-reading
+`preferredSet.Peers()` inside the loop, which also brings the demotion filter
+back into play and makes the singleflight key stale, since `flightRoute`
+embeds a fingerprint of `preferredPeers`.
 
-So the refresh needs a set of peers already dropped **for this chunk in this
-flight**, and must exclude them. That set is local to the flight, like
-`overdraftSince` (`:287`) already is, and costs one map.
+**Its stated hazard was wrong.** I wrote that the drop arm "records nothing in a
+skip list" and that "`skip` and `s.errSkip` are consulted when the list is
+built". Neither is true. `retrievePreferred` writes the peer to `skip` on both
+paths, `skip.Add` with a 600 ms window on a credit refusal
+(`pkg/retrieval/preferred.go:245`) and `skip.Forever` on dispatch (`:253`). And
+line 232 passes only `s.errSkip.ChunkPeers(chunkAddr)`; the flight-local `skip`
+is never given to `preferredCandidates`. The drop is recorded, in a list the
+builder does not read, which is a different problem with a different fix.
 
-Note this is not the overdraft path. An overdraft keeps the peer and rotates it
-to the back (`:341`), so it is still in the list and the refresh never sees an
-empty list on its account. Only the `default` arm drops, and after
-[#392](https://github.com/crtahlin/wasp/issues/392) that arm is reached by a
-peer that is not connected or whose 30 second retention window has passed.
+**Its cost section was incomplete in the direction that matters.** The error
+budget is suspended while a candidate is present:
 
-### Why not wait for the dial
+```go
+				if len(candidates) == 0 {
+					errorsLeft--
+				}
+```
 
-Waiting before retrieval, which is what #435 proposed, was considered and is
-rejected:
+Keeping the list non-empty more often therefore suspends the budget more often,
+and `docs/DIFFERENCES.md:157` already records what that costs and says it is
+paid by other operators: on a node with 150 peers, roughly a fourfold rise in
+outbound retrieval requests for a chunk, each costing the receiving peer a
+forward attempt. I wrote only "one topology lookup per preferred peer per
+refresh". The claim that a download with no hint "pays one integer comparison"
+was also wrong as specified, since `len(candidates) == 0` is true on every
+retry and the rebuild would run each time.
 
-- It blocks every hinted request by up to the bound, including the common case
-  where the provider is already connected and the correct wait is zero.
-- It does nothing for discovery, which adds providers mid-download by design.
-- It needs a new constant, and rule 8 asks for a measurement before a dial is
-  exposed. The refresh needs none.
-- It treats a symptom. The chunk would still be unable to use a peer that
-  connects one millisecond after its flight starts.
+## The mechanism is not established
 
-The refresh subsumes it: a provider connecting at 0.22 s is picked up by the
-root chunk's next retry, which on the measured timings leaves about 2.9 seconds
-of budget.
+[dial-race.md](dial-race.md) records the failing run moving
+`bee_retrieval_preferred_attempts` by **14** with **zero** hits and zero bytes,
+in all three trials. Design 2's account says the first chunk is the root, it
+never sees a candidate, and nothing else is attempted. That account cannot
+produce 14 attempts.
 
-### Why this is not the change that was withdrawn
+The hint in those runs names **one** overlay, so `preferredCandidates` returns at
+most one candidate and `PreferredAttempts` increments once per dispatch
+(`pkg/retrieval/preferred.go:254`). Fourteen attempts therefore means at least
+**fourteen flights** reached a non-empty candidate list. An earlier draft of
+this document said "at least seven chunks", by dividing by
+`maxPreferredAttempts`; that is the wrong arithmetic and the anomaly is twice
+the size it claimed.
 
-`fix/392-wait-for-credit` was abandoned for waiting on credit inside the
-per-chunk loop, which livelocked and cost a measured 2 to 3 times on content the
-network also holds ([wait-for-credit.md](wait-for-credit.md)). This change waits
-for nothing. It recomputes a list from state that is already in memory and
-returns immediately, whether or not a candidate is found.
+A competing account fits the data better and is not yet tested. The loop's
+termination is `for errorsLeft > 0` (`:289`), checked at the top with **no
+in-flight guard**, unlike the two other exits, which both test `inflight == 0`.
+So a flight can dispatch to a preferred peer, empty its list at `:353`, resume
+spending the error budget on ordinary peers because the list is now empty, reach
+zero, return `storage.ErrNotFound`, and run `defer close(quit)` while the
+preferred delivery is still outstanding. `retrieveChunk` then discards that
+delivery on `quit`, so `preferredResult` never runs and `PreferredHits` never
+moves. That produces attempts without hits and no bytes, including in the case
+where the provider did return the chunk.
 
-It is also inert unless content providers are in play. With no hint and no
-discovery, `preferredPeers` is empty, `preferredCandidates` returns an empty
-list every time, and the only cost is the length check.
+If that is the mechanism, rebuilding the candidate list is not sufficient, and
+it might appear to work for the wrong reason: a non-empty list suspends the
+error budget at the same test, which is also what produces the livelock above.
 
-## What it costs
+## What has to happen before any fix
 
-One topology lookup per preferred peer per refresh, and only on a retry that
-found the list empty. `connectedFullNode` is a single `ClosestPeer` call
-(`pkg/retrieval/preferred.go:222-228`). A hint is capped at
-`maxProviderHints = 8` (`pkg/api/providers.go:31`), so the worst case is eight
-lookups on a retry, against a retry budget of `maxOriginErrors = 32`.
-
-The cost falls on downloads that have a preferred set and are retrying, which is
-the case this is meant to help. A download with no preferred set pays one
-integer comparison.
+1. **Settle the mechanism.** Instrument the flight exit and find out whether an
+   in-flight preferred delivery is being discarded by `close(quit)`. Until that
+   is answered, any fix is a guess, and the acceptance test of "delivered bytes
+   with a matching checksum" cannot tell the two mechanisms apart.
+2. **Re-run the dial measurement with counters**, at a finer poll interval, so
+   the connection can be attributed to the hint rather than to kademlia, and so
+   the number of the 32 errors already spent by the time the provider connects
+   is known rather than inferred from a wall-clock total.
+3. Only then design the change, and state its cost in terms of the error-budget
+   suspension at `:464`, citing `docs/DIFFERENCES.md:157`.
 
 ## Protocol impact
 
-None. No wire message, no header, no constant in
-`.github/protocol-freeze.lock`. The change is inside one requester-side loop and
-is not observable by a peer except as a retrieval request it would have received
-later anyway.
-
-## Measurement
-
-Rule 7 applies: three runs per condition, spread reported, arms interleaved,
-node state matched.
-
-The acceptance criterion is **delivered bytes with a matching checksum**, not a
-counter.
-
-1. **The failing case must pass.** `cp290/t313-dialrace.sh` unchanged: disconnect
-   the provider, then one hinted download of fresh sole-source content. Today
-   this returns 404 in 3 of 3. It must return 4,194,304 bytes with a matching
-   checksum in 3 of 3.
-2. **No regression on content the network holds.** A network-held download,
-   hinted and unhinted, must stay within the spread of the control on the
-   unmodified build. This is the arm that rejected `fix/392-wait-for-credit` and
-   it is the one that matters most.
-3. **A reference nobody holds must still fail fast.** With a hint naming a peer
-   that does not have the content, the download must fail in seconds rather than
-   spinning to the request deadline. This is the hazard above, measured rather
-   than argued.
-4. **An unresolvable hint costs nothing.** A hint naming an overlay not in the
-   address book must not change the download's timing against the control.
-5. **Already-connected provider unchanged.** The six downloads recorded in
-   [dial-race.md](dial-race.md) at 2.19 to 2.96 MB/s are the baseline; the rate
-   must not fall.
-
-Counters to record on every run: `bee_retrieval_preferred_attempts`,
-`preferred_hits`, `preferred_overdrafts`, `preferred_readmits` and their
-difference, and `bee_retrieval_request_failure_count`.
-
-## Tests
-
-Unit tests in `pkg/retrieval`, each checked by mutation: break the change and
-confirm the test fails. A test that passes both ways is this repository's usual
-failure mode.
-
-- A preferred peer that is not connected when the flight starts, and becomes
-  connected during it, is used. This is the defect and it must fail without the
-  change.
-- A preferred peer dropped by the `default` arm is **not** re-added by a
-  refresh. This is the hazard and it must fail if the dropped set is omitted.
-- A download with no preferred set behaves exactly as before.
-- An overdrafted peer is not double counted: rotation still puts it at the back
-  and the refresh does not duplicate it in the list.
-
-## Rollout and rollback
-
-No configuration, no migration, no on-disk change. Rollback is reverting the
-merge commit.
+None. Nothing is proposed.
 
 ## Upstream portability
 
-Not applicable. `pkg/retrieval/preferred.go`, `pkg/providers` and
-`pkg/api/providers.go` do not exist in `upstream/v2.8.2`, checked with
-`git ls-tree`. The preferred path is this fork's own, added by
+Not applicable. `pkg/retrieval/preferred.go`, `pkg/api/providers.go` and
+`pkg/providers` do not exist in `upstream/v2.8.2`, checked with `git ls-tree`.
+The preferred path is this fork's own, added by
 [#290](https://github.com/crtahlin/wasp/issues/290).
-`pkg/retrieval/retrieval.go` is modified here relative to upstream already.
 **No `affects-upstream` marker.**
-
-## Files
-
-- `pkg/retrieval/retrieval.go`, the flight loop at `:232` and the drop arm at
-  `:348`.
-- `pkg/retrieval/preferred_test.go`, or a new test file alongside it.
-- `docs/DIFFERENCES.md`, since this changes what a node does compared with Bee
-  only inside fork-only code; the existing `Wasp-Providers` row at `:157` says
-  the named overlays are "tried first, with normal retrieval as the fallback",
-  which is not true today for a provider that is not yet connected and becomes
-  true with this change.
 
 Generated with help of AI.
