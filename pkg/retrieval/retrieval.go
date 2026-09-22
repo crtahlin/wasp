@@ -279,6 +279,8 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 		retry()
 
 		inflight := 0
+		// outstanding requests to preferred peers, see wasp #438
+		preferredInflight := 0
 
 		// wasp #392: when each preferred peer was first refused credit for this
 		// chunk. Retention is bounded by elapsed time from that moment, not by
@@ -352,6 +354,7 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 					if err == nil {
 						candidates = candidates[1:]
 						inflight++
+						preferredInflight++
 						if preferredTimer == nil {
 							preferredTimer = time.NewTimer(preferredWait)
 						} else {
@@ -429,6 +432,7 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 				inflight--
 
 				if res.preferred {
+					preferredInflight--
 					s.preferredResult(preferredSet, res)
 					// the answer is in, so the timer armed for this attempt
 					// must not start another one
@@ -458,10 +462,23 @@ func (s *Service) RetrieveChunk(ctx context.Context, chunkAddr, sourcePeerAddr s
 				// among ordinary peers. While a verified provider is still a
 				// candidate for this chunk the search is not hopeless, only
 				// unfunded, and spending the budget here ends the download
-				// before the provider's credit arrives. With no candidate left
-				// it behaves exactly as before, so content the network holds is
-				// unaffected and a genuinely missing chunk still fails fast.
-				if len(candidates) == 0 {
+				// before the provider's credit arrives.
+				//
+				// wasp #438: the same applies while a provider is still
+				// answering. A preferred peer is consumed from the list the
+				// moment it is dispatched, so without the second test the
+				// budget resumes under an outstanding request, and reaching
+				// zero returns storage.ErrNotFound and closes quit, throwing
+				// away the delivery on its way back.
+				//
+				// Both tests are about preferred peers, so a forwarder and a
+				// download carrying no hint spend the budget exactly as Bee
+				// does. The cost of holding it is that ordinary selection keeps
+				// walking: a chunk can be asked of the whole connected set
+				// rather than of 32 peers, and the flight then ends through
+				// peer depletion with topology.ErrNotFound rather than
+				// storage.ErrNotFound. See docs/DIFFERENCES.md.
+				if len(candidates) == 0 && preferredInflight == 0 {
 					errorsLeft--
 				}
 				s.errSkip.Add(chunkAddr, res.peer, skiplistDur)
