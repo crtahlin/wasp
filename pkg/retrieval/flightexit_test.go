@@ -156,7 +156,11 @@ func TestFlightEndsWhenThePreferredPeerMisses(t *testing.T) {
 
 	const (
 		ordinary = 40
-		lag      = 300 * time.Millisecond
+		// longer than preferredWait, so ordinary selection starts and spends
+		// the budget while the provider is still quiet. At a shorter lag the
+		// provider answers before the budget is touched and the test passes
+		// with or without the change, proving nothing.
+		lag = time.Second
 	)
 
 	var (
