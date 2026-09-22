@@ -49,6 +49,17 @@ type metrics struct {
 	// PreferredReadmits counts preferred peers kept for a later attempt after
 	// an overdraft, rather than dropped for that chunk.
 	PreferredReadmits prometheus.Counter
+	// PreferredRebuilds counts REBUILDS that added a peer, not flights. One
+	// flight can raise it more than once, up to the per-chunk cap, so it must
+	// not be divided by a flight count. Measured at two for a single flight
+	// over a six-peer set. See issue #435.
+	//
+	// No existing counter can show this path: PreferredCandidatesSelected is
+	// once per flight and fires on the first build, and PreferredAttempts is
+	// capped by credit. Without it an operator cannot tell a chunk served by
+	// a provider that connected late from one served by a provider that was
+	// connected all along, which is the whole difference the fix makes.
+	PreferredRebuilds prometheus.Counter
 	LocalOnlyMisses   prometheus.Counter
 	LocalOnlyLimited  prometheus.Counter
 }
@@ -159,6 +170,12 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "preferred_readmits",
 			Help:      "Preferred peers kept for a later attempt after an overdraft.",
+		}),
+		PreferredRebuilds: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "preferred_rebuilds",
+			Help:      "Rebuilds of a preferred candidate list that found a peer not already offered.",
 		}),
 		LocalOnlyMisses: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
