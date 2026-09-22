@@ -574,8 +574,7 @@ func (a *Accounting) settle(peer swarm.Address, balance *accountingPeer) error {
 				paymentAmount := new(big.Int).Neg(originatedBalance)
 
 				if paymentAmount.Cmp(a.minimumPayment) >= 0 {
-					timeElapsedInSeconds := (a.timeNow().UnixMilli() - balance.refreshTimestampMilliseconds) / 1000
-					refreshDue := new(big.Int).Mul(big.NewInt(timeElapsedInSeconds), a.refreshRate)
+					refreshDue := a.settleRefreshDue(balance, now)
 					currentBalance, err := a.Balance(peer)
 					if err != nil && !errors.Is(err, ErrPeerNoBalance) {
 						return fmt.Errorf("failed to load balance: %w", err)
@@ -756,6 +755,32 @@ func (a *Accounting) notifyPaymentThresholdUpgrade(peer swarm.Address, accountin
 	if err != nil {
 		a.logger.Error(err, "announcing increased payment threshold", "value", accountingPeer.paymentThresholdForPeer, "peer_address", peer)
 	}
+}
+
+// settleRefreshDue is how much the next refreshment is expected to clear for
+// free, given the milliseconds since this peer's last one. settle subtracts it
+// before deciding how much a cheque must cover, so that money is not spent on
+// debt that costs nothing.
+//
+// Deliberately NOT capped at one refreshRate, which is what wasp #316 asked
+// for. Pseudosettle grants elapsed seconds times the refresh rate, not one
+// rate: see peerAllowance in pkg/settlement/pseudosettle. Its one-per-second
+// rule limits how often a refreshment may happen, not how much it clears. So
+// the uncapped product is the correct prediction, and capping it would make
+// this node pay for debt it would have had forgiven. The sites that do cap a
+// refresh term bound a credit limit until the next refreshment, at most a
+// second away, which is a different quantity that happens to share a name.
+//
+// Clamped at zero, which is the part that was wrong. The subtraction is
+// signed, so a clock stepping back a second or more made the term negative and
+// raised the payment instead of lowering it. #359 clamped the credit-limit
+// side; this is the same fault on the settlement side.
+//
+// The clamp is elapsedSinceRefresh, the one #359 added, rather than a second
+// copy of the same three lines.
+func (a *Accounting) settleRefreshDue(accountingPeer *accountingPeer, now time.Time) *big.Int {
+	seconds := elapsedSinceRefresh(accountingPeer, now) / 1000
+	return new(big.Int).Mul(big.NewInt(seconds), a.refreshRate)
 }
 
 // Balances gets balances for all peers from store.

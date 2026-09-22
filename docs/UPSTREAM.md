@@ -79,7 +79,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#300](https://github.com/crtahlin/wasp/issues/300) | swap: three chain calls per received cheque cap how fast one peer can serve another | open | - | - |
 | [#301](https://github.com/crtahlin/wasp/issues/301) | chequebook: read the chequebook issuer once instead of on every cheque | done, neutral | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
 | [#302](https://github.com/crtahlin/wasp/issues/302) | chequebook: do not make cheque acceptance wait for the liquidity check | done, neutral (bundled with #301) | `fix/301-cheque-acceptance-cost` | [`a89a3a83`](https://github.com/crtahlin/wasp/commit/a89a3a83) |
-| [#316](https://github.com/crtahlin/wasp/issues/316) | accounting: refreshDue is computed without the one second cap in settle, which can suppress cheques entirely | open | - | - |
+| [#316](https://github.com/crtahlin/wasp/issues/316) | accounting: the refresh allowance in settle is not clamped, so a backwards clock step raises the payment (the issue's title claims a missing cap, which is refuted; see below) | open | - | - |
 | [#333](https://github.com/crtahlin/wasp/issues/333) | accounting: Connect rewinds the threshold-growth checkpoint but not the counter it is compared against | done | `fix/333-threshold-growth-reconnect` | [`84897232`](https://github.com/crtahlin/wasp/commit/84897232) |
 | [#337](https://github.com/crtahlin/wasp/issues/337) | file: hashtrie.Sum formats the dispersed-replica failure with %s against err.Error() rather than %w, so errors.Is cannot see the cause | done | `fix/337-replica-error-chain` | [`e2e2c623`](https://github.com/crtahlin/wasp/commit/e2e2c623) |
 | [#359](https://github.com/crtahlin/wasp/issues/359) | accounting: the refresh allowance is granted as a step, and nearly all refusals fall in the discarded window | open | - | - |
@@ -107,10 +107,26 @@ to tag defects rather than preferences. The same reading of that code did turn
 up two genuine problems, and they were split off rather than left attached to
 the changes:
 
-- [#316](https://github.com/crtahlin/wasp/issues/316), the uncapped
-  `refreshDue`, is tagged and has its row above. It was verified in
-  `upstream/v2.8.2` against the four capped sites, and it is rule 11's own
-  example of a defect, one quantity computed two different ways.
+- [#316](https://github.com/crtahlin/wasp/issues/316) is tagged and has its row
+  above, but **not for the reason first recorded here, which was wrong and is
+  corrected per rule 11.**
+
+  This entry said the defect was the missing cap in `settle`, and called it
+  rule 11's own example, one quantity computed two different ways. It is not.
+  `peerAllowance` grants elapsed seconds times the refresh rate, and
+  `NotifyRefreshmentSent` blocklists a peer that forgives less than
+  `interval x refreshRate`, so both sides of the protocol agree a refreshment
+  is worth the elapsed product. Capping `settle`'s prediction at one rate would
+  make this node pay for debt its peer is obliged to forgive. The capped sites
+  bound a credit limit until the next refreshment; two of them are not gates at
+  all but the read-only reporter in `PeerAccounting`. They share a name with
+  this one and nothing else.
+
+  What is upstream's defect, and what keeps the label, is that the elapsed time
+  is a signed subtraction with no clamp, so a clock stepping back a second or
+  more makes the term negative and raises the payment. Upstream line 484 is
+  unclamped. That is the same fault #359 fixed on the credit-limit side, and
+  the fix is the same change in both trees.
 - [#333](https://github.com/crtahlin/wasp/issues/333), the growth checkpoint
   rewound on connect while `totalDebtRepay` is not, is tagged and has its row
   above. `Connect` sets `thresholdGrowAt` back to 450,000,000 but nothing ever

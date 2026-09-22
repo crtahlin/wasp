@@ -2165,3 +2165,153 @@ func TestThresholdGrowthResetOnReconnect(t *testing.T) {
 		}
 	})
 }
+
+// TestSettleRefreshAllowance covers #316, and covers it in both directions,
+// because the issue asked for a change that would have been wrong.
+//
+// settle subtracts what the next refreshment will clear for free before
+// deciding how much a cheque must cover. Pseudosettle grants elapsed seconds
+// times the refresh rate, so that prediction is the uncapped product. Capping
+// it at one refresh rate, which #316 proposed, makes this node pay money for
+// debt it would have had forgiven.
+//
+// What was wrong is the sign: the subtraction is signed, so a clock stepping
+// back a second or more made the term negative and raised the payment.
+func TestSettleRefreshAllowance(t *testing.T) {
+	t.Parallel()
+
+	store := mock.NewStateStore()
+	t.Cleanup(func() { store.Close() })
+
+	pricing := &pricingMock{}
+	acc, err := accounting.NewAccounting(testPaymentThreshold, 0, 0, log.Noop, store, pricing, big.NewInt(testRefreshRate), testLightFactor, p2pmock.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	peer, err := swarm.ParseHexAddress("00112233")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc.Connect(peer, true)
+
+	// The allowance is read through the same helper settle uses, so the two
+	// cannot drift apart without this test noticing.
+	for _, tc := range []struct {
+		name        string
+		elapsedMs   int64
+		wantAtMost  int64
+		wantAtLeast int64
+	}{
+		{
+			// The case #316 wanted capped. It must not be: a refreshment
+			// after 10 seconds clears 10 times the rate, so predicting one
+			// rate would have this node pay for the other nine.
+			name:        "ten seconds predicts ten rates",
+			elapsedMs:   10_000,
+			wantAtLeast: 10 * testRefreshRate,
+			wantAtMost:  10 * testRefreshRate,
+		},
+		{
+			// The defect. Before the clamp this was negative, which raised
+			// the payment rather than lowering it.
+			name:        "a backwards clock step predicts nothing",
+			elapsedMs:   -5_000,
+			wantAtLeast: 0,
+			wantAtMost:  0,
+		},
+		{
+			// Sub-second steps were always harmless, because the division
+			// truncates toward zero. Kept so a change of units notices.
+			name:        "a sub-second backwards step predicts nothing",
+			elapsedMs:   -500,
+			wantAtLeast: 0,
+			wantAtMost:  0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := acc.SettleRefreshDue(peer, time.UnixMilli(tc.elapsedMs))
+			if got.Int64() < tc.wantAtLeast || got.Int64() > tc.wantAtMost {
+				t.Fatalf("elapsed %d ms predicts %s, want between %d and %d",
+					tc.elapsedMs, got, tc.wantAtLeast, tc.wantAtMost)
+			}
+		})
+	}
+}
+
+// TestSettleClampsBackwardsClock drives settle itself, which is the point.
+//
+// A first version of this work tested only the extracted helper. That left the
+// call site free to go back to the inline expression it came from: restoring
+// those two lines verbatim, with the helper and its test still present, passed
+// the whole package. The behaviour change was pinned by nothing.
+//
+// Here the peer's last refreshment is set into the future, which is what a
+// clock stepping backwards looks like from settle. The term was a signed
+// subtraction, so it went negative and was subtracted from the debt as a
+// negative, raising the payment above what the debt justified.
+func TestSettleClampsBackwardsClock(t *testing.T) {
+	t.Parallel()
+
+	store := mock.NewStateStore()
+	defer store.Close()
+
+	acc, err := accounting.NewAccounting(testPaymentThreshold, testPaymentTolerance, testPaymentEarly, log.Noop, store, &pricingMock{}, big.NewInt(testRefreshRate), testLightFactor, p2pmock.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paychan := make(chan paymentCall, 1)
+
+	const ts = int64(1000)
+	acc.SetTime(ts)
+
+	// No refreshment: this peer settles only in money, so the cheque amount is
+	// the one thing the allowance moves.
+	acc.SetRefreshFunc(func(context.Context, swarm.Address, *big.Int) {})
+	acc.SetPayFunc(func(_ context.Context, peer swarm.Address, amount *big.Int) {
+		acc.NotifyPaymentSent(peer, amount, nil)
+		paychan <- paymentCall{peer: peer, amount: amount}
+	})
+
+	peer, err := swarm.ParseHexAddress("00112233")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc.Connect(peer, true)
+
+	// Ten seconds into the future, against a clock at ts. Unclamped the term
+	// is -10 * refreshRate; clamped it is zero.
+	acc.SetRefreshTimestampForTest(peer, (ts+10)*1000)
+
+	// The allowance only moves the cheque when it is the binding constraint,
+	// which needs something reserved. Without this the payment is the debt
+	// either way and restoring the unclamped line passes the test, which is
+	// how a first version of it proved nothing.
+	//
+	// Clamped:   10000 - 0     - 3000 = 7000, and 7000 < the 10000 debt.
+	// Unclamped: 10000 + 10000 - 3000 = 17000, so the debt binds at 10000.
+	const shadow = 3000
+	acc.SetShadowReservedBalanceForTest(peer, big.NewInt(shadow))
+
+	debt := testPaymentThreshold.Uint64()
+	creditAction, err := acc.PrepareCredit(context.Background(), peer, debt, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := creditAction.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	creditAction.Cleanup()
+
+	select {
+	case call := <-paychan:
+		want := new(big.Int).Sub(testPaymentThreshold, big.NewInt(shadow))
+		if call.amount.Cmp(want) != 0 {
+			t.Fatalf("paid %s, want %s: a refreshment timestamp in the future must not raise the payment",
+				call.amount, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for the monetary payment")
+	}
+}

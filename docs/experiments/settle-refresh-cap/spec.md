@@ -1,7 +1,66 @@
-# Spec: make settle use one definition of the refresh allowance
+# Spec: clamp the refresh allowance in settle, and do not cap it
 
 Issue: [#316](https://github.com/crtahlin/wasp/issues/316). Type: fix. Area: incentives.
 Affects upstream: yes (the inline computation in `settle` is unmodified from bee v2.8.2).
+
+> **The central claim of this spec was wrong and is withdrawn.** It argued that
+> `settle`'s refresh allowance should be capped at one `refreshRate`, on the premise
+> that pseudosettle can clear at most that much before the next settlement. **It
+> cannot be capped**, and the premise confuses two different limits. What survives is
+> the missing clamp. The withdrawal is below, before the original argument, so nobody
+> reads the argument first.
+
+## Withdrawn: the cap
+
+`peerAllowance` in `pkg/settlement/pseudosettle/pseudosettle.go` computes:
+
+```go
+maxAllowance := new(big.Int).Mul(big.NewInt(currentTime-lastTime.Timestamp), refreshRateUsed)
+```
+
+**Elapsed seconds times the rate, not one rate.** The one-per-second rule earlier in
+that function (`currentTime == lastTime.Timestamp` returns `ErrSettlementTooSoon`)
+limits how *often* a refreshment may happen, not how *much* it clears. A peer idle for
+ten seconds is forgiven ten times the rate in a single refreshment.
+
+So `settle`'s uncapped product is the **correct** prediction of what the next
+refreshment will clear for free, and subtracting it is what stops this node paying money
+for debt that costs nothing. Capping it would make the node pay for the difference.
+
+This spec's own "What this must not do" section named that hazard exactly, and the
+proposed change was the thing that causes it.
+
+Measured rather than argued: applying the cap fails four tests, three of which predate
+this work, `TestAccountingCallSettlement`, `TestAccountingCallSettlementMonetary` and
+`TestAccountingCallSettlementTooSoon`. The first implementation attempt failed them, and
+that is how the premise was caught.
+
+**The four capped sites and this one are not one quantity computed two ways.** They bound
+a credit limit until the next refreshment, which is at most a second away, so one rate is
+right for them. This one predicts what a refreshment forgives, which grows with time.
+They share a name and nothing else, and that name is what made the issue plausible.
+
+## What survives: the clamp
+
+The elapsed time is a signed subtraction with no clamp, so a clock stepping back a second
+or more makes the term negative, which **raises** the payment instead of lowering it.
+[#359](https://github.com/crtahlin/wasp/issues/359) clamped the credit-limit side; this
+is the same fault on the settlement side, and it is a real defect.
+
+Sub-second backwards steps were always harmless, because the division truncates toward
+zero.
+
+## The change, as shipped
+
+The expression moves into `Accounting.settleRefreshDue`, clamped at zero and not capped,
+with the reasoning above recorded next to it so the cap is not reintroduced. A test pins
+both directions: that ten seconds predicts ten rates, and that a backwards step predicts
+nothing.
+
+---
+
+*Everything below is the original argument, kept because the withdrawal above is only
+meaningful next to what it withdraws.*
 
 ## The issue describes upstream, and the fork has moved since
 
