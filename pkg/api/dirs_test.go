@@ -781,26 +781,26 @@ func TestDirsMultipartMalformed(t *testing.T) {
 			message:     api.ErrEmptyDir.Error(),
 		},
 		{
-			// NOT fixed by #409, and recorded rather than hidden. The
-			// content type names no boundary, so mime/multipart refuses
-			// before reading anything. That is the caller's mistake and
-			// should be 400, but the error is mime/multipart's own and
-			// matches no case in the switch.
+			// Fixed by #424: this used to answer 500. mime/multipart
+			// refuses before reading anything, with an error it does not
+			// export, so the boundary is checked before the reader is
+			// built rather than matched afterwards.
 			name:        "content type declares no boundary",
 			body:        complete.Bytes(),
 			contentType: "multipart/form-data",
-			code:        http.StatusInternalServerError,
-			message:     api.ErrDirectoryStoreError.Error(),
+			code:        http.StatusBadRequest,
+			message:     api.ErrNoBoundary.Error(),
 		},
 		{
-			// NOT fixed by #409, same reason: a part header line with no
-			// colon is a malformed MIME header, which is again the
-			// caller's mistake reported as a node fault.
+			// Fixed by #424: a part header line with no colon is a
+			// malformed MIME header, matched by type because
+			// textproto.ProtocolError carries the offending line in its
+			// text and so cannot be matched by identity.
 			name:        "part header line without a colon",
 			body:        []byte("--" + boundary + "\r\nnot a header line\r\n\r\nbody\r\n--" + boundary + "--\r\n"),
 			contentType: "multipart/form-data; boundary=" + boundary,
-			code:        http.StatusInternalServerError,
-			message:     api.ErrDirectoryStoreError.Error(),
+			code:        http.StatusBadRequest,
+			message:     "malformed multipart header",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

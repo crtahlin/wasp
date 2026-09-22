@@ -12,6 +12,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"sync"
 
 	"github.com/ethersphere/bee/v2/pkg/file/redundancy"
@@ -89,6 +90,14 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 		case contentTypeTar:
 			dReader = &tarReader{r: tar.NewReader(r.Body), logger: logger}
 		case multiPartFormData:
+			if params["boundary"] == "" {
+				// wasp #424, the same as on the stamped route: mime/multipart
+				// reports a missing boundary with an unexported error, so it
+				// is caught before the reader is built.
+				logger.Debug("local ingest: multipart upload without a boundary", "error", errNoBoundary)
+				jsonhttp.BadRequest(w, errNoBoundary)
+				return
+			}
 			dReader = &multipartReader{r: multipart.NewReader(r.Body, params["boundary"])}
 		default:
 			logger.Error(nil, "local ingest: invalid content-type for a collection")
@@ -214,6 +223,7 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 		// A malformed archive is the caller's fault, not this node's. Both
 		// answer through ow, like every other failure here, so the collection
 		// is released rather than left on disk until the next restart.
+		var protoErr textproto.ProtocolError
 		switch {
 		case errors.Is(err, errEmptyDir):
 			logger.Debug("local ingest: collection has no files", "error", err)
@@ -229,6 +239,13 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, tar.ErrHeader):
 			logger.Debug("local ingest: invalid tar header", "error", err)
 			jsonhttp.BadRequest(ow, "invalid tar archive")
+			return
+		case errors.As(err, &protoErr):
+			// wasp #424: a malformed part header, matched by type because
+			// textproto.ProtocolError is a string type whose text carries the
+			// offending line.
+			logger.Debug("local ingest: malformed multipart header", "error", err)
+			jsonhttp.BadRequest(ow, "malformed multipart header")
 			return
 		case errors.Is(err, io.ErrUnexpectedEOF):
 			// A body that stops mid-archive, which includes anything shorter
