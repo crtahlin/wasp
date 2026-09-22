@@ -73,19 +73,37 @@ func (a *addressbook) MigratePeer(oldPeer, newPeer swarm.Address) error {
 		return err
 	}
 
-	if err := a.PutBeneficiary(newPeer, ba); err != nil {
-		return err
-	}
-
+	// wasp #430: the old mapping is removed BEFORE the new one is written.
+	//
+	// There is no transaction to be had here: storage.StateStorer offers only
+	// Get, Put, Delete and Iterate, so "write both or neither" cannot be
+	// expressed, and a failure part way will leave the addressbook
+	// inconsistent whichever order these run in. What the order decides is
+	// WHICH inconsistency survives.
+	//
+	// Put first, then delete, leaves BOTH peers mapped to the beneficiary:
+	// two payment paths onto one chequebook, which settle's per-peer gate does
+	// not serialize because it is keyed by overlay. Delete first leaves
+	// NEITHER mapped, which fails a payment until the next announcement calls
+	// PutBeneficiary again, the same call that established the mapping.
+	//
+	// Both are wrong. Only the first is dangerous.
+	//
+	// Re-running an interrupted migration finishes it: Delete on a missing key
+	// is a no-op in both StateStorer implementations.
 	if err := a.store.Delete(peerBeneficiaryKey(oldPeer)); err != nil {
 		return err
 	}
 
+	if err := a.PutBeneficiary(newPeer, ba); err != nil {
+		return err
+	}
+
 	if known {
-		if err := a.PutChequebook(newPeer, cb); err != nil {
+		if err := a.store.Delete(peerKey(oldPeer)); err != nil {
 			return err
 		}
-		if err := a.store.Delete(peerKey(oldPeer)); err != nil {
+		if err := a.PutChequebook(newPeer, cb); err != nil {
 			return err
 		}
 	}
