@@ -109,3 +109,77 @@ func TestCloseIsIdempotent(t *testing.T) {
 		t.Fatalf("second close: %v", err)
 	}
 }
+
+
+// orderingCloser records whether any background work was still in flight at
+// the moment the store was closed. That is #399's property, and review of the
+// #428 fix found nothing in the repository pinned it: an implementation that
+// closed the store BEFORE the drains passed every test in this package.
+type orderingCloser struct {
+	inFlight  func() bool
+	closed    atomic.Bool
+	racedWork atomic.Bool
+}
+
+func (c *orderingCloser) Close() error {
+	if c.inFlight() {
+		c.racedWork.Store(true)
+	}
+	c.closed.Store(true)
+	return nil
+}
+
+// TestCloseClosesTheStoreAfterTheDrains pins the ordering #399 introduced,
+// which #428 must preserve rather than quietly trade away.
+//
+// The store must not be closed while reserve work is still running. Here the
+// work finishes before the drain window expires, so a correct Close waits for
+// it and closes afterwards; one that closes first, as upstream does, records
+// the race.
+func TestCloseClosesTheStoreAfterTheDrains(t *testing.T) {
+	t.Parallel()
+
+	var working atomic.Bool
+	closer := &orderingCloser{inFlight: working.Load}
+
+	db := storer.NewForCloseTest(t, closer, 2*time.Second)
+
+	working.Store(true)
+	release := storer.HoldInFlight(db)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		working.Store(false)
+		release()
+	}()
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("the drain had time to finish, so Close should not report one: %v", err)
+	}
+	if !closer.closed.Load() {
+		t.Fatal("the store was not closed")
+	}
+	if closer.racedWork.Load() {
+		t.Fatal("the store was closed while reserve work was still in flight, which is the " +
+			"pebble segfault #399 exists to prevent")
+	}
+}
+
+// TestCloseCancelsTheCacheLimiter pins the force-close of cache goroutines
+// that outlast the drain. Review found deleting that call left every test
+// passing.
+func TestCloseCancelsTheCacheLimiter(t *testing.T) {
+	t.Parallel()
+
+	closer := &recordingCloser{}
+	db := storer.NewForCloseTest(t, closer, 100*time.Millisecond)
+
+	release := storer.HoldCacheWork(db)
+	defer release()
+
+	_ = db.Close()
+
+	if !storer.CacheLimiterCancelled(db) {
+		t.Fatal("a cache drain that timed out must force the limiter closed, or the " +
+			"goroutines it bounds keep running against a closed store")
+	}
+}

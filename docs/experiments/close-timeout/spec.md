@@ -6,8 +6,14 @@ Type: fix.
 ## Problem
 
 `DB.Close` gives up before the store is closed whenever a background drain takes
-longer than three seconds. The store is then left unclosed, the unclean-shutdown
-marker stays, and the next start replays the write-ahead log.
+longer than three seconds. The store is then left unclosed and the next start
+replays the write-ahead log.
+
+One qualification, since the first draft overstated it: the unclean-shutdown
+**marker** is goleveldb's, written and cleared in `pkg/storage/leveldbstore`.
+`pkg/storage/pebblestore` has no marker, and pebble is wasp's default index
+engine for a new data directory. The write-ahead replay applies to both; the
+marker half applies only to goleveldb.
 
 Two timeouts disagree, both in `pkg/storer/storer.go`:
 
@@ -54,19 +60,38 @@ exceed five seconds. It does not fix this: a drain can still be slow, and this
 is about the store not being closed at all rather than about what a slow drain
 is doing.
 
-An operator who sets `ShutdownTimeout` above five seconds does not have the
-problem. The default configuration does.
+A caller that sets `ShutdownTimeout` above five seconds does not have the
+problem. The default does. No node can set it, see below.
 
 ## The change
 
-Derive one bound from the other so they cannot drift apart again, which is how
-they got into the wrong order.
+Make `Close` wait for the close it is named for.
 
-- The drains take the **shutdown budget** rather than a hardcoded five seconds,
-  so `ShutdownTimeout` is the single number an operator reasons about.
-- `Close` then waits for the close itself with a small fixed grace on top of
-  that budget, because the drains are now self-bounding and the only remaining
-  unbounded step is `dbCloser.Close()`.
+> **Corrected at implementation, twice over.** The first draft of this section
+> said the drains should take `ShutdownTimeout` instead of their own five
+> seconds. Review showed that **narrows the #399 window from five seconds to
+> three**: the store is closed once the drains return *or give up*, so a shorter
+> drain pulls the store out from under live reserve work sooner, which is the
+> pebble segfault #399 exists to prevent. That trade was never stated, and the
+> draft's claim that the close is "never concurrently with a live scan"
+> contradicts its own "returned or given up" in the same sentence.
+>
+> The draft also framed `ShutdownTimeout` as the number an operator sets. **It
+> is not a node setting at all**: it appears nowhere in `cmd/`, and
+> `docs/DIFFERENCES.md` says so. On a real node the whole operator framing was
+> fiction.
+
+What is implemented instead:
+
+- The drains keep **their own window**, `drainTimeout`, still five seconds, so
+  #399's exposure is unchanged. `ShutdownTimeout` may only **extend** it, never
+  shorten it.
+- `Close` **waits for the close** rather than racing it. That is the whole fix:
+  the defect was returning early, not the length of the drain.
+- The store's own `Close` gets a named grace, since neither the drain window nor
+  `ShutdownTimeout` covers it. That is a second number and the spec no longer
+  pretends otherwise; what it is not is a second number in a *race* with the
+  first, which is what caused the defect.
 - The two failures are reported differently: a drain that did not finish is not
   the same as a store that was not closed, and the message says which.
 
@@ -82,29 +107,33 @@ change introduces; the only difference is that `Close` now waits for it rather
 than returning while it happens.
 
 #399's ordering is preserved exactly: the close still happens after both drains
-have returned or given up, never concurrently with a live scan.
+have returned or given up. Note that "given up" means the work may still be
+running, so this is not a guarantee that no scan is live; it is the same
+guarantee #399 shipped, neither stronger nor weaker, and the drain window that
+bounds it is unchanged.
 
 ### Why not simply raise the default
 
 Raising `defaultShutdownTimeout` above five seconds is smaller and was
-considered. It is rejected because it leaves two numbers whose relative order
-has to be maintained by hand, and the defect is precisely that nobody
-maintained it. It would also not fix an operator who sets `ShutdownTimeout` to
-four seconds, which is a legitimate thing to do and still loses the store.
+considered. It is rejected because it leaves the outer bound **racing** the
+drains rather than following them, which is the actual shape of the defect: the
+problem was never the numbers alone but that `Close` returned while the close
+was still pending. Making `Close` wait fixes it for every value of both.
 
 ## What it costs
 
 **Shutdown can take longer than it does today, by design.** Today `Close`
 returns after three seconds and the process exits with the store open; after
 this it waits for the store to be closed. That is the point, and it is bounded:
-the drains cannot exceed the budget, so the worst case is the budget plus the
-grace.
+the drains cannot exceed the drain window, so the worst case is that window
+plus the grace.
 
-An operator who wants a faster shutdown lowers `ShutdownTimeout`, and now gets
-what the name says: the whole of `Close` inside that budget, rather than the
-drains taking five seconds regardless.
+Nothing changes for a clean shutdown, where the drains return immediately, and
+that is pinned by a test rather than asserted.
 
-Nothing changes for a clean shutdown, where the drains return immediately.
+`ShutdownTimeout` is a Go API option, not a node setting, so no operator can
+change any of this without recompiling. The earlier draft's "an operator who
+sets four seconds" was wrong on that point as well as on the trade.
 
 ## Protocol impact
 
@@ -114,15 +143,20 @@ None. A local shutdown path with no wire component.
 
 In `pkg/storer`, mutation checked: revert the change and confirm the test fails.
 
-- **A drain slower than the budget still closes the store.** The test holds
-  `db.inFlight` past the budget and asserts `dbCloser.Close()` ran before
-  `Close` returned. This is the defect and it must fail today.
-- **The error distinguishes the two cases**, so a reader of a log can tell a
-  slow drain from an unclosed store.
-- **A clean shutdown is unchanged**: with nothing in flight, `Close` returns
-  promptly and reports no error.
+- **A drain slower than the window still closes the store.** Holds
+  `db.inFlight` past the window and asserts the store was closed before `Close`
+  returned. This is the defect; it fails against the old `Close`.
+- **The store is closed AFTER the drains**, which is #399's property. Review of
+  the first implementation found nothing in the repository pinned it: a `Close`
+  that closed the store first passed every test in the package. The closer now
+  records whether work was in flight at the moment it ran.
+- **A cache drain that times out force-closes the limiter.** Also found by
+  review: deleting that call left every test green.
+- **A clean shutdown is prompt**, so the fix is not paid on every shutdown.
 - **`Close` stays idempotent.** `quitOnce` guards the quit channel and
   `TriggerQuit` shares it, so a second `Close` must not panic.
+
+Each of the five has a mutation that kills it and no other.
 
 Testability was checked before this was written rather than assumed: `dbCloser`
 is an `io.Closer` field on `DB`, so a test can substitute one that records
@@ -138,8 +172,8 @@ node performs.
 ## Rollout and rollback
 
 No migration and no on-disk change. `ShutdownTimeout` keeps its name, its
-default and its meaning, and gains authority over the drains. Rollback is
-reverting the merge commit.
+default and its meaning, and may now extend the drain window but never shorten
+it. Rollback is reverting the merge commit.
 
 ## Upstream portability
 

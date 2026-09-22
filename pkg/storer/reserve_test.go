@@ -1111,8 +1111,8 @@ func TestReserveScanStopsOnShutdown(t *testing.T) {
 	}
 }
 
-// TestReserveOperationsStopOnQuit covers #407. Close waits five seconds for the
-// reserve worker and then closes the store whether or not the worker stopped,
+// TestReserveOperationsStopOnQuit covers #407. Close waits the drain window for
+// the reserve worker and then closes the store whether or not it stopped,
 // so an evict or an unreserve that keeps running is the read-after-close #399
 // fixed for the within-radius scan. Both now return ErrDBQuit promptly.
 //

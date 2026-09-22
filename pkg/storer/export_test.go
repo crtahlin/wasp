@@ -148,10 +148,10 @@ func (db *DB) Unreserve(ctx context.Context) error { return db.unreserve(ctx) }
 // own closer, the shutdown budget, and the two drains Close waits on. A full
 // store is not needed and would make the timings depend on real work.
 //
-// The budget is passed rather than taken from the default so a test can use a
-// short one; #428 is about the relationship between that budget and the drains,
-// so it has to be settable.
-func NewForCloseTest(t *testing.T, dbCloser io.Closer, shutdownTimeout time.Duration) *DB {
+// The DRAIN WINDOW is passed rather than taken from the default so a test can
+// use a short one. It is the window #399 relies on and the one #428 must not
+// shorten, so it is the number these tests turn on.
+func NewForCloseTest(t *testing.T, dbCloser io.Closer, drainWindow time.Duration) *DB {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -160,8 +160,8 @@ func NewForCloseTest(t *testing.T, dbCloser io.Closer, shutdownTimeout time.Dura
 	return &DB{
 		logger:          log.Noop,
 		quit:            make(chan struct{}),
-		dbCloser:        dbCloser,
-		shutdownTimeout: shutdownTimeout,
+		dbCloser:    dbCloser,
+		drainWindow: drainWindow,
 		cacheLimiter: cacheLimiter{
 			sem:    make(chan struct{}, 1),
 			ctx:    ctx,
@@ -177,4 +177,23 @@ func HoldInFlight(db *DB) func() {
 	db.inFlight.Add(1)
 	var once sync.Once
 	return func() { once.Do(db.inFlight.Done) }
+}
+
+
+// HoldCacheWork adds one unit of cache work and returns the release, so a test
+// can make the cache drain time out. See #428.
+func HoldCacheWork(db *DB) func() {
+	db.cacheLimiter.wg.Add(1)
+	var once sync.Once
+	return func() { once.Do(db.cacheLimiter.wg.Done) }
+}
+
+// CacheLimiterCancelled reports whether Close force-closed the cache limiter.
+func CacheLimiterCancelled(db *DB) bool {
+	select {
+	case <-db.cacheLimiter.ctx.Done():
+		return true
+	default:
+		return false
+	}
 }

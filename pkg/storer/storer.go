@@ -253,8 +253,17 @@ const (
 	// workers. Three seconds is the historical value; see Options.ShutdownTimeout
 	// for why it is now overridable.
 	defaultShutdownTimeout = 3 * time.Second
-	// closeGrace bounds the store's own Close, which runs after the drains
-	// and is the only step Options.ShutdownTimeout does not cover. See #428.
+	// drainTimeout is how long each shutdown drain waits for its workers.
+	//
+	// This is the window #399 relies on. The store is not closed until both
+	// drains have returned OR GIVEN UP, so shortening it closes the store
+	// under live reserve work sooner, which is the pebble segfault #399
+	// exists to prevent. An earlier draft of #428 shortened it to
+	// ShutdownTimeout and would have narrowed the window from five seconds to
+	// three without saying so.
+	drainTimeout = 5 * time.Second
+	// closeGrace bounds the store's own Close, the one step neither the drain
+	// window nor ShutdownTimeout covers. See #428.
 	closeGrace = 5 * time.Second
 
 	defaultOpenFilesLimit         = uint64(256)
@@ -718,6 +727,11 @@ type DB struct {
 	syncer           Syncer
 	reserveOptions   reserveOpts
 	shutdownTimeout  time.Duration
+	// drainWindow is how long each shutdown drain waits. Zero means
+	// drainTimeout. A field rather than a bare constant so a test can
+	// shorten it per store, instead of mutating package state that
+	// parallel tests would race. See #428.
+	drainWindow time.Duration
 	// reserveHasLimiter bounds concurrent ReserveHas lookups. Nil when
 	// unbounded, which is the default.
 	reserveHasLimiter chan struct{}
@@ -993,28 +1007,34 @@ func (db *DB) Close() error {
 	// Idempotent: TriggerQuit (tests) and a double Close share this guard.
 	db.quitOnce.Do(func() { close(db.quit) })
 
-	shutdownTimeout := db.shutdownTimeout
-	if shutdownTimeout <= 0 {
-		shutdownTimeout = defaultShutdownTimeout
+	// wasp #428: Close used to give up on ShutdownTimeout, three seconds by
+	// default, while each drain waited five. A drain between the two made
+	// Close return while dbCloser.Close had not run, so the store was left
+	// open and the next start replayed the write-ahead log.
+	//
+	// The fix is that Close WAITS for the close, not that the drains are
+	// shortened. Shortening them to ShutdownTimeout was the first draft and it
+	// silently narrowed the #399 window from five seconds to three; the drain
+	// keeps its own bound, and ShutdownTimeout may only extend it.
+	drain := db.drainWindow
+	if drain <= 0 {
+		drain = drainTimeout
+	}
+	if db.shutdownTimeout > drain {
+		drain = db.shutdownTimeout
 	}
 
-	// wasp #428: the drains take the shutdown budget rather than a hardcoded
-	// five seconds. They used to outlast it, so a drain between the budget and
-	// five seconds made Close return while dbCloser.Close had not run: the
-	// store was left open, the unclean-shutdown marker stayed, and the next
-	// start replayed the write-ahead log. Two numbers that had to be kept in
-	// the right order by hand were not, so now there is one.
 	reserveDrained := make(chan bool, 1)
 	go func() {
-		reserveDrained <- syncutil.WaitWithTimeout(&db.inFlight, shutdownTimeout)
+		reserveDrained <- syncutil.WaitWithTimeout(&db.inFlight, drain)
 	}()
 
 	cacheDrained := make(chan bool, 1)
 	go func() {
-		cacheDrained <- syncutil.WaitWithTimeout(&db.cacheLimiter.wg, shutdownTimeout)
+		cacheDrained <- syncutil.WaitWithTimeout(&db.cacheLimiter.wg, drain)
 	}()
 
-	// Both waits are bounded by the same budget, so this returns within it.
+	// Both waits are bounded by the same window, so this returns within it.
 	reserveOK, cacheOK := <-reserveDrained, <-cacheDrained
 	if !reserveOK {
 		db.logger.Warning("db shutting down with running goroutines")
@@ -1051,7 +1071,7 @@ func (db *DB) Close() error {
 
 	if !reserveOK || !cacheOK {
 		return errors.Join(
-			fmt.Errorf("storer closed, but bg goroutines were still running after %s", shutdownTimeout),
+			fmt.Errorf("storer closed, but bg goroutines were still running after %s", drain),
 			err,
 		)
 	}
