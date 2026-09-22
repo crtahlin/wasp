@@ -5,13 +5,18 @@
 package swap_test
 
 import (
+	"context"
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/settlement/swap"
+	swapchequebook "github.com/ethersphere/bee/v2/pkg/settlement/swap/chequebook"
+	mockchequebook "github.com/ethersphere/bee/v2/pkg/settlement/swap/chequebook/mock"
+	mockchequestore "github.com/ethersphere/bee/v2/pkg/settlement/swap/chequestore/mock"
 	mockstore "github.com/ethersphere/bee/v2/pkg/statestore/mock"
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -114,11 +119,17 @@ func TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair(t *testing.T) {
 	//   5 PUT    swap_peer_chequebook_<cb>       PutChequebook, reverse
 	//   6 DELETE swap_chequebook_peer_<old>
 	//
-	// The wrapper matches on a substring of the key, so it can fail 1, 3, 4
-	// and 6. The two reverse puts, 2 and 5, share no distinguishing substring
-	// with anything else this test can target and are not reached here. That
-	// is worth naming rather than glossing, because write 2 is the one whose
-	// position relative to write 3 is the whole invariant.
+	// The wrapper matches on a substring of the key and reaches all six. The
+	// mirrored prefixes discriminate: "peer_beneficiary" selects write 1 and
+	// not write 2, "beneficiary_peer" selects write 2 and not write 1, and the
+	// chequebook pair works the same way round.
+	//
+	// An earlier version of this comment claimed the two reverse puts could
+	// not be selected, and left writes 2 and 5 untested on that basis. That
+	// was wrong, and write 2 turned out to be the most valuable case of the
+	// six: failing it produces the wedge directly, a reverse mapping naming a
+	// peer whose forward mapping is gone, which is the state this whole issue
+	// is about.
 	for _, tc := range []struct {
 		name string
 		// wantNewChequebook is whether the new peer holds the chequebook once
@@ -152,6 +163,17 @@ func TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair(t *testing.T) {
 			wantNewChequebook: true,
 		},
 		{
+			// Write 2, the reverse beneficiary put. This is the case that
+			// reaches the wedge by the shortest route: the forward mapping for
+			// the new peer is written and the reverse mapping still names the
+			// old one. The shipped order survives it because the old peer's
+			// forward mapping has not been deleted yet, so the next handshake
+			// takes the migrate branch and finishes the job.
+			name:              "the reverse beneficiary write fails",
+			failPut:           "beneficiary_peer",
+			wantNewChequebook: true,
+		},
+		{
 			name:       "the old beneficiary delete fails",
 			failDelete: "peer_beneficiary",
 		},
@@ -166,6 +188,15 @@ func TestMigratePeerPartialWriteLeavesTheHandshakeAbleToRepair(t *testing.T) {
 		{
 			name:    "the new chequebook write fails",
 			failPut: "chequebook_peer",
+		},
+		{
+			// Write 5, the reverse chequebook put. Without this case the two
+			// writes inside PutChequebook can be swapped and nothing notices,
+			// although that is the same ordering argument the whole issue is
+			// about, one level down.
+			name:              "the reverse chequebook write fails",
+			failPut:           "peer_chequebook",
+			wantNewChequebook: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,8 +291,17 @@ func TestMigratePeerRefusesAnUnknownOldPeer(t *testing.T) {
 
 	book := swap.NewAddressbook(mockstore.NewStateStore())
 
-	if err := book.MigratePeer(oldPeer, newPeer); err == nil {
+	err := book.MigratePeer(oldPeer, newPeer)
+	if err == nil {
 		t.Fatal("migrating a peer with no beneficiary succeeded, want an error")
+	}
+
+	// The text is pinned, not just the failure. Handshake returns this error
+	// unchanged and libp2p disconnects on it, so it is what an operator sees
+	// in the log when a peer stops being able to connect. A test that accepts
+	// any error would let the one diagnostic string be renamed away.
+	if err.Error() != "old beneficiary not known" {
+		t.Fatalf("migrate: %q, want %q", err, "old beneficiary not known")
 	}
 
 	if _, known, _ := book.Beneficiary(newPeer); known {
@@ -401,6 +441,83 @@ func TestMigratePeerMovesTheReverseMappings(t *testing.T) {
 	if err != nil || !known || !gotPeer.Equal(newPeer) {
 		t.Fatalf("after the migration the chequebook maps to %v known=%v err=%v, want %v",
 			gotPeer, known, err, newPeer)
+	}
+}
+
+// TestReceiveChequeRecordsAnUnknownChequebook pins the claim the #430
+// withdrawal leans on to call the unfinished chequebook half acceptable.
+//
+// An interrupted migration can leave the new peer with no chequebook, because
+// the handshake repairs the beneficiary mapping only. That is tolerable just as
+// long as the next cheque fills it in. Nothing tested that: deleting the
+// `if !known` branch from ReceiveCheque left every package under
+// pkg/settlement passing, while removing the only thing that closes the gap.
+func TestReceiveChequeRecordsAnUnknownChequebook(t *testing.T) {
+	t.Parallel()
+
+	var (
+		peer              = swarm.MustParseHexAddress("abcd")
+		chequebookAddress = common.HexToAddress("0xcd")
+		exchangeRate      = big.NewInt(10)
+		deduction         = big.NewInt(0)
+	)
+
+	cheque := &swapchequebook.SignedCheque{
+		Cheque: swapchequebook.Cheque{
+			Beneficiary:      common.HexToAddress("0xab"),
+			CumulativePayout: big.NewInt(10),
+			Chequebook:       chequebookAddress,
+		},
+		Signature: []byte{},
+	}
+
+	chequeStore := mockchequestore.NewChequeStore(
+		mockchequestore.WithReceiveChequeFunc(
+			func(context.Context, *swapchequebook.SignedCheque, *big.Int, *big.Int) (*big.Int, error) {
+				return big.NewInt(50), nil
+			}),
+	)
+
+	var stored []common.Address
+	book := &addressbookMock{
+		// the state an interrupted migration leaves: no chequebook for the peer
+		chequebook: func(swarm.Address) (common.Address, bool, error) {
+			return common.Address{}, false, nil
+		},
+		putChequebook: func(p swarm.Address, cb common.Address) error {
+			if !p.Equal(peer) {
+				t.Fatalf("recorded the chequebook for %v, want %v", p, peer)
+			}
+			stored = append(stored, cb)
+			return nil
+		},
+	}
+
+	svc := swap.New(
+		&swapProtocolMock{},
+		log.Noop,
+		mockstore.NewStateStore(),
+		mockchequebook.NewChequebook(),
+		chequeStore,
+		book,
+		1,
+		&cashoutMock{},
+		newTestObserver(),
+		common.Address{},
+	)
+
+	if err := svc.ReceiveCheque(context.Background(), peer, cheque, exchangeRate, deduction); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(stored) != 1 {
+		t.Fatalf("the chequebook was recorded %d times, want once: the gap an "+
+			"interrupted migration leaves is only acceptable because the next "+
+			"cheque closes it", len(stored))
+	}
+	if stored[0] != chequebookAddress {
+		t.Fatalf("recorded chequebook %v, want the one the cheque carried, %v",
+			stored[0], chequebookAddress)
 	}
 }
 
