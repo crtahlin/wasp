@@ -11,7 +11,7 @@ Type: fix.
 Retrieval has two ways of giving up and they return different errors. Exhausting
 the peer walk returns `topology.ErrNotFound`, whose text is "no peer found"
 (`pkg/topology/topology.go:19`), from `pkg/retrieval/retrieval.go:374`. Spending
-the origin error budget returns `storage.ErrNotFound` from `:472`.
+the origin error budget returns `storage.ErrNotFound` from `:489`.
 `pkg/storer/netstore.go:107` passes either through unwrapped, and the chunk
 handler maps only the second:
 
