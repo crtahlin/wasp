@@ -14,7 +14,7 @@ inside that spec.
 | Body | Answer today | Underlying error | Where it is built |
 |---|---|---|---|
 | A part carrying more than 10000 header lines | 500 | `multipart: message too large` | `mime/multipart/multipart.go:177` |
-| Garbage where a new part was expected, a body ending `--BOUNDARY` then a tab | 500 | `multipart: expecting a new Part; got line "--BOUNDARY\tx\r\n"` | `mime/multipart/multipart.go:423` |
+| Garbage where a new part was expected, a body ending `--BOUNDARY`, a tab, then a further character | 500 | `multipart: expecting a new Part; got line "--BOUNDARY\tx\r\n"` | `mime/multipart/multipart.go:423` |
 
 Both were reproduced against `POST /wasp/ingest`. `POST /bzz` builds the same
 reader through the same `multipartReader` and carries its own copy of the same
@@ -79,9 +79,13 @@ in the switch, `errors.As(err, &protoErr)` and
 `errors.Is(err, io.ErrUnexpectedEOF)`, match anywhere in the error chain,
 including a chain that never passed through the reader. `dirs.go:129-136`
 already records that concern about the `io.ErrUnexpectedEOF` case and explains
-why it was left wide. The new sentinel is **narrower** than either: it is
-attached at the reader and nowhere else, so nothing that did not come from the
-caller's body can carry it.
+why it was left wide. The new sentinel is not narrower in the sense of
+matching fewer errors, and an earlier draft of this spec said it was, which is
+false: it matches the two cases above and also `ErrMessageTooLarge`, which
+neither of them does. What is true is **attribution**. It is attached at the
+reader and nowhere else, so nothing that did not come from the caller's body
+can carry it, while both existing cases can be satisfied by a chain that never
+passed through the reader.
 
 This spec does not narrow the two existing cases onto the sentinel. That would
 change what #409 and #424 do for the tar path as well as the multipart one, for
@@ -132,6 +136,15 @@ case errors.Is(err, errMalformedMultipart):
 Order inside the switch is behaviour here, not layout, which is why the tests
 below assert the response **message** and not only the status code.
 
+**The snippet above is `dirs.go`'s shape and must not be copied literally into
+`localingest.go`.** Every case there answers through `ow`, the cleanup writer
+built at `:176`, so that a refused collection is released rather than left on
+disk until the next restart, and every case carries its own `logger.Debug` and
+`return`. Answering through the plain writer there would reintroduce exactly
+the leak #424 added a test for. `dirs.go`'s switch ends in a `default:`;
+`localingest.go`'s has none and falls through to the 500 below it, so "after
+the existing multipart cases" means a slightly different place in each.
+
 ### Checked against the standard library, not reasoned about
 
 Both bodies were driven through `multipart.NewReader` directly, before and
@@ -140,7 +153,7 @@ after the wrap, rather than the behaviour being argued from the source:
 | body | raw error | `Is` `ErrMessageTooLarge` | `As` `ProtocolError` | after the wrap |
 |---|---|---|---|---|
 | 10001 part headers | `multipart: message too large` | **true** | false | sentinel **and** `ErrMessageTooLarge` both true |
-| ends `--BOUNDARY` then a tab | `multipart: expecting a new Part; got line ...` | false | false | sentinel true, nothing else |
+| ends `--BOUNDARY`, tab, `x` | `multipart: expecting a new Part; got line ...` | false | false | sentinel true, nothing else |
 | part header with no colon (#424) | `malformed MIME header: missing colon: ...` | false | **true** | sentinel **and** `ProtocolError` both true |
 | well formed | `EOF` | false | false | **not wrapped**, `io.EOF` passes through |
 
@@ -149,8 +162,30 @@ body matches **both** the `protoErr` case and the new sentinel case, so which
 message the caller sees is decided by their order and by nothing else. That is
 the mutation the order test exists to catch.
 
-The fourth row is the `io.EOF` guard doing its job. Without it the well-formed
-row would carry the sentinel and every upload would answer 400.
+**The fourth row is where an earlier draft of this spec was wrong.** It said
+the `io.EOF` guard is load bearing, and that without it every well-formed
+upload would answer 400. That is false, and it contradicts the very property
+the rest of this section relies on.
+
+`storeDir` ends its loop on `errors.Is(err, io.EOF)`
+(`pkg/api/dirs.go:220-226`), not on `==`, and two `%w` verbs keep `io.EOF` in
+the chain. So a wrapped `io.EOF` still ends the loop and a well-formed upload
+still answers 201. There is one consumer of `Next` in the repository, that
+loop, so there is no other path where it could matter.
+
+The guard is kept anyway, on honest grounds rather than the false one: it keeps
+`Next` from putting a fork sentinel in the chain of something that is not an
+error, and it keeps the contract clean for a future consumer that compares with
+`==`. **No handler-level test can detect its removal**, and this spec says so
+rather than listing a mutation that would not fail.
+
+One more thing about the guard is worth stating, because the word "normal" hides
+it: `errors.Is(err, io.EOF)` is wider than the normal end of the parts.
+`multipart.go:403-405` wraps a read error as `multipart: NextPart: %w`, so an
+empty body, a body with no boundary at all, and a body cut off at a boundary
+all come back matching it. They are malformed, and they already answer 400
+through `errEmptyDir`; the guard does not change that, and this spec does not
+claim it does.
 
 ### Both callers, again
 
@@ -193,24 +228,36 @@ In `pkg/api`, on both endpoints, mutation checked.
 
 - **A part with more than 10000 headers gives 400**, with the headers message.
   Answers 500 today.
-- **A body ending `--BOUNDARY` then a tab gives 400**, with the malformed-body
+- **A body ending `--BOUNDARY`, a tab and a further character gives 400**, with the malformed-body
   message. Answers 500 today.
 - **The two #424 bodies keep their own messages**, not the new general one.
   This is the test that pins switch order, and it fails if the sentinel case is
   moved above `errors.As(err, &protoErr)`.
 - **A well-formed multipart upload still succeeds**, which is what catches a
   wrap that swallows `io.EOF`.
-- **A node-side failure still answers 500**, the guard against the sentinel
-  widening past the reader.
+- **A node-side failure still answers 500.** This is a standing regression
+  guard rather than a mutation-checked test: the sentinel is attached at one
+  call site and none of the mutations below moves it, so nothing in the list
+  makes this test fail. The mutation that would is attaching the sentinel to
+  `storeDir`'s own `read dir stream` or `store dir file` wrap instead, which is
+  the mistake it exists to catch.
 - **A refused body leaves nothing reserved**, carried from #424: the assertion
   is only meaningful for a body that stores a file before it fails, because a
   body that stops on its first part never reserves anything and the usage reads
   zero either way.
 
-Mutations to run, each of which must break a named test: drop the
-`ErrMessageTooLarge` case; drop the sentinel wrap; move the sentinel case above
-the `protoErr` case; drop the `io.EOF` guard. A mutation that fails to compile
-proves nothing and is redone until it compiles.
+Mutations to run, each paired with the test it must break:
+
+| mutation | test it must break |
+|---|---|
+| drop the `ErrMessageTooLarge` case | the headers test, **on its message**: the body still answers 400 through the sentinel, so a status-only assertion would not notice |
+| drop the sentinel wrap | the malformed-body test. It does **not** break the headers test, which keeps its own case |
+| move the sentinel case above `protoErr` | the #424 message test |
+| attach the sentinel at `storeDir`'s wrap instead of at the reader | the node-side 500 test |
+
+Dropping the `io.EOF` guard is deliberately **not** in this list, for the
+reason given above: it is not detectable at the handler. A mutation that fails
+to compile proves nothing and is redone until it compiles.
 
 ## Measurement
 
