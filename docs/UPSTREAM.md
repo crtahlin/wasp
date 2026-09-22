@@ -90,7 +90,7 @@ commits here were resolved from fork-only merges, not by issue number alone.
 | [#407](https://github.com/crtahlin/wasp/issues/407) | Reserve worker's evict and unreserve store operations are not interrupted on shutdown | done | `fix/407-shutdown-interrupt` | [`735f8613`](https://github.com/crtahlin/wasp/commit/735f8613) |
 | [#409](https://github.com/crtahlin/wasp/issues/409) | api: a directory upload with a non-tar body returns 500 instead of 400 | done | `fix/409-non-tar-body-status` | [`167a8d7a`](https://github.com/crtahlin/wasp/commit/167a8d7a) |
 | [#424](https://github.com/crtahlin/wasp/issues/424) | api: two malformed multipart directory uploads return 500 instead of 400 | open | - | - |
-| [#438](https://github.com/crtahlin/wasp/issues/438) | retrieval: a flight ends on the error budget while a request is still in flight, so the delivery is thrown away | open | - | - |
+| [#438](https://github.com/crtahlin/wasp/issues/438) | retrieval: a flight ends on the error budget while a request is still in flight, so the delivery is thrown away | done | `fix/438-flight-exit` | [`4f88343c`](https://github.com/crtahlin/wasp/commit/4f88343c) |
 | [#440](https://github.com/crtahlin/wasp/issues/440) | api: GET /chunks answers 500 when the peer walk is exhausted, where /bzz answers 404 | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
