@@ -6,8 +6,8 @@ shows is fixed.
 
 Measured 2026-09-22 on the two-node bench, `bench-1` as the provider and
 `bench-2` as the requester, both on build `0.1.3-main-2026-09-22-2bd2d08c`.
-Harnesses `cp290/t313-remeasure.sh` and `cp290/t313-dialrace.sh`, outside this
-repository.
+Harnesses `cp290/t313-remeasure.sh`, `cp290/t313-dialrace.sh` and
+`cp290/t313-overdraft.sh`, outside this repository.
 
 Content is sole-source throughout: a fresh 4,194,304 byte object per trial,
 stored on the provider through `POST /wasp/ingest`, which writes it with no
@@ -85,17 +85,39 @@ Run B above is the same size of content on the same bench pair:
 1,033 hits against the 1,033 chunks #313 counts is every chunk of the file,
 served by the provider.
 
-Rates, sole-source, one provider: 2.41, 2.42 and 2.44 MB/s across the three
-trials, and 3.07 MB/s on a fourth download of a different reference. The
-recorded per-peer baseline in [retrieval-rate.md](retrieval-rate.md) is about
-264 KB/s.
+Rates, sole-source, one provider, across the seven completed downloads measured
+today: 2.41, 2.42 and 2.44 MB/s in the three trials above, 2.19, 2.51 and
+2.96 MB/s in the three overdraft runs below, and 3.07 MB/s on one further
+reference. The spread is 2.19 to 3.07 MB/s. The recorded per-peer baseline in
+[retrieval-rate.md](retrieval-rate.md) is about 264 KB/s.
+
+Every one of the seven returned 4,194,304 bytes with a checksum matching the
+source.
 
 The earlier diagnosis in [truncation-cause.md](truncation-cause.md), that
 overdrafts exhaust `maxOverdraftReadmits` and the only holder is then dropped
-from the chunk, also did not run here. A completed download records 471
-overdrafts and 471 readmits, a difference of zero, so no preferred candidate was
-dropped on any chunk. The credit gate refused chunks 471 times and cost the
-download nothing.
+from the chunk, also did not run here. That chain needs a preferred candidate to
+be dropped from a chunk, and the observable for it is
+`bee_retrieval_preferred_overdrafts` minus `bee_retrieval_preferred_readmits`,
+which is the count of overdrafts not readmitted.
+
+Three further completed downloads, fresh sole-source content each,
+harness `cp290/t313-overdraft.sh`:
+
+| run | attempts | hits | overdrafts | readmits | not readmitted |
+|---|---|---|---|---|---|
+| 1 | 1035 | 1033 | 244 | 244 | **0** |
+| 2 | 1035 | 1033 | 185 | 185 | **0** |
+| 3 | 1035 | 1033 | 36 | 36 | **0** |
+
+The credit gate refused chunks between 36 and 244 times per download and cost
+the download nothing on any of them. The wide spread in refusals with an
+unchanging result is the point: the count of refusals varies with the credit
+state at the moment the download starts, and the difference stays at zero
+regardless.
+
+These three runs also reproduce the attempt and hit counts independently: 1035
+attempts and 1033 hits, identical in all three.
 
 This does not attribute the repair to any single merge. Several changes since
 #313 was written touch this path, among them the network radius wait
