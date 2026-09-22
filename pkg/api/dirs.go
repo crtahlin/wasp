@@ -13,6 +13,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -41,6 +42,10 @@ var (
 	// malformed, which is why this is a sentinel: the handler answers 400 for
 	// it rather than reporting a node failure (#366).
 	errInvalidIndexDocument = errors.New("index document suffix must not include slash character")
+	// wasp #424: mime/multipart reports a missing boundary with an unexported
+	// error, so it is caught before the reader is built rather than matched
+	// afterwards.
+	errNoBoundary = errors.New("content type declares no multipart boundary")
 )
 
 // dirUploadHandler uploads a directory supplied as a tar in an HTTP request
@@ -71,6 +76,11 @@ func (s *Service) dirUploadHandler(
 	case contentTypeTar:
 		dReader = &tarReader{r: tar.NewReader(r.Body), logger: s.logger}
 	case multiPartFormData:
+		if params["boundary"] == "" {
+			logger.Debug("multipart upload without a boundary", "error", errNoBoundary)
+			jsonhttp.BadRequest(w, errNoBoundary)
+			return
+		}
 		dReader = &multipartReader{r: multipart.NewReader(r.Body, params["boundary"])}
 	default:
 		logger.Error(nil, "invalid content-type for directory upload")
@@ -93,6 +103,7 @@ func (s *Service) dirUploadHandler(
 	if err != nil {
 		logger.Debug("store dir failed", "error", err)
 		logger.Error(nil, "store dir failed")
+		var protoErr textproto.ProtocolError
 		switch {
 		case errors.Is(err, postage.ErrBucketFull):
 			jsonhttp.PaymentRequired(w, "batch is overissued")
@@ -102,6 +113,12 @@ func (s *Service) dirUploadHandler(
 			jsonhttp.BadRequest(w, errInvalidIndexDocument)
 		case errors.Is(err, tar.ErrHeader):
 			jsonhttp.BadRequest(w, "invalid filename in tar archive")
+		case errors.As(err, &protoErr):
+			// wasp #424: a malformed part header, such as a line with no
+			// colon. textproto.ProtocolError is a string type whose text
+			// carries the offending line, so it is matched by type rather
+			// than by identity or message.
+			jsonhttp.BadRequest(w, "malformed multipart header")
 		case errors.Is(err, io.ErrUnexpectedEOF):
 			// A body that stops part way through, which includes anything
 			// shorter than one 512-byte tar header block. archive/tar reports

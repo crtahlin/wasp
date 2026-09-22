@@ -32,6 +32,7 @@ var (
 	ErrInvalidRequest       = errInvalidRequest
 	ErrDirectoryStoreError  = errDirectoryStore
 	ErrEmptyDir             = errEmptyDir
+	ErrNoBoundary           = errNoBoundary
 	ErrInvalidIndexDocument = errInvalidIndexDocument
 )
 
