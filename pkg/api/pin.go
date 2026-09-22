@@ -114,15 +114,26 @@ func (s *Service) pinRootHash(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 
 	if err := errors.Join(err, errTraverse); err != nil {
-		logger.Error(errors.Join(err, putter.Cleanup()), "pin collection failed")
+		// Cleanup runs on both paths. It used to be called only as an argument
+		// to the Error log below, so moving that log would have skipped it.
+		cleanupErr := putter.Cleanup()
+
 		// wasp #449, the same as #440 on GET /chunks: traversal wraps the
 		// getter's error with %w, so a depleted peer walk arrives here as
 		// topology.ErrNotFound. That is a statement about the network rather
 		// than about this node, so it belongs with the other 404s.
+		//
+		// It is logged at debug rather than error for the same reason. An
+		// operator-level line here is the very thing this change exists to
+		// stop: a fault report for content that simply could not be fetched.
+		// chunk.go does the same.
 		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound) {
+			logger.Debug("pin collection not found", "chunk_address", paths.Reference,
+				"error", errors.Join(err, cleanupErr))
 			jsonhttp.NotFound(w, "pin collection failed")
 			return
 		}
+		logger.Error(errors.Join(err, cleanupErr), "pin collection failed")
 		jsonhttp.InternalServerError(w, "pin collection failed")
 		return
 	}

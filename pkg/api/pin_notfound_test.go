@@ -36,9 +36,11 @@ func pinServerFailingWith(t *testing.T, err error) *http.Client {
 // survive to the handler. It mapped only storage.ErrNotFound, so a depleted
 // peer walk answered 500 while a spent error budget answered 404.
 //
-// The reference must be a full length address: traversal only fetches when
-// addr.IsValidLength(), so a short one would never reach the getter and the
-// test would pass for the wrong reason.
+// The reference must be a full length address. traversal only fetches when
+// addr.IsValidLength(), so a short one never reaches the getter and fails
+// earlier with "storage: invalid reference length", which the handler answers
+// 500. That would fail the two 404 cases rather than passing them for the
+// wrong reason, and would leave only the 500 guard passing vacuously.
 func TestPinNotFoundStatus(t *testing.T) {
 	t.Parallel()
 
