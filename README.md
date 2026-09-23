@@ -73,6 +73,49 @@ rolling back means reinstalling upstream's package.
 
 Releases: <https://github.com/crtahlin/wasp/releases>
 
+<!-- highlights:start -->
+## What wasp changes
+
+Grouped by what a node does, not by what was edited. This is a summary and is
+deliberately incomplete. [`docs/DIFFERENCES.md`](docs/DIFFERENCES.md) is the
+complete record, entry by entry, against the latest released Bee.
+
+**Serving content you hold, without postage.** The largest fork-only feature.
+`POST /wasp/ingest` stores content in the node's own store with no stamp and
+without pushing it to the network, returning the same reference a stamped upload
+would. `POST /wasp/providers/{reference}` then announces that the node serves it,
+and `GET /wasp/providers/{reference}/lookup` finds who does. A download can name
+up to eight providers to try first with the `Wasp-Providers` header on `/bzz`,
+`/bytes`, `/chunks` and `/feeds`, falling back to ordinary retrieval.
+
+**Downloads that were failing now work.** A download starting in the first
+seconds after a restart no longer waits for the network radius, which used to
+make it truncate silently. A hinted download whose provider finishes connecting
+after the request began now uses that provider instead of returning 404. A chunk
+is no longer abandoned while a provider is still answering for it.
+
+**Caller mistakes answer 4xx, not 500.** Malformed multipart and archive
+uploads, and a malformed index-document header, answer 400. `GET /chunks` and
+`POST /pins` answer 404 when the search for a peer runs out, where Bee answers
+500 and tells the caller its server is broken.
+
+**Storage and shutdown.** A new data directory uses Pebble, with its compaction
+and write-slowdown triggers exposed as settings. The index store is closed after
+the reserve worker stops, rather than racing it, which is what caused a shutdown
+segfault and a write-ahead log replay on the next start. Optional SIMD hashing.
+
+**Accounting and settlement.** Overdraft limits and payment amounts stay correct
+when the clock steps backwards. Cheque allocation is serialized per beneficiary.
+Chain calls are off the cheque path.
+
+**Recovering stranded stake.** `GET` and `POST /stake/legacy` list and recover
+stake held in retired staking contracts. Recovery on startup is off by default.
+
+**Identity.** The libp2p user agent leads with `wasp/<version>` and keeps
+`bee/<upstream base>`, so a crawler reads a wasp node as its own client. Version
+numbers are this fork's own line and `bee version` reports both.
+<!-- highlights:end -->
+
 ## What is in it
 
 - [`docs/DIFFERENCES.md`](docs/DIFFERENCES.md): every way wasp differs from the
