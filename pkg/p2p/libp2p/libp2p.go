@@ -1584,8 +1584,29 @@ func appendSpace(s string) string {
 // NetworkID, never on the user agent, so extending it cannot affect
 // interoperability.
 func userAgent() string {
-	return fmt.Sprintf("bee/%s wasp/%s %s %s/%s",
-		strings.TrimPrefix(bee.UpstreamBase, "v"), bee.Version,
+	// wasp #474: the fork's own name leads.
+	//
+	// The wasp token was already here, after bee/, and a reader of a list of
+	// agents saw a Bee node: swarmscan keys its distribution on the COMPLETE
+	// string, so a wasp node already had its own row, and that row began
+	// "bee/" like every other row but one. The exception, storer-node/0.1.0,
+	// is both the precedent for a distinct client leading with its own name
+	// and the evidence that an agent which does not begin "bee/" takes part
+	// normally, since several hundred nodes run it.
+	//
+	// The bee/<upstream base> token is KEPT, deliberately. It says which Bee
+	// this build derives from, which an operator and a crawler both want, and
+	// it is the only place on the wire that carries it.
+	//
+	// Encoding the fork in the version instead, as bee/2.8.2-wasp.0.1.4, was
+	// rejected in the spec: it claims to be a 2.8.2 prerelease and sorts below
+	// 2.8.2, so wasp would read as outdated rather than as different.
+	//
+	// This is not protocol surface. The agent is not in
+	// .github/protocol-freeze.lock and gates nothing; the handshake decides
+	// whether a peer will talk to us.
+	return fmt.Sprintf("wasp/%s bee/%s %s %s/%s",
+		bee.Version, strings.TrimPrefix(bee.UpstreamBase, "v"),
 		runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 

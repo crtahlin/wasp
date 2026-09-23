@@ -197,9 +197,22 @@ on a node that has stake stranded in one of them. `stake-recovery-on-startup` is
   version` prints `wasp <version> (upstream bee <base>)`.
 - **Startup warning.** The node logs that it is wasp, an unofficial experimental
   build that the Swarm Foundation does not support.
-- **libp2p user agent.** Peers see `bee/<base> wasp/<version> <go version>
-  <os>/<arch>` instead of `bee/<version> ...`. The handshake checks only the
-  protocol version and network ID, never the user agent.
+- **libp2p user agent.** Peers see `wasp/<version> bee/<base> <go version>
+  <os>/<arch>` instead of Bee's `bee/<version> ...`. The fork's own name leads,
+  because a crawler reads the agent without asking the node anything and
+  swarmscan keys its client distribution on the **complete** string: while the
+  first token was `bee/`, a wasp node had its own row in that distribution but
+  the row read as a Bee row. `storer-node/0.1.0` is the precedent for a distinct
+  client leading with its own name, and its several hundred nodes are the
+  evidence that an agent not beginning `bee/` takes part normally
+  ([#474](https://github.com/crtahlin/wasp/issues/474)). The `bee/<base>` token
+  is kept, because it is the only place on the wire that says which Bee the
+  build derives from. **The cost, stated as one:** anything counting Bee nodes
+  by a `bee/` prefix stops counting wasp nodes, which is the intent, and which
+  makes such a count slightly less accurate about the network even while being
+  more accurate about clients. The handshake checks only the protocol version
+  and network ID, never the user agent, and the agent is not in
+  `.github/protocol-freeze.lock`.
 - **Packages.** The `.deb` and `.rpm` packages are named `wasp`. They install the
   same binary path, systemd unit and configuration file as Bee's package, declare
   that they replace it, and carry epoch 1 so that `apt` treats them as an upgrade.
