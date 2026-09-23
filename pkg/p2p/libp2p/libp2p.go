@@ -1573,41 +1573,55 @@ func appendSpace(s string) string {
 	return " " + s
 }
 
-// userAgent returns a User Agent string passed to the libp2p host to identify peer node.
+// userAgent returns the User Agent string passed to the libp2p host, which is
+// what a peer or a crawler reads about this node from the identify exchange.
 //
-// Wasp advertises the upstream Bee release FIRST so that peers, crawlers and
-// network dashboards parsing "bee/<semver>" keep working unchanged, then its own
-// identity so this node is unambiguously distinguishable from stock Bee. Anyone
-// reading a log or a peer list can tell at a glance that this is not upstream.
+// wasp #474: THE FORK'S OWN NAME LEADS, and the upstream Bee release follows.
 //
-// This string is informational only: the handshake gates on ProtocolVersion and
-// NetworkID, never on the user agent, so extending it cannot affect
-// interoperability.
+// An earlier version of this comment argued the opposite, that the Bee release
+// should come first "so that peers, crawlers and network dashboards parsing
+// bee/<semver> keep working unchanged". Breaking exactly those dashboards is
+// now the intent: a client distribution keyed on this string put wasp in its
+// own row, and that row began "bee/" like every other row but one, so a wasp
+// node read as a Bee node. Anything counting Bee nodes by a "bee/" PREFIX now
+// stops counting wasp nodes, which is the point and is also a cost, since a
+// wasp node is protocol-compatible and does carry traffic.
+//
+// The bee/<upstream base> token is KEPT, deliberately: it is the only place on
+// the wire that says which Bee this build derives from, and a counter matching
+// "bee/" anywhere rather than at the start still sees it.
+//
+// Encoding the fork in the version instead, as bee/2.8.2-wasp.0.1.4, was
+// rejected in docs/experiments/wasp-user-agent/spec.md: it claims to be a
+// 2.8.2 prerelease and sorts below 2.8.2, so wasp would read as outdated
+// rather than as different.
+//
+// This string is informational only. The handshake gates on ProtocolVersion
+// and NetworkID and nothing in this repository parses a peer's agent, so
+// changing it cannot affect interoperability. Note that make protocol-freeze
+// does not check this: scripts/protocol-freeze.sh never reads this file, so it
+// passing is necessary and not evidence. The evidence is
+// docs/agent-playbooks/protocol-compatibility.md, which lists the user agent
+// first under what is safe to change, and inbound connections continuing to
+// arrive from stock Bee peers after deployment.
 func userAgent() string {
-	// wasp #474: the fork's own name leads.
-	//
-	// The wasp token was already here, after bee/, and a reader of a list of
-	// agents saw a Bee node: swarmscan keys its distribution on the COMPLETE
-	// string, so a wasp node already had its own row, and that row began
-	// "bee/" like every other row but one. The exception, storer-node/0.1.0,
-	// is both the precedent for a distinct client leading with its own name
-	// and the evidence that an agent which does not begin "bee/" takes part
-	// normally, since several hundred nodes run it.
-	//
-	// The bee/<upstream base> token is KEPT, deliberately. It says which Bee
-	// this build derives from, which an operator and a crawler both want, and
-	// it is the only place on the wire that carries it.
-	//
-	// Encoding the fork in the version instead, as bee/2.8.2-wasp.0.1.4, was
-	// rejected in the spec: it claims to be a 2.8.2 prerelease and sorts below
-	// 2.8.2, so wasp would read as outdated rather than as different.
-	//
-	// This is not protocol surface. The agent is not in
-	// .github/protocol-freeze.lock and gates nothing; the handshake decides
-	// whether a peer will talk to us.
-	return fmt.Sprintf("wasp/%s bee/%s %s %s/%s",
-		bee.Version, strings.TrimPrefix(bee.UpstreamBase, "v"),
+	return userAgentString(bee.Version, bee.UpstreamBase,
 		runtime.Version(), runtime.GOOS, runtime.GOARCH)
+}
+
+// userAgentString formats the agent from explicit values.
+//
+// Split out from userAgent so the formatting can be tested with inputs the
+// build-time variables never take in a test binary. bee.UpstreamBase is
+// "unknown" under a plain go test, which has no leading "v" to trim, and the
+// Makefile's test targets do not pass LDFLAGS. So dropping the TrimPrefix is
+// invisible to every test that reads the globals, and would ship "bee/v2.8.2"
+// where a crawler expects "bee/2.8.2". A test calls this directly with a
+// v-prefixed base for that reason.
+func userAgentString(waspVersion, upstreamBase, goVersion, goos, goarch string) string {
+	return fmt.Sprintf("wasp/%s bee/%s %s %s/%s",
+		waspVersion, strings.TrimPrefix(upstreamBase, "v"),
+		goVersion, goos, goarch)
 }
 
 func newConnMetricNotify(m metrics) *connectionNotifier {

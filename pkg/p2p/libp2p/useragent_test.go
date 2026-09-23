@@ -66,3 +66,48 @@ func TestUserAgentLeadsWithWasp(t *testing.T) {
 		}
 	})
 }
+
+// TestUserAgentStringTrimsTheUpstreamV pins the formatting against literals,
+// with an upstream base that actually carries a leading "v".
+//
+// The test above cannot do this. bee.UpstreamBase is "unknown" in a test
+// binary, which has no "v" to trim, and the Makefile's test targets do not
+// pass LDFLAGS, so no test that reads the globals exercises the trim. Review
+// found exactly that: deleting strings.TrimPrefix survived the whole suite
+// while shipping "bee/v2.8.2" to every peer, where a crawler expects
+// "bee/2.8.2".
+//
+// Asserting the whole string against a literal also pins the order, the
+// separators and the token count in one place, which the global-reading test
+// deliberately does not do so a toolchain bump cannot break it.
+func TestUserAgentStringTrimsTheUpstreamV(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		waspVersion  string
+		upstreamBase string
+		want         string
+	}{
+		{
+			name:         "the upstream base carries a v, as a real build does",
+			waspVersion:  "0.1.4-6484a665",
+			upstreamBase: "v2.8.2",
+			want:         "wasp/0.1.4-6484a665 bee/2.8.2 go1.26.4 linux/amd64",
+		},
+		{
+			name:         "the upstream base carries no v, as a test binary has",
+			waspVersion:  "-dev",
+			upstreamBase: "unknown",
+			want:         "wasp/-dev bee/unknown go1.26.4 linux/amd64",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := libp2p.UserAgentString(tc.waspVersion, tc.upstreamBase, "go1.26.4", "linux", "amd64")
+			if got != tc.want {
+				t.Fatalf("user agent %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

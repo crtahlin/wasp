@@ -44,6 +44,10 @@ type StaticAddressResolver = staticAddressResolver
 var (
 	NewStaticAddressResolver = newStaticAddressResolver
 	UserAgent                = userAgent
+	// UserAgentString is exported so a test can exercise the formatting with
+	// a v-prefixed upstream base. The build-time variables never carry one in
+	// a test binary, so the trim is otherwise untestable. See issue #474.
+	UserAgentString = userAgentString
 )
 
 func WithHostFactory(factory func(...libp2pm.Option) (host.Host, error)) Options {
