@@ -69,18 +69,56 @@ Maintainer: fork <noreply@localhost>
 Description: pre-rename fixture standing in for an old install
 EOF
 
+# dpkg -i does NOT resolve dependencies, and debian:bookworm-slim ships none of
+# the ones this package declares. So the declared dependencies are installed
+# first, otherwise dpkg stops at "install ok unpacked" with a dependency error
+# and the check fails on a package that is perfectly good. That is exactly what
+# happened on the v0.1.4 release, the first time this check ever ran in one: the
+# package declares ca-certificates, the image does not have it, and an operator
+# installing the same file with apt was unaffected.
+#
+# They are read OUT OF THE PACKAGE rather than listed here, so adding a
+# dependency later cannot break this check the same way. Version constraints in
+# parentheses and alternatives after a pipe are stripped, apt is asked for the
+# plain names.
+#
+# dpkg is deliberately kept for the upgrade itself. What is under test is
+# dpkg's file takeover through Replaces and Conflicts, which apt would perform
+# through dpkg anyway but with its own error handling in front of it.
 docker run --rm -v "$work":/w:ro "debian:bookworm-slim" bash -euo pipefail -c '
   cd /tmp && cp /w/*.deb /w/build-old -r . 2>/dev/null || true
   cp -r /w/build-old .
   dpkg-deb -b build-old old.deb >/dev/null
   cp /w/wasp.deb .
+
+  deps=$(dpkg-deb -f wasp.deb Depends \
+         | tr "," "\n" | cut -d"|" -f1 | sed "s/(.*)//" | tr -d " " | grep -v "^$" || true)
+  if [ -n "$deps" ]; then
+    echo "  installing declared dependencies: $(echo $deps | tr "\n" " ")"
+    apt-get update -qq >/dev/null
+    apt-get install -y -qq $deps >/dev/null
+  fi
+
   echo "  installing bee-experimental fixture"
   dpkg -i old.deb >/dev/null
   echo "  installing wasp over it"
   dpkg -i --force-confold wasp.deb >/dev/null
   owner=$(dpkg -S /usr/bin/bee | cut -d: -f1)
   [ "$owner" = "wasp" ] || { echo "FAIL: /usr/bin/bee owned by $owner, not wasp"; exit 1; }
-  dpkg-query -W -f="${Package} ${Version}\n" wasp
+
+  # dpkg-query -f is deliberately not used. Its format language spells fields
+  # ${Package}, and this runs under set -u, so bash expands them first and dies
+  # with "Package: unbound variable" before dpkg-query ever sees the string.
+  # The original line here carried that bug from the start and never showed it,
+  # because the missing dependency above failed the run one line earlier. Fixing
+  # only the dependencies would have moved the failure here.
+  #
+  # There is no separate assertion that the package ended up configured rather
+  # than merely unpacked. "install ok unpacked" is exactly what a missing
+  # dependency leaves, but dpkg -i already exits non-zero in that case and this
+  # script runs under set -e, so such a check could never fail on its own and
+  # would only look like coverage it does not provide.
+  dpkg-query -s wasp | sed -n "s/^Package: /  package: /p;s/^Version: /  version: /p"
   echo "  ok: wasp took over the bee-experimental install"
 ' | sed 's/^/  /'
 
