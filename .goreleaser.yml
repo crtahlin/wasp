@@ -11,6 +11,20 @@ before:
 release:
   prerelease: auto
 
+# Release notes are supplied by release.yaml with --release-notes, built from
+# the README highlights block and the CHANGELOG.md section for this version.
+#
+# Without this, goreleaser generates its own notes by listing every commit
+# between tags. That walks ALL parents rather than the first-parent spine, so
+# each change appears twice, once as its merge and once as the branch commit
+# behind it, and the curated changelog this repository builds never reaches the
+# release page. v0.1.4 shipped that way. See #481.
+#
+# --release-notes already suppresses generation; this states the intent and
+# stops the default returning if that argument is ever dropped.
+changelog:
+  disable: true
+
 git:
   prerelease_suffix: "-"
   # Kept as defence in depth, but DO NOT RELY ON IT: ignore_tags did not filter

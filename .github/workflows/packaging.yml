@@ -18,12 +18,20 @@ on:
       - '.goreleaser.yml'
       - 'packaging/**'
       - '.github/workflows/packaging.yml'
+      - '.github/workflows/release.yaml'
+      - 'scripts/check-release-notes.sh'
+      - 'README.md'
+      - 'CHANGELOG.md'
   push:
     branches: [main]
     paths:
       - '.goreleaser.yml'
       - 'packaging/**'
       - '.github/workflows/packaging.yml'
+      - '.github/workflows/release.yaml'
+      - 'scripts/check-release-notes.sh'
+      - 'README.md'
+      - 'CHANGELOG.md'
   workflow_dispatch:
 
 permissions:
@@ -41,3 +49,12 @@ jobs:
 
       - name: Check deb/rpm Conflicts and Replaces
         run: python3 packaging/check-package-relationships.py
+
+      - name: Check the release notes can be built
+        # release.yaml assembles a release's notes by pattern, from the README
+        # highlights block and the newest CHANGELOG.md section. Neither
+        # extraction fails loudly on its own: a renamed marker or a changed
+        # heading just yields nothing, or the wrong version's section, and the
+        # release page goes out wrong. Checked here rather than at release
+        # time. See #481.
+        run: scripts/check-release-notes.sh
