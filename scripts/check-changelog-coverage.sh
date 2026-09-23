@@ -26,6 +26,24 @@ RENDERED="$(git-cliff --unreleased 2>/dev/null || true)"
 missing=0
 while read -r sha subject; do
   [ -n "$sha" ] || continue
+
+  # cliff.toml deliberately skips release chores: a release commit must not
+  # appear in the changelog it is generating. The script has to know about
+  # that, or it reports the release's own merge as dropped and fails the
+  # release that created it.
+  #
+  # Only this one skip rule is exempted, and the others are deliberately not:
+  #
+  #   "^Merge "            is NOT exempt. The preprocessor lifts the
+  #                        conventional line out of the body first, so those
+  #                        DO render, and #104 vanishing that way is the
+  #                        reason this script exists.
+  #   "^Pull from upstream" has never appeared on the spine in this range; if
+  #                        it does, a human should look rather than have it
+  #                        silently waved through.
+  case "$subject" in
+    'chore(release)'*) continue ;;
+  esac
   # Upstream syncs and this fork's own merges both carry (#N); anything without
   # a number cannot be matched and is reported for a human to look at.
   pr="$(printf '%s' "$subject" | grep -oE '\(#[0-9]+\)$' | tr -d '(#)' || true)"
