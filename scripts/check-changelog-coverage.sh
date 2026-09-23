@@ -33,8 +33,26 @@ while read -r sha subject; do
     pr="$(printf '%s' "$subject" | grep -oE '^Merge pull request #[0-9]+' | grep -oE '[0-9]+' || true)"
   fi
   if [ -z "$pr" ]; then
-    echo "  UNMATCHABLE  $sha  $subject"
-    echo "               no pull request number in the subject; cannot verify it was recorded"
+    # No usable number in the subject. This used to be reported as
+    # UNMATCHABLE and counted as a failure, on the reasoning that a merge
+    # without a number cannot be linked and so cannot be in the changelog.
+    #
+    # That is no longer true. #350 reached main with no number and #233 with
+    # "(#198, #231)", which are the issues it corrects rather than its own
+    # pull request, and cliff.toml now recovers both by subject. So the
+    # question is not whether a number is present but whether the entry was
+    # rendered, which is what this script claims to check.
+    #
+    # Verify by the description text git-cliff renders: everything after the
+    # conventional prefix, with any trailing "(#...)" dropped, since a
+    # recovery rule may rewrite that part.
+    desc="${subject#*: }"
+    desc="${desc%% (#*}"
+    if [ -n "$desc" ] && printf '%s' "$RENDERED" | grep -qF -- "$desc"; then
+      continue
+    fi
+    echo "  DROPPED      $sha  $subject"
+    echo "               no pull request number in the subject, and its text is not in the changelog"
     missing=$((missing+1))
     continue
   fi

@@ -76,7 +76,24 @@ commit_preprocessors = [
   # artefact is not something to leave resting on one setting.
   { pattern = '(?s)^Merge pull request #(\d+) from \S+\s*\n\s*\n\s*(\S[^\n]*)', replace = "${2} (#${1})" },
 
-  # Must run after the rule above, so the number it appends is linked too.
+  # Two merges reached main without a trailing (#N) this file can use, so both
+  # were dropped from the changelog silently. scripts/check-changelog-coverage.sh
+  # caught them before the release that would have shipped without them, which
+  # is the outcome that script exists for.
+  #
+  #   #350 was merged with no pull request number at all.
+  #   #233 was merged as "... (#198, #231)". Those are the ISSUES the change
+  #        corrects, not its own pull request, and the linking rule below needs
+  #        a lone "(#N)" so it matches neither.
+  #
+  # Recovered here by subject rather than by rewriting main, because fork
+  # branches and their merges are the historical record (rule 5). The issue
+  # references on the second are kept: they say what the change was about, and
+  # the pull request number is appended rather than substituted.
+  { pattern = '^docs: how bandwidth is paid for', replace = "docs: how bandwidth is paid for (#350)" },
+  { pattern = '^docs\(storage\): correct the read-axis finding, engines at parity \(#198, #231\)', replace = "docs(storage): correct the read-axis finding, engines at parity for #198 and #231 (#233)" },
+
+  # Must run after the rules above, so the numbers they append are linked too.
   { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/crtahlin/wasp/pull/${1}))" },
 ]
 
