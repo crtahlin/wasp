@@ -6,7 +6,9 @@ no configuration, what it can be configured to do, what it exposes, and how it
 is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
-  on 2026-09-10.
+  on 2026-09-23. Re-checked that day against upstream's published releases:
+  v2.8.2 of 2026-08-26 is still the newest that is not a release candidate, so
+  the comparison point has not moved and no entry was removed.
 - **wasp described:** commit `fe0a9569`, 2026-09-22, the last commit that
   changes what a node does. The latest wasp release is v0.1.3.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
