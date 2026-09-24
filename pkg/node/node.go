@@ -286,6 +286,17 @@ func effectiveMaxDoubling(requested, configuredMax int) (int, error) {
 	return maxDoubling, nil
 }
 
+// ErrConfig marks an error that a restart cannot fix, because the
+// configuration itself is wrong. It exists so the process can exit with a
+// status the service unit refuses to restart on, rather than looping every few
+// seconds (issue #490).
+//
+// Wrap ONLY validation failures. An unreachable chain endpoint, a peer failure
+// or anything else transient must stay unwrapped, because a node whose provider
+// is briefly down has to come back on its own. Widening this turns a passing
+// outage into one that needs a human, which is worse than the loop it replaces.
+var ErrConfig = errors.New("node: invalid configuration")
+
 // runStakeRecoveryOnStartup optionally recovers stake left in retired staking
 // contracts when the node starts (issue #256). The mode is off (the default,
 // nothing happens), withdraw (recover to the wallet), or migrate (recover into
@@ -296,11 +307,25 @@ func effectiveMaxDoubling(requested, configuredMax int) (int, error) {
 // on the next start.
 func runStakeRecoveryOnStartup(mode string, chainEnabled bool, svc staking.LegacyStakeService, logger log.Logger) error {
 	switch mode {
-	case "", "off":
+	// "false" is accepted because YAML 1.1 coerces a bare off/on/yes/no to a
+	// boolean, so the documented default written the obvious way,
+	//
+	//     stake-recovery-on-startup: off
+	//
+	// reaches this function as "false" and used to stop the node from starting
+	// at all (issue #489). A YAML off can only have meant off, so accepting it
+	// loses nothing.
+	//
+	// "true" is deliberately NOT accepted. It does not say whether withdraw or
+	// migrate was wanted, and guessing on a setting that moves staked funds
+	// would be worse than refusing to start.
+	case "", "off", "false":
 		return nil
 	case string(staking.RecoverModeWithdraw), string(staking.RecoverModeMigrate):
 	default:
-		return fmt.Errorf("invalid stake-recovery-on-startup %q: must be off, withdraw or migrate", mode)
+		return fmt.Errorf("%w: stake-recovery-on-startup %q: must be off, withdraw or migrate. "+
+			"Note that YAML reads a bare off, on, yes or no as a boolean, so write it quoted, "+
+			"for example: stake-recovery-on-startup: \"off\"", ErrConfig, mode)
 	}
 	if !chainEnabled {
 		logger.Warning("stake-recovery-on-startup is set but the chain is disabled; skipping legacy stake recovery")

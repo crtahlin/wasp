@@ -14,6 +14,7 @@ var (
 	SyncedWithinThreshold      = syncedWithinThreshold
 	RadiusWithoutWaiting       = radiusWithoutWaiting
 	ErrNetworkRadiusUnknown    = errNetworkRadiusUnknown
+	RunStakeRecoveryOnStartup  = runStakeRecoveryOnStartup
 )
 
 // NewTestBeeWithClosers builds a Bee with only the push-sync and retrieval
