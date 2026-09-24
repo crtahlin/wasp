@@ -62,11 +62,23 @@ with upstream's package, so installing one replaces the other.
 
 ```bash
 # Debian / Ubuntu
-dpkg -i wasp_<version>_amd64.deb
+apt install ./wasp_<version>_amd64.deb
+
+# Fedora / RHEL
+dnf install ./wasp-<version>.x86_64.rpm
 
 # Docker
 docker run ghcr.io/crtahlin/wasp:<version>
 ```
+
+The leading `./` matters: without it the package manager treats the argument as a
+name to look up in its repositories rather than a file to install.
+
+Not `dpkg -i`. It does not resolve dependencies, and the package declares
+`ca-certificates` and `adduser`, so on a host without them dpkg unpacks and then
+refuses to configure, leaving the package in `install ok unpacked` with the unit
+unconfigured. That is most likely on exactly the minimal images a fresh node
+tends to be built from ([#487](https://github.com/crtahlin/wasp/issues/487)).
 
 Existing upstream configuration and data directories are used unchanged, so
 rolling back means reinstalling upstream's package.
