@@ -9,9 +9,9 @@ is built and packaged.
   on 2026-09-23. Re-checked that day against upstream's published releases:
   v2.8.2 of 2026-08-26 is still the newest that is not a release candidate, so
   the comparison point has not moved and no entry was removed.
-- **wasp described:** the tip of `fix/500-nat-addr-port-only`, 2026-09-25, the
-  last commit that changes what a node does. Replaced by the merge commit in
-  the follow-up ledger change. The latest wasp release is v0.1.4.
+- **wasp described:** [`5575f71f`](https://github.com/crtahlin/wasp/commit/5575f71f),
+  2026-09-25, the last commit that changes what a node does. The latest wasp
+  release is v0.1.4, which does not contain it.
 - **wasp's upstream base:** v2.8.2, recorded in [`.upstream-base`](../.upstream-base).
 
 The comparison is always with the latest **released** Bee, never with upstream
