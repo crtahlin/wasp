@@ -20,8 +20,25 @@ func TestValidatePublicAddress(t *testing.T) {
 		expErr bool
 	}{
 		{
-			name:   "empty host",
+			// A port-only address advertises the observed public IP on this
+			// port. Upstream rejects it; wasp accepts it. See #500.
+			name:   "port only",
 			addr:   ":1635",
+			expErr: false,
+		},
+		{
+			name:   "port only, empty port",
+			addr:   ":",
+			expErr: true,
+		},
+		{
+			name:   "port only, invalid port number",
+			addr:   ":abc",
+			expErr: true,
+		},
+		{
+			name:   "port only, port out of range",
+			addr:   ":70000",
 			expErr: true,
 		},
 		{

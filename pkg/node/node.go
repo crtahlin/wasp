@@ -1918,14 +1918,16 @@ func validatePublicAddress(addr string) error {
 	if err != nil {
 		return fmt.Errorf("%w", err)
 	}
-	if host == "" {
-		return errors.New("host is empty")
-	}
 	if port == "" {
 		return errors.New("port is empty")
 	}
 	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return fmt.Errorf("port is not a valid number: %w", err)
+	}
+	// A port-only address (":1634") advertises the public IP peers observe on
+	// this port, so it follows a change of public IP. See #500.
+	if host == "" {
+		return nil
 	}
 	if host == "localhost" {
 		return errors.New("localhost is not a valid address")

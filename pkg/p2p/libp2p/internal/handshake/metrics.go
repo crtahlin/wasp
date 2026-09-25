@@ -20,6 +20,7 @@ type metrics struct {
 	AdvertisableUnderlaysTruncated prometheus.Counter
 	ObservedUnderlaysTruncated     prometheus.Counter
 	AddressMinted                  prometheus.Counter
+	NATAddrMismatch                prometheus.Counter
 	TimestampRejected              *prometheus.CounterVec
 	ChequebookVerification         *prometheus.CounterVec
 }
@@ -82,6 +83,12 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "address_minted_total",
 			Help:      "Number of session-stable signed addresses minted. Plateaus per session; linear growth indicates advertised-underlay churn.",
+		}),
+		NATAddrMismatch: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "nat_addr_mismatch_total",
+			Help:      "Number of times a sustained run of handshakes observed a public IP that the configured nat-addr does not advertise. A rise means nat-addr is stale.",
 		}),
 		TimestampRejected: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
