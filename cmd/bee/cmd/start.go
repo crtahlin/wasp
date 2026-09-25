@@ -86,6 +86,15 @@ func (c *command) initStartCmd() (err error) {
 			respC := buildBeeNodeAsync(ctx, c, cmd, logger)
 			var beeNode atomic.Value
 
+			// A failed build used to be logged here and nothing more, so RunE
+			// returned nil and the process exited 0. systemd then reported
+			// "Deactivated successfully" and Restart=always restarted it every
+			// few seconds, so a bad configuration value looped indefinitely
+			// while systemctl is-active still said active (issue #490).
+			// The error is kept and returned, so the process exits non-zero and
+			// main can map a configuration error to its own status.
+			var buildErr atomic.Value
+
 			p := &program{
 				start: func() {
 					// Wait for bee node to fully build and initialized
@@ -93,6 +102,7 @@ func (c *command) initStartCmd() (err error) {
 					case resp := <-respC:
 						if resp.err != nil {
 							logger.Error(resp.err, "failed to build bee node")
+							buildErr.Store(resp.err)
 							return
 						}
 						beeNode.Store(resp.bee)
@@ -167,6 +177,13 @@ func (c *command) initStartCmd() (err error) {
 				// start blocks until some interrupt is received
 				p.start()
 				p.stop()
+			}
+
+			// Returned after stop() so shutdown still runs and the async log
+			// sinks are still closed: the exit status changes, the teardown
+			// does not.
+			if err, ok := buildErr.Load().(error); ok && err != nil {
+				return err
 			}
 
 			return nil

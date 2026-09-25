@@ -284,5 +284,31 @@ password-file: "/var/lib/bee/password"
 # start, rather than quietly falling back, so that asking for it means being
 # sure of it. Set false to keep the pure-Go path on capable hardware.
 # use-simd-hashing: false
+## stake recovery from retired staking contracts. off (the default, do nothing),
+## withdraw (recover it to the node's wallet), or migrate (recover it into the
+## current staking contract). It moves staked funds, so it is opt-in.
+##
+## QUOTE IT. YAML reads a bare off, on, yes or no as a BOOLEAN, so
+##
+##   stake-recovery-on-startup: off
+##
+## reaches the node as "false". That is accepted as off, but the quoted form is
+## what makes the file say what it means, and an unquoted "on" is not a valid
+## mode at all because it does not say withdraw or migrate.
+# stake-recovery-on-startup: "off"
+
+## the redistribution reserve-size proof. classic is the whole-reserve proof
+## upstream uses and the live contract verifies. windowed is EXPERIMENTAL and is
+## not what the live contract verifies, so leave this alone on a node that holds
+## stake.
+# reserve-proof-mode: "classic"
+
+## index store engine, pebble or leveldb. A data directory is BOUND to the
+## engine it was created with, so this only takes effect on a fresh one and
+## changing it later means a new data directory and a full resync, not a
+## restart. Unset means pebble for a fresh directory and whatever an existing
+## directory already uses.
+# storage-engine: "pebble"
+
 ## limit of possible connected light nodes (default: 100)
 # light-node-limit: 100

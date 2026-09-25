@@ -11,6 +11,14 @@ Group=bee
 ExecStart=/usr/bin/bee start --config /etc/bee/bee.yaml
 Restart=always
 RestartSec=5s
+# 78 is EX_CONFIG: the node exits with it when a configuration value is invalid.
+# A restart cannot change the file, so restarting only loops every RestartSec
+# while systemctl is-active still reports active, and buries the one log line
+# naming the bad value under a fresh shutdown sequence each time. Measured on a
+# real node before this: NRestarts reached 11 from one unquoted YAML value.
+# With this, the unit goes to failed and systemctl status says why.
+# Every other failure keeps exiting 1 and keeps restarting (issue #490).
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=multi-user.target
