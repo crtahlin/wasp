@@ -561,7 +561,7 @@ FETCH:
 	if err != nil {
 		logger.Debug("bzz download: not manifest", "address", address, "error", err)
 		logger.Error(nil, "not manifest")
-		jsonhttp.NotFound(w, nil)
+		jsonhttp.NotFound(w, hintedNotFound(ctx))
 		return
 	}
 
@@ -785,7 +785,7 @@ func (s *Service) downloadHandler(logger log.Logger, w http.ResponseWriter, r *h
 		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound) {
 			logger.Debug("api download: not found ", "address", reference, "error", err)
 			logger.Error(nil, err.Error())
-			jsonhttp.NotFound(w, nil)
+			jsonhttp.NotFound(w, hintedNotFound(ctx))
 			return
 		}
 		logger.Debug("api download: unexpected error", "address", reference, "error", err)

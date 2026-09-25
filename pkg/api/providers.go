@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -38,6 +39,12 @@ const (
 	providerSetTTL = 10 * time.Minute
 	// maxProviderSets bounds the number of shared preferred sets.
 	maxProviderSets = 1024
+	// hintConnectWait is the longest a hinted download waits for one of its
+	// named providers to connect before it fetches its first chunk. A lookup
+	// and a dial outlast the first chunk's retry budget, so without the wait
+	// a provider reachable only through its record is never used. Kept a
+	// constant until a measurement shows it needs to be an option. See #499.
+	hintConnectWait = 10 * time.Second
 )
 
 var errProvidersHeader = errors.New("invalid Wasp-Providers header: want comma-separated hex overlays")
@@ -49,7 +56,7 @@ type Providers interface {
 	Announced() ([]providers.Announcement, error)
 	Lookup(ctx context.Context, k []byte) ([]*providers.Record, error)
 	Discover(ctx context.Context, k []byte, set providers.Adder)
-	ConnectHints(ctx context.Context, overlays []swarm.Address)
+	ConnectHints(ctx context.Context, overlays []swarm.Address, k []byte) *providers.HintRun
 }
 
 type providerHintKey struct{}
@@ -60,6 +67,9 @@ type providerHint struct {
 	set     *retrieval.PreferredSet
 	key     []byte
 	fetched atomic.Int64
+	// run is the connect run for providers named in WaspProvidersHeader;
+	// nil when the request named none.
+	run *providers.HintRun
 }
 
 // withProviders prepares a download for content providers when they are on.
@@ -98,9 +108,36 @@ func (s *Service) withProviders(r *http.Request, k []byte) (*http.Request, error
 	ctx := retrieval.WithPreferredPeers(r.Context(), hint.set)
 	ctx = context.WithValue(ctx, providerHintKey{}, hint)
 	if len(overlays) > 0 {
-		s.providers.ConnectHints(ctx, overlays)
+		// Wait for one named provider to connect before the first chunk is
+		// fetched, so a provider reached through its record, or dialled at
+		// all, is a candidate for that chunk. See #499.
+		hint.run = s.providers.ConnectHints(ctx, overlays, k)
+		wait := s.hintConnectWait
+		if wait == 0 {
+			wait = hintConnectWait
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-hint.run.Done():
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+		timer.Stop()
 	}
 	return r.WithContext(ctx), nil
+}
+
+// hintedNotFound returns the 404 message for a download that did not find
+// its content: for a download that named providers, what happened to them,
+// and nil otherwise, which keeps the default message.
+func hintedNotFound(ctx context.Context) any {
+	hint, ok := ctx.Value(providerHintKey{}).(*providerHint)
+	if !ok || hint.run == nil {
+		return nil
+	}
+	o := hint.run.Outcome()
+	return fmt.Sprintf("not found; no named provider could be used: %d had no known address and no provider record, %d could not be dialled, %d were connected",
+		o.NoAddress, o.DialFailed, o.Connected)
 }
 
 // providerGetter wraps the getter of a download so that, once the download

@@ -67,6 +67,7 @@ type Counts struct {
 	LookupsCanceled          float64
 	DiscoveriesStarted       float64
 	HintedConnectsStarted    float64
+	HintedRecordDials        float64
 }
 
 // Counters reports the discovery counters, for tests that need to see which
@@ -82,5 +83,6 @@ func (s *Service) Counters(tb testing.TB) Counts {
 		LookupsCanceled:          counterValue(tb, s.metrics.LookupsCanceled),
 		DiscoveriesStarted:       counterValue(tb, s.metrics.DiscoveriesStarted),
 		HintedConnectsStarted:    counterValue(tb, s.metrics.HintedConnectsStarted),
+		HintedRecordDials:        counterValue(tb, s.metrics.HintedRecordDials),
 	}
 }

@@ -6,6 +6,7 @@ package api
 
 import (
 	"context"
+	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/retrieval"
@@ -171,4 +172,10 @@ func NewProviderGetterForTest(p Providers, key []byte, set *retrieval.PreferredS
 	hint := &providerHint{set: set, key: key}
 	ctx := context.WithValue(context.Background(), providerHintKey{}, hint)
 	return s.providerGetter(ctx, g)
+}
+
+// SetHintConnectWait shortens how long a hinted download waits for a named
+// provider to connect, so a test of the limit does not take ten seconds.
+func (s *Service) SetHintConnectWait(d time.Duration) {
+	s.hintConnectWait = d
 }

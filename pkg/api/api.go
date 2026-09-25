@@ -170,6 +170,9 @@ type Service struct {
 	gsoc      gsoc.Listener
 	steward   steward.Interface
 	providers Providers
+	// hintConnectWait overrides the constant of the same name when non-zero;
+	// set only by tests.
+	hintConnectWait time.Duration
 	// localIngestEnabled gates POST /wasp/ingest. The route is mounted
 	// either way and answers 403 when this is false; with no authentication
 	// layer to put it behind, the flag is the only control there is.

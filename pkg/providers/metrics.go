@@ -29,6 +29,10 @@ type metrics struct {
 	// HintedConnectsStarted is the same denominator for the hinted path, which
 	// performs no lookup and so would otherwise have none.
 	HintedConnectsStarted prometheus.Counter
+	// HintedRecordDials counts dials to a hinted provider at the address in
+	// its provider record, made because the address book had none or its
+	// dial failed. See #499.
+	HintedRecordDials prometheus.Counter
 	// LookupsCompleted counts lookups that actually read the network and
 	// returned without their context being canceled. A cache hit does NOT
 	// increment it, and neither does a key that is not a plain reference:
@@ -87,6 +91,12 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "hinted_connects_started",
 			Help:      "Number of hinted provider connect runs started.",
+		}),
+		HintedRecordDials: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "hinted_record_dials",
+			Help:      "Number of dials to a hinted provider at the address in its provider record, because the address book had none or its dial failed.",
 		}),
 		LookupsCompleted: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
