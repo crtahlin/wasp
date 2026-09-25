@@ -643,6 +643,11 @@ FETCH:
 			}
 		}
 
+		// A root chunk nobody could serve: look up its providers once and
+		// read the manifest again if one connected. See #498.
+		if !feedDereferenced && s.canLookupOnMiss(ctx) && s.rootMissing(ctx, cache, address, rLevel) && s.lookupOnMiss(ctx) {
+			goto FETCH
+		}
 		logger.Debug("bzz download: address not found or incorrect", "address", address, "path", pathVar)
 		logger.Error(nil, "address not found or incorrect")
 		msg := "address not found or incorrect"
@@ -708,6 +713,9 @@ FETCH:
 
 			jsonhttp.NotFound(w, "path address not found")
 		} else {
+			if !feedDereferenced && s.canLookupOnMiss(ctx) && s.rootMissing(ctx, cache, address, rLevel) && s.lookupOnMiss(ctx) {
+				goto FETCH
+			}
 			jsonhttp.NotFound(w, hintedNotFound(ctx))
 		}
 		return
@@ -784,6 +792,11 @@ func (s *Service) downloadHandler(logger log.Logger, w http.ResponseWriter, r *h
 		reader, l, err = joiner.NewJoiner(ctx, s.providerGetter(ctx, s.storer.Download(cache)), s.storer.Cache(), reference, rootCh)
 	} else {
 		reader, l, err = joiner.New(ctx, s.providerGetter(ctx, s.storer.Download(cache)), s.storer.Cache(), reference, rLevel)
+		// A root chunk nobody could serve: look up its providers once and
+		// try again if one connected. See #498.
+		if err != nil && (errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound)) && s.lookupOnMiss(ctx) {
+			reader, l, err = joiner.New(ctx, s.providerGetter(ctx, s.storer.Download(cache)), s.storer.Cache(), reference, rLevel)
+		}
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound) {

@@ -337,8 +337,16 @@ func (s *Service) Lookup(ctx context.Context, k []byte) ([]*Record, error) {
 // Discover looks up the providers of content key k in the background,
 // connects to them, and adds their overlays to set. It stops when ctx is done
 // or the service closes.
-func (s *Service) Discover(ctx context.Context, k []byte, set Adder) {
-	s.goBackground(func() {
+//
+// The returned run's Done is closed as soon as one provider is connected, or
+// when the run has ended without one, so a download that cannot fetch its
+// root chunk can wait for a provider before trying again. See #498. The
+// 64th-chunk trigger does not wait and ignores it.
+func (s *Service) Discover(ctx context.Context, k []byte, set Adder) *HintRun {
+	run := NewHintRun()
+	started := s.goBackground(func() {
+		defer run.Finish()
+
 		// Discovery is node-scoped: a provider, once connected, is useful to
 		// later downloads and to none of the request that found it, because a
 		// lookup takes longer than that request has left. Deriving from the
@@ -375,8 +383,19 @@ func (s *Service) Discover(ctx context.Context, k []byte, set Adder) {
 			}
 			already, err := s.opts.Connect(ctx, r.Address)
 			s.countConnect(already, err, r.Address.Overlay, "provider")
+			switch {
+			case err == nil:
+				run.Add(HintOutcome{Connected: 1})
+				run.Finish()
+			case ctx.Err() == nil:
+				run.Add(HintOutcome{DialFailed: 1})
+			}
 		}
 	})
+	if !started {
+		run.Finish()
+	}
+	return run
 }
 
 // countConnect records the outcome of one connect and logs a failure.
