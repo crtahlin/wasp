@@ -14,9 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethersphere/bee/v2/pkg/file/redundancy"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	"github.com/ethersphere/bee/v2/pkg/providers"
+	"github.com/ethersphere/bee/v2/pkg/replicas"
 	"github.com/ethersphere/bee/v2/pkg/retrieval"
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -119,17 +121,7 @@ func (s *Service) withProviders(r *http.Request, k []byte) (*http.Request, error
 		// all, is a candidate for that chunk. See #499.
 		hint.run = s.providers.ConnectHints(ctx, overlays, k)
 		hint.named = len(overlays)
-		wait := s.hintConnectWait
-		if wait == 0 {
-			wait = hintConnectWait
-		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-hint.run.Done():
-		case <-timer.C:
-		case <-ctx.Done():
-		}
-		timer.Stop()
+		s.waitForProvider(ctx, hint.run)
 	}
 	return r.WithContext(ctx), nil
 }
@@ -142,15 +134,33 @@ func (s *Service) withProviders(r *http.Request, k []byte) (*http.Request, error
 // and content that the network holds never reaches it, because its root chunk
 // is fetched. The 64-chunk trigger in providerGetter is unchanged. See #498.
 func (s *Service) lookupOnMiss(ctx context.Context) bool {
-	hint, ok := ctx.Value(providerHintKey{}).(*providerHint)
-	if !ok || s.providers == nil || hint.run != nil || hint.key == nil {
+	if !s.canLookupOnMiss(ctx) {
 		return false
 	}
+	hint := ctx.Value(providerHintKey{}).(*providerHint)
 	if hint.missLooked.Swap(true) {
 		return false
 	}
 	// the lookup's own reads must not go to this download's preferred peers
 	run := s.providers.Discover(retrieval.WithPreferredPeers(ctx, nil), hint.key, hint.set)
+	s.waitForProvider(ctx, run)
+	return run.Outcome().Connected > 0
+}
+
+// canLookupOnMiss reports, without any network work, whether a download may
+// look up providers on a miss: providers are on, the request named none, it
+// has a plain content key, and it has not looked up on a miss already. The
+// /bzz path asks this before it spends a fetch confirming that the root is
+// missing, so a node with providers off, or a request that can never look
+// up, pays nothing extra on its 404.
+func (s *Service) canLookupOnMiss(ctx context.Context) bool {
+	hint, ok := ctx.Value(providerHintKey{}).(*providerHint)
+	return ok && s.providers != nil && hint.run == nil && hint.key != nil && !hint.missLooked.Load()
+}
+
+// waitForProvider waits for run to report a connected provider, or to end,
+// for at most hintConnectWait, and returns earlier if ctx is done.
+func (s *Service) waitForProvider(ctx context.Context, run *providers.HintRun) {
 	wait := s.hintConnectWait
 	if wait == 0 {
 		wait = hintConnectWait
@@ -162,14 +172,15 @@ func (s *Service) lookupOnMiss(ctx context.Context) bool {
 	case <-timer.C:
 	case <-ctx.Done():
 	}
-	return run.Outcome().Connected > 0
 }
 
 // rootMissing reports whether the root chunk of address cannot be fetched,
-// for a /bzz download whose manifest read failed: only then is looking up
-// providers worth its cost. It is called on the failure path only.
-func (s *Service) rootMissing(ctx context.Context, cache bool, address swarm.Address) bool {
-	_, err := s.storer.Download(cache).Get(ctx, address)
+// reading its dispersed replicas at the request's redundancy level as the
+// manifest read does, so content that survives only as replicas does not
+// count as missing. It is called only on a /bzz failure path, and only after
+// canLookupOnMiss, because it costs a fetch.
+func (s *Service) rootMissing(ctx context.Context, cache bool, address swarm.Address, rLevel redundancy.Level) bool {
+	_, err := replicas.NewGetter(s.storer.Download(cache), rLevel).Get(ctx, address)
 	return errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound)
 }
 

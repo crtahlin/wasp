@@ -645,7 +645,7 @@ FETCH:
 
 		// A root chunk nobody could serve: look up its providers once and
 		// read the manifest again if one connected. See #498.
-		if s.rootMissing(ctx, cache, address) && s.lookupOnMiss(ctx) {
+		if !feedDereferenced && s.canLookupOnMiss(ctx) && s.rootMissing(ctx, cache, address, rLevel) && s.lookupOnMiss(ctx) {
 			goto FETCH
 		}
 		logger.Debug("bzz download: address not found or incorrect", "address", address, "path", pathVar)
@@ -713,7 +713,7 @@ FETCH:
 
 			jsonhttp.NotFound(w, "path address not found")
 		} else {
-			if s.rootMissing(ctx, cache, address) && s.lookupOnMiss(ctx) {
+			if !feedDereferenced && s.canLookupOnMiss(ctx) && s.rootMissing(ctx, cache, address, rLevel) && s.lookupOnMiss(ctx) {
 				goto FETCH
 			}
 			jsonhttp.NotFound(w, hintedNotFound(ctx))

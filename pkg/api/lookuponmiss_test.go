@@ -174,6 +174,7 @@ func TestProvidersLookupOnMissOnlyWhenUnhinted(t *testing.T) {
 	)
 	encrypted := strings.Repeat("ab", 64)
 	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+encrypted, http.StatusNotFound)
+	jsonhttptest.Request(t, client, http.MethodGet, "/bzz/"+encrypted+"/", http.StatusNotFound)
 	if got := discoveries(fake); len(got) != 1 {
 		t.Fatalf("discoveries %x, want none for a hinted or encrypted download", got)
 	}
@@ -199,16 +200,82 @@ func TestProvidersLookupOnMissOncePerRequest(t *testing.T) {
 	client, _ := newMissServer(t, fake)
 	missing := swarm.RandAddress(t)
 
-	done := make(chan struct{})
+	// a plain request, so nothing calls into t from the goroutine
+	status := make(chan int, 1)
 	go func() {
-		defer close(done)
-		jsonhttptest.Request(t, client, http.MethodGet, "/bzz/"+missing.String()+"/", http.StatusNotFound)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost/bzz/"+missing.String()+"/", nil)
+		if err != nil {
+			status <- 0
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			status <- 0
+			return
+		}
+		_ = resp.Body.Close()
+		status <- resp.StatusCode
 	}()
 	select {
-	case <-done:
+	case code := <-status:
+		if code != http.StatusNotFound {
+			t.Fatalf("status %d, want 404", code)
+		}
 	case <-time.After(10 * time.Second):
 		stop.Store(true) // let the request end, so the server can shut down
-		<-done
+		<-status
 		t.Fatal("a /bzz request looked up and retried without end")
+	}
+}
+
+// countingStore counts reads of one address, to show which requests fetch a
+// missing root a second time.
+type countingStore struct {
+	*inmemchunkstore.ChunkStore
+	addr  swarm.Address
+	reads atomic.Int64
+}
+
+func (c *countingStore) Get(ctx context.Context, addr swarm.Address) (swarm.Chunk, error) {
+	if addr.Equal(c.addr) {
+		c.reads.Add(1)
+	}
+	return c.ChunkStore.Get(ctx, addr)
+}
+
+// TestProvidersNoRootRefetchWhenIneligible: on /bzz, confirming that a root
+// is missing costs a fetch, so it is paid only by a request that may look
+// up. A node with providers off, the default, and a hinted request answer
+// their 404 with the same reads as before; an eligible request reads the root
+// once more.
+func TestProvidersNoRootRefetchWhenIneligible(t *testing.T) {
+	t.Parallel()
+
+	missing := swarm.RandAddress(t)
+	reads := func(p api.Providers, hinted bool) int64 {
+		t.Helper()
+		cs := &countingStore{ChunkStore: inmemchunkstore.New(), addr: missing}
+		client, _, _, _ := newTestServer(t, testServerOptions{
+			Storer:    mockstorer.NewWithChunkStore(cs),
+			Post:      mockpost.New(mockpost.WithAcceptAll()),
+			Providers: p,
+		})
+		opts := []jsonhttptest.Option{}
+		if hinted {
+			opts = append(opts, jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, swarm.RandAddress(t).String()))
+		}
+		jsonhttptest.Request(t, client, http.MethodGet, "/bzz/"+missing.String()+"/", http.StatusNotFound, opts...)
+		return cs.reads.Load()
+	}
+
+	off := reads(nil, false)
+	hinted := reads(&fakeProviders{}, true)
+	eligible := reads(&fakeProviders{}, false)
+
+	if hinted != off {
+		t.Fatalf("a hinted request read the root %d times, a node with providers off %d; want the same", hinted, off)
+	}
+	if eligible <= off {
+		t.Fatalf("an eligible request read the root %d times, not more than %d; the check for a missing root did not run", eligible, off)
 	}
 }
