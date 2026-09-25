@@ -42,12 +42,18 @@ const (
 	providerSetTTL = 10 * time.Minute
 	// maxProviderSets bounds the number of shared preferred sets.
 	maxProviderSets = 1024
-	// hintConnectWait is the longest a hinted download waits for one of its
-	// named providers to connect before it fetches its first chunk. A lookup
-	// and a dial outlast the first chunk's retry budget, so without the wait
-	// a provider reachable only through its record is never used. Kept a
-	// constant until a measurement shows it needs to be an option. See #499.
-	hintConnectWait = 10 * time.Second
+	// hintConnectWait is the longest a download waits for a provider to
+	// connect, before its first chunk when it named providers (#499), or
+	// before retrying its root after a lookup on a miss (#498). A lookup and
+	// a dial outlast the first chunk's retry budget, so without the wait a
+	// provider reachable only through its record is never used. It was 10 s;
+	// a connect from a fresh ultra-light node measured about 10.5 s (#511),
+	// so it is about twice that. On the miss path the wait also covers the
+	// lookup, whose slot reads have a 2 s deadline each, so the margin there
+	// is smaller than twice. The wait ends at the first connection, so only a
+	// slow or failed connect pays for it. Kept a constant until a measurement
+	// shows it needs to be an option.
+	hintConnectWait = 20 * time.Second
 )
 
 var errProvidersHeader = errors.New("invalid Wasp-Providers header: want comma-separated hex overlays")
