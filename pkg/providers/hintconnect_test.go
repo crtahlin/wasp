@@ -341,3 +341,30 @@ func TestConnectHintsNoRedialOfSameAddress(t *testing.T) {
 		t.Fatalf("outcome %+v, want one that could not be dialled", o)
 	}
 }
+
+// TestDiscoverRunReportsConnection: the run Discover returns closes Done with
+// a connection when a provider is found, and closes it empty when nobody
+// announced the content, so a download that missed its root can wait on it.
+// See #498.
+func TestDiscoverRunReportsConnection(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+	k := announced(t, n, c, a)
+
+	dials := &dialLog{}
+	reader := newService(t, n, b, c, dials.connect)
+
+	run := reader.Discover(context.Background(), k, &adder{})
+	waitRun(t, run)
+	if o := run.Outcome(); o.Connected != 1 {
+		t.Fatalf("outcome %+v, want the provider connected", o)
+	}
+
+	empty := reader.Discover(context.Background(), swarm.RandAddress(t).Bytes(), &adder{})
+	waitRun(t, empty)
+	if o := empty.Outcome(); o.Connected != 0 {
+		t.Fatalf("outcome %+v for content nobody announced, want no connection", o)
+	}
+}

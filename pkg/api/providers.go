@@ -20,6 +20,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/retrieval"
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
 	"github.com/gorilla/mux"
 )
 
@@ -55,7 +56,7 @@ type Providers interface {
 	Withdraw(k []byte) error
 	Announced() ([]providers.Announcement, error)
 	Lookup(ctx context.Context, k []byte) ([]*providers.Record, error)
-	Discover(ctx context.Context, k []byte, set providers.Adder)
+	Discover(ctx context.Context, k []byte, set providers.Adder) *providers.HintRun
 	ConnectHints(ctx context.Context, overlays []swarm.Address, k []byte) *providers.HintRun
 }
 
@@ -72,6 +73,9 @@ type providerHint struct {
 	run *providers.HintRun
 	// named is how many providers the request named.
 	named int
+	// missLooked records that this request already looked up providers
+	// because its root chunk was missing, so it does so at most once.
+	missLooked atomic.Bool
 }
 
 // withProviders prepares a download for content providers when they are on.
@@ -128,6 +132,45 @@ func (s *Service) withProviders(r *http.Request, k []byte) (*http.Request, error
 		timer.Stop()
 	}
 	return r.WithContext(ctx), nil
+}
+
+// lookupOnMiss runs discovery for a download that could not fetch its root
+// chunk, waits for a provider to connect, and reports whether one did, in
+// which case the caller fetches the root once more. It runs at most once per
+// request, and only for a download that named no providers and has a plain
+// content key: a hinted download already connected to its named providers,
+// and content that the network holds never reaches it, because its root chunk
+// is fetched. The 64-chunk trigger in providerGetter is unchanged. See #498.
+func (s *Service) lookupOnMiss(ctx context.Context) bool {
+	hint, ok := ctx.Value(providerHintKey{}).(*providerHint)
+	if !ok || s.providers == nil || hint.run != nil || hint.key == nil {
+		return false
+	}
+	if hint.missLooked.Swap(true) {
+		return false
+	}
+	// the lookup's own reads must not go to this download's preferred peers
+	run := s.providers.Discover(retrieval.WithPreferredPeers(ctx, nil), hint.key, hint.set)
+	wait := s.hintConnectWait
+	if wait == 0 {
+		wait = hintConnectWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-run.Done():
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	return run.Outcome().Connected > 0
+}
+
+// rootMissing reports whether the root chunk of address cannot be fetched,
+// for a /bzz download whose manifest read failed: only then is looking up
+// providers worth its cost. It is called on the failure path only.
+func (s *Service) rootMissing(ctx context.Context, cache bool, address swarm.Address) bool {
+	_, err := s.storer.Download(cache).Get(ctx, address)
+	return errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound)
 }
 
 // hintedOutcome describes what happened to the providers a download named,

@@ -46,6 +46,12 @@ type fakeProviders struct {
 	// lookupHasSet records, per Discover, whether its context carried a
 	// preferred set
 	lookupHasSet []bool
+	// onDiscover, when set, runs on each Discover and reports whether a
+	// provider connected; it stands for a provider becoming reachable
+	onDiscover func() bool
+	// discoverDelay, when set, makes Discover's run finish only after it,
+	// as a real lookup and dial do
+	discoverDelay time.Duration
 }
 
 func (f *fakeProviders) Announce(_ context.Context, k, batchID []byte) error {
@@ -75,13 +81,31 @@ func (f *fakeProviders) Lookup(context.Context, []byte) ([]*providers.Record, er
 	return f.records, nil
 }
 
-func (f *fakeProviders) Discover(ctx context.Context, k []byte, set providers.Adder) {
+func (f *fakeProviders) Discover(ctx context.Context, k []byte, set providers.Adder) *providers.HintRun {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.discovered = append(f.discovered, k)
 	f.sets = append(f.sets, set)
 	// the lookup's own reads must not go to the download's preferred peers
 	f.lookupHasSet = append(f.lookupHasSet, retrieval.PreferredPeers(ctx) != nil)
+	onDiscover, delay := f.onDiscover, f.discoverDelay
+	f.mu.Unlock()
+
+	run := providers.NewHintRun()
+	finish := func() {
+		if onDiscover != nil && onDiscover() {
+			run.Add(providers.HintOutcome{Connected: 1})
+		}
+		run.Finish()
+	}
+	if delay > 0 {
+		go func() {
+			time.Sleep(delay)
+			finish()
+		}()
+		return run
+	}
+	finish()
+	return run
 }
 
 func (f *fakeProviders) ConnectHints(_ context.Context, overlays []swarm.Address, k []byte) *providers.HintRun {
