@@ -129,3 +129,32 @@ func TestWaitIdentifiedReturnsAddresses(t *testing.T) {
 		t.Fatalf("got %v, want the address identify reported", got)
 	}
 }
+
+// TestWaitIdentifiedAddressBeforeIdentify: an address that reaches the
+// peerstore while identify is still running is returned at once, as the old
+// address wait did, so the change is never slower than before.
+func TestWaitIdentifiedAddressBeforeIdentify(t *testing.T) {
+	t.Parallel()
+
+	id := newPeer(t)
+	addr, err := ma.NewMultiaddr("/ip4/1.2.3.4/tcp/1634")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := newPeerstore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		ps.AddAddr(id, addr, time.Hour)
+	}()
+	start := time.Now()
+	got := waitIdentified(ctx, fakeIdentify{done: make(chan struct{})}, ps, fakeConn{peer: id})
+	if len(got) != 1 || !got[0].Equal(addr) {
+		t.Fatalf("got %v, want the address that arrived", got)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("took %v; an address arriving before identify finished must end the wait", elapsed)
+	}
+}

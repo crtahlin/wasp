@@ -33,21 +33,32 @@ func identifyWaiterOf(h any) identifyWaiter {
 	return ids
 }
 
-// waitIdentified returns the remote peer's addresses once identify has
-// finished for conn, or when ctx is done, whichever comes first.
+// waitIdentified returns the remote peer's addresses as soon as one is in
+// the peerstore, or identify has finished for conn, or ctx is done, whichever
+// comes first.
 //
-// It replaces waiting for an address to appear. identify keeps only public
-// addresses from a peer that connected over a public address, so a peer
-// behind NAT that advertises none leaves its peerstore entry empty for good,
-// and waiting for an address meant waiting for the whole timeout before the
-// caller's fallback to the connection's remote address. Once identify has
-// finished, no address is coming, and an empty result is final. See #511.
+// Waiting for an address alone, as before, could not end early for a peer
+// behind NAT that advertises none: identify keeps only public addresses from a
+// peer that connected over a public address, so its peerstore entry stays
+// empty, and the wait ran to the whole timeout before the caller's fallback to
+// the connection's remote address. Once identify has finished no address is
+// coming, so an empty result is final. An address that arrives before identify
+// finishes is still returned at once, so this is never slower than waiting for
+// an address alone. See #511.
 func waitIdentified(ctx context.Context, ids identifyWaiter, ps peerstore.Peerstore, conn network.Conn) []ma.Multiaddr {
+	ctx, cancel := context.WithCancel(ctx) // cancel the address stream on return
+	defer cancel()
+
 	peerID := conn.RemotePeer()
+	// Open the stream before reading, so an address stored in between is not
+	// missed; the same order waitPeerAddrs uses.
+	addrStream := ps.AddrStream(ctx, peerID)
 	if addrs := ps.Addrs(peerID); len(addrs) > 0 {
 		return addrs
 	}
 	select {
+	case addr := <-addrStream:
+		return []ma.Multiaddr{addr}
 	case <-ids.IdentifyWait(conn):
 	case <-ctx.Done():
 	}
