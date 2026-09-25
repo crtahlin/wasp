@@ -48,7 +48,9 @@ const (
 	// a dial outlast the first chunk's retry budget, so without the wait a
 	// provider reachable only through its record is never used. It was 10 s;
 	// a connect from a fresh ultra-light node measured about 10.5 s (#511),
-	// so it is twice that. The wait ends at the first connection, so only a
+	// so it is about twice that. On the miss path the wait also covers the
+	// lookup, whose slot reads have a 2 s deadline each, so the margin there
+	// is smaller than twice. The wait ends at the first connection, so only a
 	// slow or failed connect pays for it. Kept a constant until a measurement
 	// shows it needs to be an option.
 	hintConnectWait = 20 * time.Second
