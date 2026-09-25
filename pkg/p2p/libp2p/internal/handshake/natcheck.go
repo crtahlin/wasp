@@ -10,15 +10,20 @@ import (
 )
 
 // natDisagreement compares the public IPs a peer observed for this node with
-// the public IPs this node is about to advertise. It reports a disagreement
-// when, for an IP family present on both sides, none of the observed IPs is
-// advertised, and returns one IP from each side to name in a warning.
+// the same observations after the nat-addr resolver has rewritten them, which
+// is what this node advertises for them. The node's own listen addresses are
+// deliberately left out: they say nothing about nat-addr, and a host's global
+// IPv6 address that a peer sees rewritten would otherwise read as a stale
+// nat-addr. It reports a disagreement when, for an IP family present on both
+// sides, none of the observed IPs is advertised, and returns one IP from each
+// side to name in a warning.
 //
 // Only the same family is compared: a peer that reached the node over IPv6
 // says nothing about a configured IPv4 address. With no nat-addr, or a
-// port-only one, the advertised IPs are resolved from the observed ones, so
-// this never reports a disagreement. It exists for a nat-addr that carries a
-// host, which never follows a public IP change. See #500.
+// port-only one, the resolver keeps the observed IP, and with a DNS name the
+// advertised address carries no IP, so none of those ever disagrees. It
+// exists for a nat-addr that carries an IP, which never follows a public IP
+// change. See #500.
 func natDisagreement(observed, advertised []ma.Multiaddr) (disagrees bool, observedIP, advertisedIP string) {
 	obs := publicIPsByFamily(observed)
 	adv := publicIPsByFamily(advertised)
@@ -91,6 +96,6 @@ func (s *Service) checkNATAddr(observed, advertised []ma.Multiaddr) {
 		return
 	}
 	s.metrics.NATAddrMismatch.Inc()
-	s.logger.Warning("configured nat-addr IP is not the IP peers observe; update nat-addr, or set it to \":<port>\" to follow the observed IP",
+	s.logger.Warning("configured nat-addr IP is not the IP peers observe; update nat-addr, or, if this node sends and receives through the same public IP, set it to \":<port>\" to follow the observed IP",
 		"advertised_ip", advertisedIP, "observed_ip", observedIP)
 }

@@ -11,9 +11,15 @@ advertises that host for as long as it runs:
 
 - **An IP is fixed.** When the network's public IP changes, the node keeps
   signing and advertising the old one.
-- **A DNS name is fixed too.** `getMultiProto`
-  (`pkg/p2p/libp2p/static_resolver.go:112`) resolves it once, when the resolver
-  is built at startup.
+- **A DNS name** was described here as fixed too, resolved once at startup.
+  **That was wrong, corrected during review of the implementation.**
+  `getMultiProto` (`pkg/p2p/libp2p/static_resolver.go:112-135`) looks the name
+  up only to choose between `/dns4`, `/dns6` and `/dns`, and the node advertises
+  `/dnsX/<name>/tcp/<port>`, which peers resolve each time they dial. So a
+  dynamic DNS name already follows an IP change. The port-only form is still
+  needed for operators who do not run dynamic DNS, or who do not want to publish
+  a hostname in every signed address, which is why the bench nodes use a bare
+  IP.
 - **Nothing tells the operator.** The node keeps its outbound connections and
   its peer count, and `/status` keeps reporting `isReachable: true`.
 
@@ -198,9 +204,13 @@ form costs:
 
 - **`<ip>:<port>`**: stable, but goes stale silently when the public IP changes,
   which the new warning now reports.
-- **`<dns-name>:<port>`**: resolved once at startup, so it also goes stale until
-  a restart, and it publishes a hostname in every signed address.
-- **`:<port>`**: follows the IP peers observe. It trusts peers' observations,
+- **`<dns-name>:<port>`**: advertised as a name that peers resolve when they
+  dial, so it follows a dynamic DNS record, but it publishes a hostname in every
+  signed address. (Corrected; an earlier revision said it was resolved once at
+  startup.)
+- **`:<port>`**: follows the IP peers observe. It requires inbound and
+  outbound traffic to share one public IP, since peers observe the outbound one
+  (added during review). It trusts peers' observations,
   limited by #225's three-handshake run, so a minority of lying peers cannot move
   it. It costs other nodes nothing.
 

@@ -64,6 +64,24 @@ func TestNATDisagreement(t *testing.T) {
 			want:       false,
 		},
 		{
+			name:       "IPv6 configured address is not observed",
+			observed:   a("/ip6/2a00:1450:1::5/tcp/40001"),
+			advertised: a("/ip6/2a00:1450:2::9/tcp/1634"),
+			want:       true,
+		},
+		{
+			name:       "one family disagrees",
+			observed:   a("/ip4/5.6.7.8/tcp/40001", "/ip6/2a00:1450:1::5/tcp/40001"),
+			advertised: a("/ip4/1.2.3.4/tcp/1634", "/ip6/2a00:1450:1::5/tcp/1634"),
+			want:       true,
+		},
+		{
+			name:       "DNS nat-addr carries no IP to compare",
+			observed:   a("/ip4/5.6.7.8/tcp/40001"),
+			advertised: a("/dns4/node.example.com/tcp/1634"),
+			want:       false,
+		},
+		{
 			name:       "nothing public advertised",
 			observed:   a("/ip4/5.6.7.8/tcp/40001"),
 			advertised: a("/ip4/192.168.1.5/tcp/1634"),

@@ -175,10 +175,11 @@ data-dir: "/var/lib/bee"
 ## minimum radius storage threshold
 # minimum-storage-radius: "0"
 ## NAT exposed address, as host:port. Behind a port-forwarding NAT whose public
-## IP can change, use ":<port>" (for example ":1634"): the node then advertises
-## the public IP its peers observe on that port and follows it when it changes.
-## A host here is advertised as written, and a warning is logged if peers
-## observe a different public IP.
+## IP can change, and which sends and receives through the same public IP, use
+## ":<port>" (for example ":1634"): the node then advertises the public IP its
+## peers observe on that port and follows it when it changes. An IP here is
+## advertised as written, and a warning is logged if peers observe another one.
+## A DNS name is advertised as a name that peers resolve when they dial.
 # nat-addr: ""
 ## suggester for target neighborhood
 # neighborhood-suggester: https://api.swarmscan.io/v1/network/neighborhoods/suggestion

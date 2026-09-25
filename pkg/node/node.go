@@ -1925,8 +1925,12 @@ func validatePublicAddress(addr string) error {
 		return fmt.Errorf("port is not a valid number: %w", err)
 	}
 	// A port-only address (":1634") advertises the public IP peers observe on
-	// this port, so it follows a change of public IP. See #500.
+	// this port, so it follows a change of public IP. Port 0 would advertise
+	// an address nobody can dial. See #500.
 	if host == "" {
+		if port == "0" {
+			return errors.New("port 0 is not a valid port for a port-only address")
+		}
 		return nil
 	}
 	if host == "localhost" {

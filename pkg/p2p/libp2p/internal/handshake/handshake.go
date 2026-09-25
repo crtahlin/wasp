@@ -341,6 +341,7 @@ func (s *Service) Handshake(ctx context.Context, stream p2p.Stream, peerMultiadd
 
 		advertisableUnderlays[i] = advertisableUnderlay
 	}
+	s.checkNATAddr(observedUnderlays, advertisableUnderlays)
 
 	if s.hostAddresser != nil {
 		hostAddrs, err := s.hostAddresser.AdvertizableAddrs()
@@ -366,8 +367,6 @@ func (s *Service) Handshake(ctx context.Context, stream p2p.Stream, peerMultiadd
 	if advTruncated {
 		s.metrics.AdvertisableUnderlaysTruncated.Inc()
 	}
-
-	s.checkNATAddr(observedUnderlays, advertisableUnderlays)
 
 	bzzAddress, err := s.signedAddress(s.stabilizeUnderlays(advertisableUnderlays))
 	if err != nil {
@@ -449,6 +448,7 @@ func (s *Service) Handle(ctx context.Context, stream p2p.Stream, peerMultiaddrs 
 		}
 		advertisableUnderlays[i] = advertisableUnderlay
 	}
+	s.checkNATAddr(observedUnderlays, advertisableUnderlays)
 
 	if s.hostAddresser != nil {
 		hostAddrs, err := s.hostAddresser.AdvertizableAddrs()
@@ -474,8 +474,6 @@ func (s *Service) Handle(ctx context.Context, stream p2p.Stream, peerMultiaddrs 
 	if handleAdvTruncated {
 		s.metrics.AdvertisableUnderlaysTruncated.Inc()
 	}
-
-	s.checkNATAddr(observedUnderlays, advertisableUnderlays)
 
 	bzzAddress, err := s.signedAddress(s.stabilizeUnderlays(advertisableUnderlays))
 	if err != nil {

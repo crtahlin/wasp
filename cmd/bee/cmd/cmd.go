@@ -356,7 +356,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().String(optionNamePasswordFile, "", "path to a file that contains password for decrypting keys")
 	cmd.Flags().String(optionNameAPIAddr, "127.0.0.1:1633", "HTTP API listen address")
 	cmd.Flags().String(optionNameP2PAddr, ":1634", "P2P listen address")
-	cmd.Flags().String(optionNameNATAddr, "", "NAT exposed address, as host:port, or as :port to advertise the public IP peers observe on this port and follow it when it changes")
+	cmd.Flags().String(optionNameNATAddr, "", "NAT exposed address, as host:port, or as :port to advertise the public IP peers observe on this port and follow it when it changes (only where inbound and outbound traffic share one public IP)")
 	cmd.Flags().Bool(optionNameP2PWSEnable, false, "enable P2P WebSocket transport")
 	cmd.Flags().StringSlice(optionNameBootnodes, []string{"/dnsaddr/mainnet.ethswarm.org"}, "initial nodes to connect to")
 	cmd.Flags().Uint64(optionNameNetworkID, chaincfg.Mainnet.NetworkID, "ID of the Swarm network")

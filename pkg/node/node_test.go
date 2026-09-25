@@ -37,6 +37,11 @@ func TestValidatePublicAddress(t *testing.T) {
 			expErr: true,
 		},
 		{
+			name:   "port only, port zero",
+			addr:   ":0",
+			expErr: true,
+		},
+		{
 			name:   "port only, port out of range",
 			addr:   ":70000",
 			expErr: true,
