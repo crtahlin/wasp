@@ -215,3 +215,13 @@ in wasp, so the issue carries no `affects-upstream` label.
 - `docs/DIFFERENCES.md`, the `Wasp-Providers` row; `docs/experiments/INDEX.md`.
 
 Generated with help of AI.
+
+## Addendum, 2026-09-25: the wait bound is raised to 20 s
+
+Node validation of #498, which shares `hintConnectWait`, found that a connect
+from a fresh ultra-light requester to the provider takes about 10.5 s (#511).
+The hinted path's own validation passed from fresh requesters in 3 of 3 runs,
+but only because the root chunk's retries outlasted the connection, not because
+the 10 s wait covered it. The bound goes to 20 s for both paths; see the
+addendum in [`lookup-on-miss.md`](lookup-on-miss.md). Documentation that says
+"up to 10 s" is updated with it.

@@ -145,3 +145,39 @@ carries no `affects-upstream` label.
 - `docs/DIFFERENCES.md`, the automatic discovery row; `docs/experiments/INDEX.md`.
 
 Generated with help of AI.
+
+## Addendum, 2026-09-25: the wait bound is raised to 20 s
+
+**The first node validation was negative for the fresh-requester case.** On
+the bench, three runs per condition, with `stake-1` on v0.1.4 as the provider and
+throwaway ultra-light requesters built from `main` at `cba69e16`:
+
+| Condition | Result |
+|---|---|
+| plain `GET /bytes/<ref>`, fresh ultra-light requester | 404 in 3 of 3, about 12.4 s |
+| plain `GET /bzz/<ref>/` of an ingested collection, fresh ultra-light requester | 404 in 3 of 3, 17 to 24 s |
+| plain `GET /bytes/<ref>`, bench-1, a full node, disconnected from the provider | 200 in about 4 s |
+| a reference nobody holds, twice | 404 in 3.6 to 3.9 s after one lookup; the repeat served from the lookup cache, as specified |
+
+In every failing run the lookup completed and discovery had started its dial,
+but no connection was counted. The cause is the connect itself: a plain
+`POST /connect` from a fresh ultra-light node to the provider took 10.61, 10.54
+and 10.65 s on three separate nodes, against 0.23 s from bench-1. With a 10 s
+bound the miss path gave up about half a second before the connection landed,
+and it retries only when a provider is connected. Why that connect takes 10.5 s
+is unmodified upstream code, tracked in #511.
+
+**The change:** `hintConnectWait` goes from 10 s to **20 s**. It is the same
+constant #499 uses, and the hinted path had the same margin: it succeeded from
+fresh requesters only because the root chunk's own retries outlasted the
+connection. The wait still ends at the first connection, or as soon as the
+lookup ends with no provider, so the longer bound costs time only where a
+provider was found but connects slowly or not at all. A reference nobody holds
+is unaffected.
+
+20 s is two times the measured connect, not a tuned value. It stays a constant
+(rule 8); if #511 removes the 10.5 s delay, the bound can come back down with a
+measurement to justify it.
+
+The measurement above is repeated with the change, and the results go into
+`lookup-on-miss-results.md` together with this negative run.
