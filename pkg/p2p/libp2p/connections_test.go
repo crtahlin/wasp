@@ -1664,3 +1664,16 @@ func TestConnectEmptyPeerstoreSkipsAddressbookAndReacher(t *testing.T) {
 		t.Fatal("expected reacher not to be notified for NAT peer")
 	}
 }
+
+// TestServiceUsesIdentifyWait: the real libp2p host exposes its identify
+// service, so a connection is answered when identify finishes rather than
+// after the whole address wait. If this ever fails, the code falls back to
+// the old wait and a peer behind NAT costs 10 s per connection again (#511).
+func TestServiceUsesIdentifyWait(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newService(t, 1, libp2pServiceOpts{})
+	if !s.UsesIdentifyWait() {
+		t.Fatal("the libp2p host does not expose its identify service")
+	}
+}

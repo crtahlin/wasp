@@ -74,8 +74,13 @@ func (s *Service) FilterSupportedAddresses(addrs []ma.Multiaddr) []ma.Multiaddr 
 	return s.filterSupportedAddresses(addrs)
 }
 
+// PeerMultiaddrs builds a peer's addresses from the peerstore by peer ID,
+// without a connection, so it takes the address wait rather than the
+// identify wait that peerMultiaddrs uses for a live connection (#511).
 func (s *Service) PeerMultiaddrs(ctx context.Context, peerID libp2ppeer.ID) ([]ma.Multiaddr, error) {
-	return s.peerMultiaddrs(ctx, peerID)
+	waitPeersCtx, cancel := context.WithTimeout(ctx, peerstoreWaitAddrsTimeout)
+	defer cancel()
+	return buildFullMAs(waitPeerAddrs(waitPeersCtx, s.host.Peerstore(), peerID), peerID)
 }
 
 func (s *Service) SetTransportFlags(hasTCP, hasWS, hasWSS bool) {
@@ -119,4 +124,10 @@ func NewPutHandshakeAddressTestService(logger log.Logger, book addressbook.GetPu
 		addressbook:      book,
 		chequebookStorer: storer,
 	}
+}
+
+// UsesIdentifyWait reports whether the service's host exposes the identify
+// service, so peerMultiaddrs takes the identify wait (#511).
+func (s *Service) UsesIdentifyWait() bool {
+	return identifyWaiterOf(s.host) != nil
 }
