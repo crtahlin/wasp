@@ -132,7 +132,7 @@ func TestConnectHintsSurvivesCallerCancel(t *testing.T) {
 	dead, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	reader.ConnectHints(dead, []swarm.Address{a.addr.Overlay})
+	reader.ConnectHints(dead, []swarm.Address{a.addr.Overlay}, nil)
 
 	select {
 	case got := <-dialed:
@@ -183,7 +183,7 @@ func TestConnectHintsStopsOnClose(t *testing.T) {
 	resolve := func(swarm.Address) (*bzz.Address, error) { return a.addr, nil }
 	reader := newServiceResolving(t, n, b, c, connect, resolve)
 
-	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay}, nil)
 	assertStopsOnClose(t, reader, running, canceled)
 }
 
@@ -277,7 +277,7 @@ func TestConnectHintsBoundedByTimeout(t *testing.T) {
 	reader := newServiceResolving(t, n, b, c, connect, resolve)
 	reader.SetDiscoverTimeout(200 * time.Millisecond)
 
-	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay}, nil)
 
 	select {
 	case <-running:
@@ -489,7 +489,7 @@ func TestHintedConnectsStartedCounted(t *testing.T) {
 	resolve := func(swarm.Address) (*bzz.Address, error) { return a.addr, nil }
 	reader := newServiceResolving(t, n, b, c, connect, resolve)
 
-	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay}, nil)
 	select {
 	case <-dialed:
 	case <-time.After(20 * time.Second):
@@ -557,7 +557,7 @@ func TestCancelledHintedRunDoesNotDial(t *testing.T) {
 	// negative for the reason in TestCancelledRunStopsDialingButKeepsTheSet:
 	// an already-passed deadline cancels synchronously, a 1ns one races a timer
 	reader.SetDiscoverTimeout(-time.Second)
-	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay})
+	reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay}, nil)
 	_ = reader.Close()
 
 	if got := atomic.LoadInt64(&calls); got != 0 {

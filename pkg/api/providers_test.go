@@ -13,9 +13,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/api"
 	"github.com/ethersphere/bee/v2/pkg/bzz"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
@@ -29,12 +31,16 @@ import (
 
 // fakeProviders records what the API asks of the content-providers service.
 type fakeProviders struct {
-	mu         sync.Mutex
-	err        error
-	announced  []providers.Announcement
-	withdrawn  [][]byte
-	records    []*providers.Record
-	hints      []swarm.Address
+	mu        sync.Mutex
+	err       error
+	announced []providers.Announcement
+	withdrawn [][]byte
+	records   []*providers.Record
+	hints     []swarm.Address
+	hintKeys  [][]byte
+	// hintRun, when set, is returned by ConnectHints; otherwise a finished
+	// run is returned, so a download does not wait
+	hintRun    *providers.HintRun
 	discovered [][]byte
 	sets       []providers.Adder
 	// lookupHasSet records, per Discover, whether its context carried a
@@ -78,10 +84,17 @@ func (f *fakeProviders) Discover(ctx context.Context, k []byte, set providers.Ad
 	f.lookupHasSet = append(f.lookupHasSet, retrieval.PreferredPeers(ctx) != nil)
 }
 
-func (f *fakeProviders) ConnectHints(_ context.Context, overlays []swarm.Address) {
+func (f *fakeProviders) ConnectHints(_ context.Context, overlays []swarm.Address, k []byte) *providers.HintRun {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hints = append(f.hints, overlays...)
+	f.hintKeys = append(f.hintKeys, k)
+	if f.hintRun != nil {
+		return f.hintRun
+	}
+	run := providers.NewHintRun()
+	run.Finish()
+	return run
 }
 
 var providersBatch = strings.Repeat("ab", 32)
@@ -408,4 +421,141 @@ func pinProvided(t *testing.T, st interface {
 	if err := p.Done(ref); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// uploadForHintTest stores a small blob and returns its reference.
+func uploadForHintTest(t *testing.T, client *http.Client) swarm.Address {
+	t.Helper()
+	var resp api.BytesPostResponse
+	jsonhttptest.Request(t, client, http.MethodPost, "/bytes", http.StatusCreated,
+		jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
+		jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
+		jsonhttptest.WithRequestBody(strings.NewReader("hinted download")),
+		jsonhttptest.WithUnmarshalJSONResponse(&resp),
+	)
+	return resp.Reference
+}
+
+// TestProvidersHintWaitsForConnection: a hinted download does not fetch its
+// first chunk until a named provider is connected, so a provider reached
+// through its record is a candidate for that chunk. See #499.
+func TestProvidersHintWaitsForConnection(t *testing.T) {
+	t.Parallel()
+
+	run := providers.NewHintRun()
+	fake := &fakeProviders{hintRun: run}
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:    mockstorer.New(),
+		Post:      mockpost.New(mockpost.WithAcceptAll()),
+		Providers: fake,
+	})
+	ref := uploadForHintTest(t, client)
+
+	const delay = 300 * time.Millisecond
+	go func() {
+		time.Sleep(delay)
+		run.Add(providers.HintOutcome{Connected: 1})
+		run.Finish()
+	}()
+
+	start := time.Now()
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+ref.String(), http.StatusOK,
+		jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, swarm.RandAddress(t).String()),
+	)
+	if elapsed := time.Since(start); elapsed < delay {
+		t.Fatalf("download answered after %v, before the provider connected at %v", elapsed, delay)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.hintKeys) != 1 || !bytes.Equal(fake.hintKeys[0], ref.Bytes()) {
+		t.Fatalf("hint content keys %x, want the downloaded reference", fake.hintKeys)
+	}
+}
+
+// TestProvidersHintWaitIsBounded: a named provider that never connects delays
+// the download by the limit and no more.
+func TestProvidersHintWaitIsBounded(t *testing.T) {
+	t.Parallel()
+
+	const limit = 200 * time.Millisecond
+	run := providers.NewHintRun() // never finishes on its own
+	fake := &fakeProviders{hintRun: run}
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:          mockstorer.New(),
+		Post:            mockpost.New(mockpost.WithAcceptAll()),
+		Providers:       fake,
+		HintConnectWait: limit,
+	})
+	ref := uploadForHintTest(t, client)
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+ref.String(), http.StatusOK,
+			jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, swarm.RandAddress(t).String()),
+		)
+		done <- time.Since(start)
+	}()
+
+	select {
+	case elapsed := <-done:
+		if elapsed < limit {
+			t.Fatalf("download answered after %v, before the limit %v", elapsed, limit)
+		}
+	case <-time.After(5 * time.Second):
+		// release the request, so the server can shut down and the test
+		// reports the failure rather than hanging
+		run.Finish()
+		<-done
+		t.Fatal("the wait for a named provider is not bounded")
+	}
+}
+
+// TestProvidersHintedNotFoundSaysWhy: a hinted download that ends in 404 says
+// what happened to the named providers; one without the header keeps the
+// default message.
+func TestProvidersHintedNotFoundSaysWhy(t *testing.T) {
+	t.Parallel()
+
+	run := providers.NewHintRun()
+	run.Add(providers.HintOutcome{NoAddress: 1})
+	run.Finish()
+	fake := &fakeProviders{hintRun: run}
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer:    mockstorer.New(),
+		Post:      mockpost.New(mockpost.WithAcceptAll()),
+		Providers: fake,
+	})
+	missing := swarm.RandAddress(t)
+
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+missing.String(), http.StatusNotFound,
+		jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, swarm.RandAddress(t).String()),
+		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+			Code:    http.StatusNotFound,
+			Message: "not found; of the 1 named providers, 0 were connected, 1 had no known address and no provider record, 0 could not be dialled, 0 were still being tried",
+		}),
+	)
+	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+missing.String(), http.StatusNotFound,
+		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+			Code:    http.StatusNotFound,
+			Message: http.StatusText(http.StatusNotFound),
+		}),
+	)
+
+	// /bzz with a missing root ends at the manifest path's own 404, which
+	// keeps its message and adds the outcome.
+	jsonhttptest.Request(t, client, http.MethodGet, "/bzz/"+missing.String()+"/", http.StatusNotFound,
+		jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, swarm.RandAddress(t).String()),
+		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+			Code:    http.StatusNotFound,
+			Message: "address not found or incorrect; of the 1 named providers, 0 were connected, 1 had no known address and no provider record, 0 could not be dialled, 0 were still being tried",
+		}),
+	)
+	jsonhttptest.Request(t, client, http.MethodGet, "/bzz/"+missing.String()+"/", http.StatusNotFound,
+		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+			Code:    http.StatusNotFound,
+			Message: "address not found or incorrect",
+		}),
+	)
 }

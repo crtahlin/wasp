@@ -645,7 +645,11 @@ FETCH:
 
 		logger.Debug("bzz download: address not found or incorrect", "address", address, "path", pathVar)
 		logger.Error(nil, "address not found or incorrect")
-		jsonhttp.NotFound(w, "address not found or incorrect")
+		msg := "address not found or incorrect"
+		if outcome, ok := hintedOutcome(ctx); ok {
+			msg += "; " + outcome
+		}
+		jsonhttp.NotFound(w, msg)
 		return
 	}
 	me, err := m.Lookup(ctx, pathVar)
@@ -704,7 +708,7 @@ FETCH:
 
 			jsonhttp.NotFound(w, "path address not found")
 		} else {
-			jsonhttp.NotFound(w, nil)
+			jsonhttp.NotFound(w, hintedNotFound(ctx))
 		}
 		return
 	}
@@ -785,7 +789,7 @@ func (s *Service) downloadHandler(logger log.Logger, w http.ResponseWriter, r *h
 		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound) {
 			logger.Debug("api download: not found ", "address", reference, "error", err)
 			logger.Error(nil, err.Error())
-			jsonhttp.NotFound(w, nil)
+			jsonhttp.NotFound(w, hintedNotFound(ctx))
 			return
 		}
 		logger.Debug("api download: unexpected error", "address", reference, "error", err)

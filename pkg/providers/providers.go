@@ -222,18 +222,19 @@ func (s *Service) Close() error {
 }
 
 // goBackground runs f in a goroutine that Close waits for, unless the service
-// is already closed.
-func (s *Service) goBackground(f func()) {
+// is already closed. It reports whether f was started.
+func (s *Service) goBackground(f func()) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return
+		return false
 	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		f()
 	}()
+	return true
 }
 
 // Announce makes this node announce content key k, writing records and
@@ -405,14 +406,82 @@ func (s *Service) countConnect(alreadyConnected bool, err error, overlay swarm.A
 	}
 }
 
+// HintOutcome counts what happened to the providers named in one download
+// hint. It describes only the named overlays, never other providers.
+type HintOutcome struct {
+	// Connected is how many were connected, already or by a dial.
+	Connected int
+	// NoAddress is how many had neither an address book entry nor a
+	// provider record naming them.
+	NoAddress int
+	// DialFailed is how many had an address that could not be dialled.
+	DialFailed int
+}
+
+// HintRun is one ConnectHints run. Done is closed as soon as one named
+// provider is connected, or when every attempt has finished without one.
+type HintRun struct {
+	done chan struct{}
+	once sync.Once
+
+	mu      sync.Mutex
+	outcome HintOutcome
+}
+
+// NewHintRun returns a run that is still in progress. ConnectHints makes its
+// own; this is for callers that stand in for the service.
+func NewHintRun() *HintRun {
+	return &HintRun{done: make(chan struct{})}
+}
+
+// Finish closes Done. It may be called more than once.
+func (r *HintRun) Finish() {
+	r.once.Do(func() { close(r.done) })
+}
+
+// Add adds counts to the outcome.
+func (r *HintRun) Add(o HintOutcome) {
+	r.mu.Lock()
+	r.outcome.Connected += o.Connected
+	r.outcome.NoAddress += o.NoAddress
+	r.outcome.DialFailed += o.DialFailed
+	r.mu.Unlock()
+}
+
+// Done is closed when a named provider is connected or the run has ended.
+func (r *HintRun) Done() <-chan struct{} {
+	return r.done
+}
+
+// Outcome returns the counts so far. Attempts still running after Done are
+// not in it yet.
+func (r *HintRun) Outcome() HintOutcome {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.outcome
+}
+
 // ConnectHints connects, in the background, to the overlays named in a
-// download hint that the address book knows. It stops when ctx is done or the
-// service closes.
-func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
-	if s.opts.Resolve == nil || s.opts.Connect == nil {
-		return
+// download hint. An overlay is dialled at its address book address, and when
+// it has none, or that dial fails, at the address in its verified provider
+// record for content key k. k may be nil, for a download with no content key,
+// and then only the address book is used. The lookup runs at most once per
+// call and is served from the lookup cache when it can be. Records for
+// overlays that were not named are never dialled. See #499.
+//
+// The returned run's Done is closed as soon as one named provider is
+// connected, so a download can wait for it before fetching its first chunk.
+// The run stops when ctx is done, when its bound passes, or when the service
+// closes.
+func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address, k []byte) *HintRun {
+	run := NewHintRun()
+	if s.opts.Connect == nil {
+		run.Finish()
+		return run
 	}
-	s.goBackground(func() {
+	started := s.goBackground(func() {
+		defer run.Finish()
+
 		// Same reason as Discover: a hinted dial is worth having after the
 		// request that named it has gone, and deriving from that request
 		// cancels the dial when the response ends. See issue #369.
@@ -424,25 +493,122 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address) {
 
 		s.metrics.HintedConnectsStarted.Inc()
 
+		var (
+			records []*Record
+			looked  bool
+		)
+		recordAddress := func(o swarm.Address) *bzz.Address {
+			if len(k) != swarm.HashSize {
+				return nil
+			}
+			if !looked {
+				looked = true
+				var err error
+				if records, err = s.Lookup(ctx, k); err != nil {
+					s.logger.Debug("hinted provider lookup failed", "key", hex.EncodeToString(k), "error", err)
+				}
+			}
+			for _, r := range records {
+				if r.Address.Overlay.Equal(o) {
+					return r.Address
+				}
+			}
+			return nil
+		}
+
+		// First pass: the address book, for every named overlay at once, so
+		// a reachable provider is connected, and Done closed, without waiting
+		// for a slow or dead address named ahead of it.
+		type pending struct {
+			overlay swarm.Address
+			stale   *bzz.Address // the address book address that failed, if any
+		}
+		var (
+			fallbackMu sync.Mutex
+			fallback   []pending
+			wg         sync.WaitGroup
+		)
 		for _, o := range overlays {
-			// Unlike Discover, this returns rather than continuing: there is
-			// no preferred set to fill here, so once the run is cut off there
-			// is nothing left worth doing.
+			// A run cut off before it starts dials nothing.
 			if ctx.Err() != nil {
-				return
+				break
 			}
 			if o.Equal(s.opts.Overlay) {
 				continue
 			}
-			addr, err := s.opts.Resolve(o)
-			if err != nil {
-				s.logger.Debug("hinted provider not in the address book", "peer_address", o, "error", err)
+			var addr *bzz.Address
+			if s.opts.Resolve != nil {
+				a, err := s.opts.Resolve(o)
+				if err != nil {
+					s.logger.Debug("hinted provider not in the address book", "peer_address", o, "error", err)
+				} else {
+					addr = a
+				}
+			}
+			if addr == nil {
+				fallback = append(fallback, pending{overlay: o})
 				continue
 			}
-			already, err := s.opts.Connect(ctx, addr)
-			s.countConnect(already, err, o, "hinted provider")
+			wg.Add(1)
+			go func(o swarm.Address, addr *bzz.Address) {
+				defer wg.Done()
+				already, err := s.opts.Connect(ctx, addr)
+				s.countConnect(already, err, o, "hinted provider")
+				if err == nil {
+					run.Add(HintOutcome{Connected: 1})
+					run.Finish()
+					return
+				}
+				if ctx.Err() != nil {
+					return
+				}
+				fallbackMu.Lock()
+				fallback = append(fallback, pending{overlay: o, stale: addr})
+				fallbackMu.Unlock()
+			}(o, addr)
+		}
+		wg.Wait()
+		// Unlike Discover, this returns rather than continuing: there is no
+		// preferred set to fill here, so once the run is cut off there is
+		// nothing left worth doing.
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Second pass: the provider record, for each overlay the address
+		// book could not reach.
+		for _, p := range fallback {
+			if ctx.Err() != nil {
+				return
+			}
+			rec := recordAddress(p.overlay)
+			if rec == nil || (p.stale != nil && rec.Equal(p.stale)) {
+				// No record, or one that names the address that just failed.
+				if p.stale == nil {
+					run.Add(HintOutcome{NoAddress: 1})
+				} else {
+					run.Add(HintOutcome{DialFailed: 1})
+				}
+				continue
+			}
+			s.metrics.HintedRecordDials.Inc()
+			already, err := s.opts.Connect(ctx, rec)
+			s.countConnect(already, err, p.overlay, "hinted provider from its record")
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				run.Add(HintOutcome{DialFailed: 1})
+				continue
+			}
+			run.Add(HintOutcome{Connected: 1})
+			run.Finish()
 		}
 	})
+	if !started {
+		run.Finish()
+	}
+	return run
 }
 
 // runOnce writes the windows that are due for every announcement and

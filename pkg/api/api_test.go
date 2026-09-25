@@ -108,6 +108,7 @@ type testServerOptions struct {
 	AccessControl      accesscontrol.Controller
 	Steward            steward.Interface
 	Providers          api.Providers
+	HintConnectWait    time.Duration
 	LocalIngestEnabled bool
 	WsHeaders          http.Header
 	DirectUpload       bool
@@ -225,6 +226,9 @@ func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.
 	}
 
 	s := api.New(o.PublicKey, o.PSSPublicKey, o.EthereumAddress, []string{o.WhitelistedAddr}, o.Logger, transaction, o.BatchStore, o.BeeMode, !o.ChequebookDisabled, !o.SwapDisabled, backend, o.CORSAllowedOrigins, inmemstore.New())
+	if o.HintConnectWait != 0 {
+		s.SetHintConnectWait(o.HintConnectWait)
+	}
 	testutil.CleanupCloser(t, s)
 
 	s.SetP2P(o.P2P)
