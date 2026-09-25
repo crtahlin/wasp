@@ -516,17 +516,26 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address, k 
 			return nil
 		}
 
+		// First pass: the address book, for every named overlay at once, so
+		// a reachable provider is connected, and Done closed, without waiting
+		// for a slow or dead address named ahead of it.
+		type pending struct {
+			overlay swarm.Address
+			stale   *bzz.Address // the address book address that failed, if any
+		}
+		var (
+			fallbackMu sync.Mutex
+			fallback   []pending
+			wg         sync.WaitGroup
+		)
 		for _, o := range overlays {
-			// Unlike Discover, this returns rather than continuing: there is
-			// no preferred set to fill here, so once the run is cut off there
-			// is nothing left worth doing.
+			// A run cut off before it starts dials nothing.
 			if ctx.Err() != nil {
-				return
+				break
 			}
 			if o.Equal(s.opts.Overlay) {
 				continue
 			}
-
 			var addr *bzz.Address
 			if s.opts.Resolve != nil {
 				a, err := s.opts.Resolve(o)
@@ -536,22 +545,46 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address, k 
 					addr = a
 				}
 			}
-			if addr != nil {
+			if addr == nil {
+				fallback = append(fallback, pending{overlay: o})
+				continue
+			}
+			wg.Add(1)
+			go func(o swarm.Address, addr *bzz.Address) {
+				defer wg.Done()
 				already, err := s.opts.Connect(ctx, addr)
 				s.countConnect(already, err, o, "hinted provider")
 				if err == nil {
 					run.Add(HintOutcome{Connected: 1})
 					run.Finish()
-					continue
+					return
 				}
 				if ctx.Err() != nil {
 					return
 				}
-			}
+				fallbackMu.Lock()
+				fallback = append(fallback, pending{overlay: o, stale: addr})
+				fallbackMu.Unlock()
+			}(o, addr)
+		}
+		wg.Wait()
+		// Unlike Discover, this returns rather than continuing: there is no
+		// preferred set to fill here, so once the run is cut off there is
+		// nothing left worth doing.
+		if ctx.Err() != nil {
+			return
+		}
 
-			rec := recordAddress(o)
-			if rec == nil {
-				if addr == nil {
+		// Second pass: the provider record, for each overlay the address
+		// book could not reach.
+		for _, p := range fallback {
+			if ctx.Err() != nil {
+				return
+			}
+			rec := recordAddress(p.overlay)
+			if rec == nil || (p.stale != nil && rec.Equal(p.stale)) {
+				// No record, or one that names the address that just failed.
+				if p.stale == nil {
 					run.Add(HintOutcome{NoAddress: 1})
 				} else {
 					run.Add(HintOutcome{DialFailed: 1})
@@ -560,8 +593,11 @@ func (s *Service) ConnectHints(ctx context.Context, overlays []swarm.Address, k 
 			}
 			s.metrics.HintedRecordDials.Inc()
 			already, err := s.opts.Connect(ctx, rec)
-			s.countConnect(already, err, o, "hinted provider from its record")
+			s.countConnect(already, err, p.overlay, "hinted provider from its record")
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				run.Add(HintOutcome{DialFailed: 1})
 				continue
 			}

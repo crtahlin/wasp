@@ -70,6 +70,8 @@ type providerHint struct {
 	// run is the connect run for providers named in WaspProvidersHeader;
 	// nil when the request named none.
 	run *providers.HintRun
+	// named is how many providers the request named.
+	named int
 }
 
 // withProviders prepares a download for content providers when they are on.
@@ -112,6 +114,7 @@ func (s *Service) withProviders(r *http.Request, k []byte) (*http.Request, error
 		// fetched, so a provider reached through its record, or dialled at
 		// all, is a candidate for that chunk. See #499.
 		hint.run = s.providers.ConnectHints(ctx, overlays, k)
+		hint.named = len(overlays)
 		wait := s.hintConnectWait
 		if wait == 0 {
 			wait = hintConnectWait
@@ -127,17 +130,30 @@ func (s *Service) withProviders(r *http.Request, k []byte) (*http.Request, error
 	return r.WithContext(ctx), nil
 }
 
+// hintedOutcome describes what happened to the providers a download named,
+// for its 404 message, and reports false for a download that named none.
+// Dials may still be running when it is read, after the wait for a
+// connection timed out, and those are counted as still being tried.
+func hintedOutcome(ctx context.Context) (string, bool) {
+	hint, ok := ctx.Value(providerHintKey{}).(*providerHint)
+	if !ok || hint.run == nil {
+		return "", false
+	}
+	o := hint.run.Outcome()
+	trying := max(hint.named-o.Connected-o.NoAddress-o.DialFailed, 0)
+	return fmt.Sprintf("of the %d named providers, %d were connected, %d had no known address and no provider record, %d could not be dialled, %d were still being tried",
+		hint.named, o.Connected, o.NoAddress, o.DialFailed, trying), true
+}
+
 // hintedNotFound returns the 404 message for a download that did not find
 // its content: for a download that named providers, what happened to them,
 // and nil otherwise, which keeps the default message.
 func hintedNotFound(ctx context.Context) any {
-	hint, ok := ctx.Value(providerHintKey{}).(*providerHint)
-	if !ok || hint.run == nil {
+	outcome, ok := hintedOutcome(ctx)
+	if !ok {
 		return nil
 	}
-	o := hint.run.Outcome()
-	return fmt.Sprintf("not found; no named provider could be used: %d had no known address and no provider record, %d could not be dialled, %d were connected",
-		o.NoAddress, o.DialFailed, o.Connected)
+	return "not found; " + outcome
 }
 
 // providerGetter wraps the getter of a download so that, once the download

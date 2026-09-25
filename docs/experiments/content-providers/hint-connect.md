@@ -84,9 +84,16 @@ every attempt has finished without success. `withProviders` waits on it for at
 most `hintConnectWait`, **10 seconds**, before returning. The remaining dials
 carry on in the background, bounded by `discoverBound()` as today.
 
-- A request whose named provider is already connected returns at once: the
-  channel closes on the first check, and no lookup runs.
+- A request whose named provider is already connected returns after that one
+  dial, and no lookup runs. **Corrected during review:** the address book dials
+  for all named overlays run at once, before any record fallback, so a dead
+  address named first cannot hold up a reachable provider named second, which
+  a one-at-a-time loop did.
 - A request without the header is unaffected: nothing waits.
+- `/chunks` and `/feeds` also call `withProviders`, so a hinted request there
+  waits too, with only the address book as a source, and so do HEAD requests on
+  `/bytes` and `/bzz`. (Added during review; the earlier text named only
+  `/bytes` and `/bzz`.)
 - `hintConnectWait` is a constant, as `discoverAfterChunks` is. It is not
   exposed as an option until a measurement shows it matters (rule 8).
 
@@ -99,11 +106,18 @@ When a download that carried `Wasp-Providers` ends in 404, the message says what
 happened to the named providers, from what step 1 recorded:
 
 ```
-not found; no named provider could be used: 1 had no known address and no provider record, 0 could not be dialled, 0 were connected
+not found; of the 1 named providers, 0 were connected, 1 had no known address and no provider record, 0 could not be dialled, 0 were still being tried
 ```
 
 A download without the header keeps the current empty 404 body. The counts are
 per request and describe the named providers only.
+
+**Corrected during review of the implementation.** The wording above replaces
+an earlier one, "no named provider could be used: ...", which contradicted
+itself when a provider had connected but did not deliver, and which could not
+count dials still running after the wait timed out. On `/bzz`, a missing root
+ends at the manifest path's own 404, "address not found or incorrect", so the
+outcome is appended to that message rather than replacing it.
 
 ### Not changed
 

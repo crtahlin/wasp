@@ -282,3 +282,62 @@ func TestConnectHintsDoneAtFirstConnection(t *testing.T) {
 		t.Fatal("Done waited for every dial, not the first connection")
 	}
 }
+
+// TestConnectHintsReachableSecondNotDelayed: a provider named second that the
+// address book reaches is connected, and Done closed, while the dial to a dead
+// address named first is still running.
+func TestConnectHintsReachableSecondNotDelayed(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	dead, ok, b := newNode(t, 1), newNode(t, 1), newNode(t, 1)
+
+	release := make(chan struct{})
+	defer close(release)
+	connect := func(ctx context.Context, addr *bzz.Address) (bool, error) {
+		if addr.Overlay.Equal(dead.addr.Overlay) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return false, errors.New("dial failed")
+		}
+		return false, ctx.Err()
+	}
+	resolve := func(o swarm.Address) (*bzz.Address, error) {
+		if o.Equal(dead.addr.Overlay) {
+			return dead.addr, nil
+		}
+		return ok.addr, nil
+	}
+	reader := newServiceResolving(t, n, b, c, connect, resolve)
+	run := reader.ConnectHints(context.Background(), []swarm.Address{dead.addr.Overlay, ok.addr.Overlay}, swarm.RandAddress(t).Bytes())
+
+	select {
+	case <-run.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a reachable provider waited for the dial to one named ahead of it")
+	}
+}
+
+// TestConnectHintsNoRedialOfSameAddress: a record that names the address the
+// address book dial just failed on is not dialled again.
+func TestConnectHintsNoRedialOfSameAddress(t *testing.T) {
+	t.Parallel()
+
+	n, c := newNetwork(), &clock{t: midWindow(1000)}
+	a, b := newNode(t, 1), newNode(t, 1)
+	k := announced(t, n, c, a)
+
+	dials := &dialLog{ok: func(*bzz.Address) bool { return false }}
+	reader := newServiceResolving(t, n, b, c, dials.connect, func(swarm.Address) (*bzz.Address, error) { return a.addr, nil })
+	run := reader.ConnectHints(context.Background(), []swarm.Address{a.addr.Overlay}, k)
+	waitRun(t, run)
+
+	if got := dials.list(); len(got) != 1 {
+		t.Fatalf("dialed %v, want the one address once", got)
+	}
+	if o := run.Outcome(); o.DialFailed != 1 {
+		t.Fatalf("outcome %+v, want one that could not be dialled", o)
+	}
+}

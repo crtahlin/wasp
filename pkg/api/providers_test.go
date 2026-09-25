@@ -533,13 +533,29 @@ func TestProvidersHintedNotFoundSaysWhy(t *testing.T) {
 		jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, swarm.RandAddress(t).String()),
 		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
 			Code:    http.StatusNotFound,
-			Message: "not found; no named provider could be used: 1 had no known address and no provider record, 0 could not be dialled, 0 were connected",
+			Message: "not found; of the 1 named providers, 0 were connected, 1 had no known address and no provider record, 0 could not be dialled, 0 were still being tried",
 		}),
 	)
 	jsonhttptest.Request(t, client, http.MethodGet, "/bytes/"+missing.String(), http.StatusNotFound,
 		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
 			Code:    http.StatusNotFound,
 			Message: http.StatusText(http.StatusNotFound),
+		}),
+	)
+
+	// /bzz with a missing root ends at the manifest path's own 404, which
+	// keeps its message and adds the outcome.
+	jsonhttptest.Request(t, client, http.MethodGet, "/bzz/"+missing.String()+"/", http.StatusNotFound,
+		jsonhttptest.WithRequestHeader(api.WaspProvidersHeader, swarm.RandAddress(t).String()),
+		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+			Code:    http.StatusNotFound,
+			Message: "address not found or incorrect; of the 1 named providers, 0 were connected, 1 had no known address and no provider record, 0 could not be dialled, 0 were still being tried",
+		}),
+	)
+	jsonhttptest.Request(t, client, http.MethodGet, "/bzz/"+missing.String()+"/", http.StatusNotFound,
+		jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+			Code:    http.StatusNotFound,
+			Message: "address not found or incorrect",
 		}),
 	)
 }

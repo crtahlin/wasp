@@ -561,7 +561,7 @@ FETCH:
 	if err != nil {
 		logger.Debug("bzz download: not manifest", "address", address, "error", err)
 		logger.Error(nil, "not manifest")
-		jsonhttp.NotFound(w, hintedNotFound(ctx))
+		jsonhttp.NotFound(w, nil)
 		return
 	}
 
@@ -645,7 +645,11 @@ FETCH:
 
 		logger.Debug("bzz download: address not found or incorrect", "address", address, "path", pathVar)
 		logger.Error(nil, "address not found or incorrect")
-		jsonhttp.NotFound(w, "address not found or incorrect")
+		msg := "address not found or incorrect"
+		if outcome, ok := hintedOutcome(ctx); ok {
+			msg += "; " + outcome
+		}
+		jsonhttp.NotFound(w, msg)
 		return
 	}
 	me, err := m.Lookup(ctx, pathVar)
@@ -704,7 +708,7 @@ FETCH:
 
 			jsonhttp.NotFound(w, "path address not found")
 		} else {
-			jsonhttp.NotFound(w, nil)
+			jsonhttp.NotFound(w, hintedNotFound(ctx))
 		}
 		return
 	}
