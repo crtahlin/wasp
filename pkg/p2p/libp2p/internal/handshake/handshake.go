@@ -96,6 +96,9 @@ type Service struct {
 	advMu      sync.Mutex
 	advertised []ma.Multiaddr // pinned advertised underlay set; nil until a public address is seen
 	advStale   int            // consecutive handshakes whose observation lacked the pinned public IP
+	// natMismatch counts consecutive handshakes whose observed public IP is not
+	// advertised, the sign of a nat-addr that has gone stale. See #500.
+	natMismatch int
 }
 
 // advertisedUnderlayRepinThreshold is how many consecutive handshakes must observe
@@ -200,8 +203,10 @@ func (s *Service) signedAddress(underlays []ma.Multiaddr) (*bzz.Address, error) 
 // per connection, so peers observe the same public IP with different ports, and
 // comparing whole addresses would treat every remapped port as a change and churn.
 //
-// A configured nat-addr already yields a constant set, so this adopts it once and
-// never changes it: a no-op.
+// A nat-addr that carries a host yields a constant set, so this adopts it once and
+// never changes it: a no-op. A port-only nat-addr (":1634") does not: the resolver
+// keeps each observed IP and replaces only the port, so this follows a public IP
+// change exactly as it does with no nat-addr. See #500.
 func (s *Service) stabilizeUnderlays(computed []ma.Multiaddr) []ma.Multiaddr {
 	s.advMu.Lock()
 	defer s.advMu.Unlock()
@@ -336,6 +341,7 @@ func (s *Service) Handshake(ctx context.Context, stream p2p.Stream, peerMultiadd
 
 		advertisableUnderlays[i] = advertisableUnderlay
 	}
+	s.checkNATAddr(observedUnderlays, advertisableUnderlays)
 
 	if s.hostAddresser != nil {
 		hostAddrs, err := s.hostAddresser.AdvertizableAddrs()
@@ -442,6 +448,7 @@ func (s *Service) Handle(ctx context.Context, stream p2p.Stream, peerMultiaddrs 
 		}
 		advertisableUnderlays[i] = advertisableUnderlay
 	}
+	s.checkNATAddr(observedUnderlays, advertisableUnderlays)
 
 	if s.hostAddresser != nil {
 		hostAddrs, err := s.hostAddresser.AdvertizableAddrs()
