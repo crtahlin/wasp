@@ -22,7 +22,11 @@ Content stored with `POST /wasp/ingest` is pinned already, and the ingest can
 announce it in the same call: send `Swarm-Postage-Batch-Id` with the ingest.
 The response then carries `announced`, and `announceError` when the
 announcement failed. A failed announcement does not fail the ingest, so check
-`announced` rather than the status code, and announce later with step 2 (#503).
+`announced` rather than the status code, and announce later with step 2
+([#503](https://github.com/crtahlin/wasp/issues/503)). If the client gives up
+before the answer arrives, the content may be stored but not announced: check
+`GET /wasp/providers`, or send the same ingest again, which answers 200 and
+announces.
 
 ## What announcing costs
 

@@ -6,6 +6,7 @@ package api_test
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -72,6 +73,19 @@ func TestLocalIngestAnnounces(t *testing.T) {
 	fake.mu.Unlock()
 	if !bytes.Equal(batch, batchOk) {
 		t.Fatalf("announced with batch %x, want the request's %x", batch, batchOk)
+	}
+
+	// and the node lists it, as an operator would check
+	var list struct {
+		Announcements []struct {
+			Reference string `json:"reference"`
+		} `json:"announcements"`
+	}
+	jsonhttptest.Request(t, client, http.MethodGet, "/wasp/providers", http.StatusOK,
+		jsonhttptest.WithUnmarshalJSONResponse(&list),
+	)
+	if len(list.Announcements) != 1 || list.Announcements[0].Reference != resp.Reference.String() {
+		t.Fatalf("GET /wasp/providers lists %+v, want the ingested reference %s", list.Announcements, resp.Reference)
 	}
 }
 
@@ -144,6 +158,7 @@ func TestLocalIngestAnnounceFailureKeepsIngest(t *testing.T) {
 	}{
 		{"unusable batch", postage.ErrNotUsable, "batch not usable yet or does not exist"},
 		{"unknown batch", postage.ErrNotFound, "batch with id not found"},
+		{"any other failure", errors.New("stamper: store closed"), "announce failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -229,6 +244,27 @@ func TestLocalIngestAnnounceRefusedBeforeBody(t *testing.T) {
 			jsonhttptest.Request(t, client, http.MethodPost, localIngestResource, http.StatusCreated, headers...)
 		})
 	}
+}
+
+// TestLocalIngestAnnounceMalformedBatch: a batch ID that is not hex fails
+// header validation before anything is stored.
+func TestLocalIngestAnnounceMalformedBatch(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeProviders{}
+	client := ingestAnnounceServer(t, fake, api.FullMode)
+	content := localIngestContent(t, swarm.ChunkSize*2)
+
+	jsonhttptest.Request(t, client, http.MethodPost, localIngestResource, http.StatusBadRequest,
+		jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, "not-hex"),
+		jsonhttptest.WithRequestBody(bytes.NewReader(content)),
+	)
+	if len(announcedKeys(fake)) != 0 {
+		t.Fatal("announced after a malformed batch ID")
+	}
+	jsonhttptest.Request(t, client, http.MethodPost, localIngestResource, http.StatusCreated,
+		jsonhttptest.WithRequestBody(bytes.NewReader(content)),
+	)
 }
 
 // TestLocalIngestWithoutBatch: no batch, no announcement, and the body is
