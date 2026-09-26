@@ -102,4 +102,3 @@ echo "$notes" | grep -qF "docs/DIFFERENCES.md](https://github.com/" || fail "the
 echo "$notes" | grep -qF "$heading" || fail "the built notes do not carry the CHANGELOG section $heading"
 
 echo "ok: built notes for v$version, $(echo "$notes" | wc -l | tr -d ' ') lines, all five parts"
-
