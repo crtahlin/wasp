@@ -6,12 +6,13 @@ package p2p_test
 
 import (
 	"context"
+	"errors"
+	"net"
 	"testing"
-
-	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/ethersphere/bee/v2/pkg/bzz"
 	"github.com/ethersphere/bee/v2/pkg/p2p"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 // TestTCPPreferenceOrdering verifies that sortAddrsByTCPPreference places TCP
@@ -129,6 +130,14 @@ func TestDiscoverDNS(t *testing.T) {
 				resolved = append(resolved, a)
 				return false, nil
 			})
+			// The lookup goes over the internet, so a resolver failure on the
+			// test runner says nothing about the records. Skip on it rather
+			// than fail the run; an empty or wrong resolution still fails
+			// below. See #507.
+			var dnsErr *net.DNSError
+			if errors.As(err, &dnsErr) {
+				t.Skipf("Discover(%q): DNS resolution failed on this runner, not checking the records: %v", tc.bootnode, err)
+			}
 			if err != nil {
 				t.Fatalf("Discover(%q): %v", tc.bootnode, err)
 			}

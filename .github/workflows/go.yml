@@ -34,11 +34,78 @@ concurrency:
 
 jobs:
   test:
+    # macOS and Windows build and test without the race detector. Data races do
+    # not depend on the operating system, so the race detector runs once, on
+    # Ubuntu, in the test-race shards below (#519).
     name: Test
     runs-on: ${{ matrix.os }}
     strategy:
+      # A failure on one operating system must not cancel the others (#519).
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest, windows-latest]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        cache: true
+        go-version-file: go.mod
+    - name: Are there code changes?
+      id: changed
+      shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Documentation-only pull requests still report these contexts, but
+        # skip the work. Compare against the merge base rather than the tip so
+        # a stale base does not look like a code change.
+        if [ "${{ github.event_name }}" != "pull_request" ]; then
+          echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+        fi
+        # Ask GitHub which files changed rather than diffing locally.
+        # actions/checkout fetches depth 1, so `git diff base...HEAD` has no
+        # merge base and dies with "no merge base" — which is what happened on
+        # the first documentation-only pull request after this was added.
+        # Harmlessly, because the detector fails open, but it meant the skip
+        # never once engaged.
+        FILES=$(gh api --paginate \
+          "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+          --jq '.[].filename' 2>/dev/null || echo "")
+        # Fail open: no evidence means run everything, never skip.
+        if [ -z "$FILES" ]; then
+          echo "could not determine changed files; running everything"
+          echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+        fi
+        echo "changed files:"; echo "$FILES" | sed 's/^/  /'
+        if echo "$FILES" | grep -qvE '(\.md$|^packaging/|^openapi/|^\.github/ISSUE_TEMPLATE/)'; then
+          echo "code=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "code=false" >> "$GITHUB_OUTPUT"
+          echo "documentation-only change; skipping build and tests"
+        fi
+    - name: Increase UDP buffer sizes (macOS)
+      if: matrix.os == 'macos-latest' && steps.changed.outputs.code == 'true'
+      run: |
+        sudo sysctl -w kern.ipc.maxsockbuf=6291456
+    - name: Build
+      if: steps.changed.outputs.code == 'true'
+      run: make build
+    - name: Test without race detector
+      if: steps.changed.outputs.code == 'true'
+      run: make test-ci
+  test-race:
+    # The Ubuntu race run, split so the slowest package, pkg/api, no longer
+    # holds everything else up (#519). The shards run through make, which
+    # exports GOEXPERIMENT=nogreenteagc (#69); calling go test directly would
+    # drop it.
+    name: Test race (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [api, storage, rest]
     steps:
     - name: Checkout
       uses: actions/checkout@v5
@@ -81,19 +148,15 @@ jobs:
           echo "documentation-only change; skipping build and tests"
         fi
     - name: Increase UDP buffer sizes (Ubuntu)
-      if: matrix.os == 'ubuntu-latest' && steps.changed.outputs.code == 'true'
+      if: steps.changed.outputs.code == 'true'
       run: |
         sudo sysctl -w net.core.rmem_max=7500000
         sudo sysctl -w net.core.wmem_max=7500000
-    - name: Increase UDP buffer sizes (macOS)
-      if: matrix.os == 'macos-latest' && steps.changed.outputs.code == 'true'
-      run: |
-        sudo sysctl -w kern.ipc.maxsockbuf=6291456
     - name: Build
       if: steps.changed.outputs.code == 'true'
       run: make build
     - name: SIMD stub must run on a scratch stack
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.shard == 'rest'
       # Guards #92. The stub must switch SP to a caller-supplied scratch stack
       # before calling the XKCP blob. Running that foreign code on the goroutine
       # stack corrupts memory and kills the node in ~12 minutes under load.
@@ -141,7 +204,7 @@ jobs:
         [ "$fail" -eq 0 ] || exit 1
         echo "ok: both SIMD stubs switch to a scratch stack, restore it, cross-check it, and read their arguments first"
     - name: Green Tea GC must stay disabled
-      if: matrix.os == 'ubuntu-latest' && steps.changed.outputs.code == 'true'
+      if: matrix.shard == 'rest' && steps.changed.outputs.code == 'true'
       # Guards issue #69: Go 1.26's default Green Tea GC corrupts the heap under
       # wasp's allocation profile. This is invisible until a node crashes in
       # production, so assert the build setting is actually recorded in the binary.
@@ -154,12 +217,45 @@ jobs:
           exit 1
         fi
         echo "ok: $(go version -m dist/bee | grep GOEXPERIMENT | tr -s ' ')"
-    - name: Test with race detector (Ubuntu and MacOS)
-      if: matrix.os != 'windows-latest' && steps.changed.outputs.code == 'true'
-      run: make test-ci-race
-    - name: Test without race detector (Windows)
-      if: matrix.os == 'windows-latest' && steps.changed.outputs.code == 'true'
-      run: make test-ci
+    - name: Select the shard's packages
+      id: pkgs
+      if: steps.changed.outputs.code == 'true'
+      shell: bash
+      run: |
+        # rest is the complement of the other shards, so a new package can
+        # never be left out of the race run.
+        heavy='/pkg/(api|storageincentives|storer)(/|$)'
+        case "${{ matrix.shard }}" in
+          api)     pkgs=$(go list ./pkg/api/...) ;;
+          storage) pkgs=$(go list ./pkg/storageincentives/... ./pkg/storer/...) ;;
+          rest)    pkgs=$(go list ./... | grep -vE "$heavy") ;;
+        esac
+        # The three shards together must be exactly go list ./...
+        all=$(go list ./... | sort)
+        union=$( { go list ./pkg/api/... ./pkg/storageincentives/... ./pkg/storer/...; go list ./... | grep -vE "$heavy"; } | sort -u)
+        if [ "$all" != "$union" ]; then
+          echo "::error::the race shards do not cover exactly go list ./..."
+          diff <(echo "$all") <(echo "$union") || true
+          exit 1
+        fi
+        echo "shard ${{ matrix.shard }}: $(echo "$pkgs" | wc -l) packages of $(echo "$all" | wc -l)"
+        echo "list=$(echo $pkgs)" >> "$GITHUB_OUTPUT"
+    - name: Test with race detector
+      if: steps.changed.outputs.code == 'true'
+      run: make test-ci-race TEST_PKGS="${{ steps.pkgs.outputs.list }}"
+  test-ubuntu:
+    # Branch protection requires a check named "Test (ubuntu-latest)". It keeps
+    # that name and passes only when every race shard passed (#519).
+    name: Test (ubuntu-latest)
+    needs: test-race
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: All race shards passed
+      run: |
+        result='${{ needs.test-race.result }}'
+        echo "race shards: $result"
+        [ "$result" = "success" ]
   lint:
     name: Lint
     runs-on: ubuntu-latest

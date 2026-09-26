@@ -69,6 +69,10 @@ export GOEXPERIMENT
 # just later — while a slow-but-correct suite stops being reported as broken.
 TEST_TIMEOUT ?= 30m
 
+# TEST_PKGS selects the packages test-ci and test-ci-race run. CI splits the
+# race run into shards with it (#519); locally it defaults to everything.
+TEST_PKGS ?= ./...
+
 .PHONY: all
 all: build lint test-race binary
 
@@ -166,18 +170,18 @@ endif
 .PHONY: test-ci
 test-ci:
 ifdef cover
-	$(GO) test -timeout $(TEST_TIMEOUT) -coverprofile=cover.out ./...
+	$(GO) test -timeout $(TEST_TIMEOUT) -coverprofile=cover.out $(TEST_PKGS)
 else
-	$(GO) test -timeout $(TEST_TIMEOUT) ./...
+	$(GO) test -timeout $(TEST_TIMEOUT) $(TEST_PKGS)
 endif
 
 
 .PHONY: test-ci-race
 test-ci-race:
 ifdef cover
-	$(GO) test -race -timeout $(TEST_TIMEOUT) -coverprofile=cover.out ./...
+	$(GO) test -race -timeout $(TEST_TIMEOUT) -coverprofile=cover.out $(TEST_PKGS)
 else
-	$(GO) test -race -timeout $(TEST_TIMEOUT) ./...
+	$(GO) test -race -timeout $(TEST_TIMEOUT) $(TEST_PKGS)
 endif
 
 .PHONY: build
