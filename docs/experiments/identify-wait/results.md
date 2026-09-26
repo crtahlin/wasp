@@ -61,8 +61,8 @@ the bench NAT, on `main`. Three runs per condition, each on a new node, with
 
 Every download returned the right bytes. The downloads are slow because an
 ultra-light node pays only by time allowance; that is the same for every row.
-Before the first byte arrives, a fresh requester spends about 1.6 to 2.1 s
-with a hint and about 4.0 to 4.6 s on the lookup path, measured against the
+Before the first byte arrives, a fresh requester spends about 1.2 to 2.1 s
+with a hint and about 4.1 to 4.7 s on the lookup path, measured against the
 connected control on the same kind of node. The connect itself is a quarter of
 a second, against 10.5 s before #511.
 
