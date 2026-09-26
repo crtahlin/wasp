@@ -17,6 +17,7 @@ import (
 
 	"github.com/ethersphere/bee/v2/pkg/file/redundancy"
 	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -36,6 +37,13 @@ type localIngestResponse struct {
 	// this content. It stops being true once anyone retrieves it through a
 	// forwarding peer, which caches what it relays.
 	SoleSource bool `json:"soleSource"`
+	// Announced is set only when the request carried a batch to announce
+	// with, and says whether the announcement succeeded. A failed
+	// announcement does not fail the ingest, whose content is stored either
+	// way, so the status code alone does not show it (#503).
+	Announced *bool `json:"announced,omitempty"`
+	// AnnounceError is the announce endpoint's message for the failure.
+	AnnounceError string `json:"announceError,omitempty"`
 }
 
 type localIngestFullResponse struct {
@@ -66,10 +74,31 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 		Encrypt bool              `map:"Swarm-Encrypt"`
 		RLevel  *redundancy.Level `map:"Swarm-Redundancy-Level" validate:"omitempty,rLevel"`
 		IsDir   bool              `map:"Swarm-Collection"`
+		BatchID []byte            `map:"Swarm-Postage-Batch-Id"`
 	}{}
 	if response := s.mapStructure(r.Header, &headers); response != nil {
 		response("invalid header params", logger, w)
 		return
+	}
+
+	// A batch asks for the reference to be announced once it is stored. The
+	// batch stamps only the provider record, never the content. An
+	// announcement that can never succeed is refused here, before the body
+	// is read, so nothing is stored for it. The checks and their answers are
+	// the announce endpoint's.
+	announce := len(headers.BatchID) > 0
+	if announce {
+		if !s.providersEnabled(w) {
+			return
+		}
+		if s.beeMode != FullMode {
+			jsonhttp.BadRequest(w, "only a full node can announce content")
+			return
+		}
+		if headers.Encrypt {
+			jsonhttp.BadRequest(w, "encrypted references cannot be announced: a record would publish their key")
+			return
+		}
 	}
 
 	// A directory is selected by the header alone, deliberately not by the
@@ -289,11 +318,15 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 				logger.Debug("local ingest: cleanup after duplicate failed", "error", err)
 				logger.Error(nil, "local ingest: cleanup after a duplicate failed, its chunks stay on disk counted by nothing until the next restart")
 			}
-			jsonhttp.OK(w, localIngestResponse{
+			resp := localIngestResponse{
 				Reference:  reference,
 				Chunks:     chunks,
 				SoleSource: false,
-			})
+			}
+			if announce {
+				s.ingestAnnounce(r.Context(), logger, &resp, headers.BatchID)
+			}
+			jsonhttp.OK(w, resp)
 			return
 		}
 		logger.Debug("local ingest: done failed", "error", err)
@@ -312,11 +345,31 @@ func (s *Service) localIngestHandler(w http.ResponseWriter, r *http.Request) {
 
 	logger.Debug("local ingest stored", "reference", reference, "chunks", chunks)
 
-	jsonhttp.Created(w, localIngestResponse{
+	resp := localIngestResponse{
 		Reference:  reference,
 		Chunks:     chunks,
 		SoleSource: true,
-	})
+	}
+	if announce {
+		s.ingestAnnounce(r.Context(), logger, &resp, headers.BatchID)
+	}
+	jsonhttp.Created(w, resp)
+}
+
+// ingestAnnounce announces a stored ingest and records the outcome in resp.
+// It calls Announce directly rather than going through the announce handler:
+// an ingest is an ordinary pinning collection, so that handler's pin check
+// always passes here. For a collection the reference is the manifest root,
+// which is what a download of the collection names.
+func (s *Service) ingestAnnounce(ctx context.Context, logger log.Logger, resp *localIngestResponse, batchID []byte) {
+	ok := true
+	if err := s.providers.Announce(ctx, resp.Reference.Bytes(), batchID); err != nil {
+		ok = false
+		_, resp.AnnounceError = announceFailure(err)
+		logger.Debug("local ingest: announce failed", "reference", resp.Reference, "error", err)
+		logger.Warning("local ingest: content stored but not announced; announce it with POST /wasp/providers/{reference}", "reference", resp.Reference, "reason", resp.AnnounceError)
+	}
+	resp.Announced = &ok
 }
 
 func respondLocalIngestFull(w http.ResponseWriter, held, limit uint64) {

@@ -387,18 +387,26 @@ func (s *Service) providersAnnounceHandler(w http.ResponseWriter, r *http.Reques
 	if err := s.providers.Announce(r.Context(), paths.Reference.Bytes(), headers.BatchID); err != nil {
 		logger.Debug("announce failed", "reference", paths.Reference, "error", err)
 		logger.Error(nil, "announce failed")
-		switch {
-		case errors.Is(err, postage.ErrNotUsable), errors.Is(err, errBatchUnusable):
-			jsonhttp.UnprocessableEntity(w, "batch not usable yet or does not exist")
-		case errors.Is(err, postage.ErrNotFound):
-			jsonhttp.NotFound(w, "batch with id not found")
-		default:
-			jsonhttp.InternalServerError(w, "announce failed")
-		}
+		status, msg := announceFailure(err)
+		jsonhttp.Respond(w, status, msg)
 		return
 	}
 
 	jsonhttp.Created(w, nil)
+}
+
+// announceFailure is the status and message for a failed Announce. The
+// announce endpoint answers with both; an ingest that also announces reports
+// the message only, since its own status stands (#503).
+func announceFailure(err error) (int, string) {
+	switch {
+	case errors.Is(err, postage.ErrNotUsable), errors.Is(err, errBatchUnusable):
+		return http.StatusUnprocessableEntity, "batch not usable yet or does not exist"
+	case errors.Is(err, postage.ErrNotFound):
+		return http.StatusNotFound, "batch with id not found"
+	default:
+		return http.StatusInternalServerError, "announce failed"
+	}
 }
 
 func (s *Service) providersWithdrawHandler(w http.ResponseWriter, r *http.Request) {
