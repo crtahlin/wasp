@@ -9,10 +9,12 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
+
+	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/ethersphere/bee/v2/pkg/bzz"
 	"github.com/ethersphere/bee/v2/pkg/p2p"
-	ma "github.com/multiformats/go-multiaddr"
 )
 
 // TestTCPPreferenceOrdering verifies that sortAddrsByTCPPreference places TCP
@@ -125,18 +127,31 @@ func TestDiscoverDNS(t *testing.T) {
 				t.Fatalf("parse multiaddr %q: %v", tc.bootnode, err)
 			}
 
+			// The lookup goes over the internet, and a runner's resolver can
+			// fail for a moment. Retry a resolver error a few times. If it
+			// persists, tell a broken resolver on this runner, which is no
+			// reason to fail, from a record that is really gone, which is
+			// what this test exists to catch: resolve a control name, and
+			// skip only when that fails too. See #507.
 			var resolved []ma.Multiaddr
-			_, err = p2p.Discover(context.Background(), addr, func(a ma.Multiaddr) (bool, error) {
-				resolved = append(resolved, a)
-				return false, nil
-			})
-			// The lookup goes over the internet, so a resolver failure on the
-			// test runner says nothing about the records. Skip on it rather
-			// than fail the run; an empty or wrong resolution still fails
-			// below. See #507.
+			for attempt := 1; ; attempt++ {
+				resolved = nil
+				_, err = p2p.Discover(context.Background(), addr, func(a ma.Multiaddr) (bool, error) {
+					resolved = append(resolved, a)
+					return false, nil
+				})
+				var dnsErr *net.DNSError
+				if !errors.As(err, &dnsErr) || attempt == 3 {
+					break
+				}
+				time.Sleep(2 * time.Second)
+			}
 			var dnsErr *net.DNSError
 			if errors.As(err, &dnsErr) {
-				t.Skipf("Discover(%q): DNS resolution failed on this runner, not checking the records: %v", tc.bootnode, err)
+				if _, cerr := net.DefaultResolver.LookupHost(context.Background(), "ethswarm.org"); cerr != nil {
+					t.Skipf("Discover(%q): DNS does not work on this runner (control lookup: %v), not checking the records: %v", tc.bootnode, cerr, err)
+				}
+				t.Fatalf("Discover(%q): the record does not resolve although DNS works on this runner: %v", tc.bootnode, err)
 			}
 			if err != nil {
 				t.Fatalf("Discover(%q): %v", tc.bootnode, err)

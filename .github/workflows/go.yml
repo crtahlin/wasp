@@ -230,6 +230,12 @@ jobs:
           storage) pkgs=$(go list ./pkg/storageincentives/... ./pkg/storer/...) ;;
           rest)    pkgs=$(go list ./... | grep -vE "$heavy") ;;
         esac
+        # An empty list would make make fall back to nothing and go test run
+        # the repository root instead, so refuse it.
+        if [ -z "$pkgs" ]; then
+          echo "::error::shard ${{ matrix.shard }} selected no packages"
+          exit 1
+        fi
         # The three shards together must be exactly go list ./...
         all=$(go list ./... | sort)
         union=$( { go list ./pkg/api/... ./pkg/storageincentives/... ./pkg/storer/...; go list ./... | grep -vE "$heavy"; } | sort -u)
