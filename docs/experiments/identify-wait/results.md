@@ -43,4 +43,34 @@ connects to a responder whose peerstore has no address for the dialler. It takes
 20 s (#513) because of this delay. With #511 in place, a smaller bound may be
 enough; that needs its own measurement before changing.
 
+## The provider wait bound, measured again with #511 on the provider
+
+Measured on 2026-09-26 after `stake-1` moved to v0.1.5, which carries #511.
+`stake-1` was the provider. Each requester was a fresh ultra-light node behind
+the bench NAT, on `main`. Three runs per condition, each on a new node, with
+500,000 bytes of fresh content per download.
+
+**Table: a fresh requester reaching a provider that carries #511**
+
+| Condition | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| `POST /connect` to the provider | 0.23 s | 0.24 s | 0.26 s |
+| Plain download of announced content, which looks the provider up on a miss (#498) | 86.8 s | 86.9 s | 86.8 s |
+| Download naming the provider in `Wasp-Providers`, not yet connected (#499) | 84.4 s | 84.0 s | 83.7 s |
+| The same node, now connected, downloading other fresh content | 82.3 s | 82.8 s | 82.1 s |
+
+Every download returned the right bytes. The downloads are slow because an
+ultra-light node pays only by time allowance; that is the same for every row.
+Before the first byte arrives, a fresh requester spends about 1.6 to 2.1 s
+with a hint and about 4.0 to 4.6 s on the lookup path, measured against the
+connected control on the same kind of node. The connect itself is a quarter of
+a second, against 10.5 s before #511.
+
+**The bound is left at 20 s.** A reachable provider that carries #511 is
+connected long before either 10 s or 20 s, so the bound now matters only when
+the provider cannot be reached, where it sets how long a 404 takes. It
+cannot come down below about 11 s while providers on v0.1.4 or earlier are in
+use, since they still take about 10.5 s to answer a fresh requester behind
+NAT. Lowering it is worth a spec once those providers are gone.
+
 Generated with help of AI.
