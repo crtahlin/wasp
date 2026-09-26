@@ -4,6 +4,42 @@ Changes this fork makes to upstream Bee. Upstream's own changes are absorbed as
 single `chore(upstream)` entries — see `.upstream-base` for the release this
 build derives from, and upstream's release notes for what it contains.
 
+## [0.1.5](https://github.com/crtahlin/wasp/releases/tag/v0.1.5) - 2026-09-26
+
+### Bug fixes
+- install declared dependencies before the deb upgrade check ([#480](https://github.com/crtahlin/wasp/pull/480))
+- accept a port-only nat-addr and warn when a fixed one is stale ([#502](https://github.com/crtahlin/wasp/pull/502))
+- stop on a bad config value instead of looping on it ([#492](https://github.com/crtahlin/wasp/pull/492))
+- connect to a hinted provider before the download starts ([#506](https://github.com/crtahlin/wasp/pull/506))
+- look up providers when a download cannot fetch its root chunk ([#509](https://github.com/crtahlin/wasp/pull/509))
+- raise the provider wait bound to 20 s ([#513](https://github.com/crtahlin/wasp/pull/513))
+- answer a peer behind NAT without waiting 10 s for addresses ([#516](https://github.com/crtahlin/wasp/pull/516))
+
+### CI
+- run the race detector once, in parallel shards, without fail-fast ([#519](https://github.com/crtahlin/wasp/pull/519)) ([#521](https://github.com/crtahlin/wasp/pull/521))
+
+### Documentation
+- record v0.1.4 as the release containing the changes ([#479](https://github.com/crtahlin/wasp/pull/479))
+- spec release notes that say what the build does ([#482](https://github.com/crtahlin/wasp/pull/482))
+- spec an always-on staking node running Pebble ([#486](https://github.com/crtahlin/wasp/pull/486))
+- install with apt, not dpkg -i ([#488](https://github.com/crtahlin/wasp/pull/488))
+- spec stopping on a bad config value instead of looping ([#491](https://github.com/crtahlin/wasp/pull/491))
+- spec a nat-addr that follows the public IP ([#501](https://github.com/crtahlin/wasp/pull/501))
+- spec connecting to a hinted provider before download ([#504](https://github.com/crtahlin/wasp/pull/504))
+- spec looking up providers when the root chunk is missing ([#505](https://github.com/crtahlin/wasp/pull/505))
+- ledger row for the port-only nat-addr ([#508](https://github.com/crtahlin/wasp/pull/508))
+- ledger rows for the hinted connect and the lookup on a root miss ([#510](https://github.com/crtahlin/wasp/pull/510))
+- raise the provider wait bound to 20 s after validation ([#512](https://github.com/crtahlin/wasp/pull/512))
+- results for the port-only nat-addr, hinted connect and lookup on a miss ([#514](https://github.com/crtahlin/wasp/pull/514))
+- spec answering a NAT'd peer without the 10 s address wait ([#515](https://github.com/crtahlin/wasp/pull/515))
+- write down the two-node measurement and pre-push checks ([#517](https://github.com/crtahlin/wasp/pull/517))
+- results for answering a NAT'd peer without the address wait ([#518](https://github.com/crtahlin/wasp/pull/518))
+- spec cutting pull request CI to about 11 minutes ([#520](https://github.com/crtahlin/wasp/pull/520))
+- re-check the comparison point before v0.1.5 ([#523](https://github.com/crtahlin/wasp/pull/523))
+
+### Features
+- publish notes that say what the build does ([#483](https://github.com/crtahlin/wasp/pull/483))
+
 ## [0.1.4](https://github.com/crtahlin/wasp/releases/tag/v0.1.4) - 2026-09-23
 
 ### Bug fixes
