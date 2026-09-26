@@ -35,6 +35,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
 	bhost "github.com/libp2p/go-libp2p/p2p/host/basic"
 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 	swarmt "github.com/libp2p/go-libp2p/p2p/net/swarm/testing"
@@ -1618,6 +1619,13 @@ func (h *emptyAddrsHost) Peerstore() peerstore.Peerstore {
 	return h.ps
 }
 
+// IDService passes the wrapped host's identify service through, as the real
+// host exposes it, so the responder takes the identify wait (#511). Without
+// it this wrapper would hide the service and silently test the old wait.
+func (h *emptyAddrsHost) IDService() identify.IDService {
+	return h.Host.(interface{ IDService() identify.IDService }).IDService()
+}
+
 func TestConnectEmptyPeerstoreSkipsAddressbookAndReacher(t *testing.T) {
 	t.Parallel()
 
@@ -1648,9 +1656,16 @@ func TestConnectEmptyPeerstoreSkipsAddressbookAndReacher(t *testing.T) {
 	psWrapper.setTarget(s2.Host().ID())
 	s1.SetHost(&emptyAddrsHost{Host: s1.Host(), ps: psWrapper})
 
+	start := time.Now()
 	_, err := s2.Connect(context.Background(), serviceUnderlayAddress(t, s1))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The responder has no address for the peer, as for a peer behind NAT.
+	// It must answer once identify finishes, not after the whole 10 s
+	// address wait (#511).
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("connect took %v; a peer with no address must not wait out the address timeout", elapsed)
 	}
 
 	expectPeersEventually(t, s1, overlay2)

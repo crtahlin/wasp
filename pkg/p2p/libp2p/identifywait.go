@@ -57,8 +57,10 @@ func waitIdentified(ctx context.Context, ids identifyWaiter, ps peerstore.Peerst
 		return addrs
 	}
 	select {
-	case addr := <-addrStream:
-		return []ma.Multiaddr{addr}
+	case addr, ok := <-addrStream:
+		if ok {
+			return []ma.Multiaddr{addr}
+		}
 	case <-ids.IdentifyWait(conn):
 	case <-ctx.Done():
 	}

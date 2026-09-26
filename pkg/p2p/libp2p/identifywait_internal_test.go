@@ -105,14 +105,19 @@ func TestWaitIdentifiedReturnsAddresses(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	addr2, err := ma.NewMultiaddr("/ip4/5.6.7.8/tcp/1634")
+	if err != nil {
+		t.Fatal(err)
+	}
 	ps := newPeerstore(t)
-	ps.AddAddr(id, addr, time.Hour)
+	ps.AddAddrs(id, []ma.Multiaddr{addr, addr2}, time.Hour)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	start := time.Now()
 	got := waitIdentified(ctx, fakeIdentify{done: make(chan struct{})}, ps, fakeConn{peer: id})
-	if len(got) != 1 || !got[0].Equal(addr) {
-		t.Fatalf("got %v, want the stored address", got)
+	// all stored addresses, not just the first the stream would replay
+	if len(got) != 2 {
+		t.Fatalf("got %v, want both stored addresses", got)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("took %v to return an address already stored", elapsed)
