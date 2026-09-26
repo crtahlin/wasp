@@ -85,7 +85,10 @@ echo "ok: CHANGELOG section $heading, $entries entries"
 #
 # Runs the release's own script for the newest CHANGELOG version and checks
 # that each of its five parts is there. The tag need not exist yet: the script
-# only uses it for the previous release and the DIFFERENCES link.
+# only uses it for the previous release and the DIFFERENCES link. The pull
+# request checkout is shallow and has no tags, so only the wording without a
+# previous release is exercised here; the release job, with every tag, gets the
+# other one.
 
 version=$(echo "$heading" | sed -n 's/^## \[\([^]]*\)\].*/\1/p')
 [ -n "$version" ] || fail "could not read a version from the CHANGELOG heading \"$heading\""

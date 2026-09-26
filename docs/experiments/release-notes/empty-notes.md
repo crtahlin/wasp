@@ -43,7 +43,7 @@ this order:
 1. The experimental-software warning, as a quoted paragraph.
 2. An "About this release" list with the upstream base read from
    `.upstream-base`, the previous release (the newest `v*.*.*` tag before
-   `<tag>`), and the rollback: install the previous release's package with
+   `<tag>`, prereleases such as `-rc1` excluded), and the rollback: install the previous release's package with
    `apt-get install --allow-downgrades` and restart. The rollback line tells the
    reader to check the changelog below for a storage-format change, which would
    make going back unsafe.

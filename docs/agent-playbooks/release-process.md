@@ -116,6 +116,10 @@ changelog section. v0.1.5 went out with an empty page from a green job, because
 `changelog.disable` in `.goreleaser.yml` stops goreleaser loading the notes
 file (#531). Never set it.
 
+If the step fails, fix the page by hand with `gh release edit --notes-file`.
+Re-running the release job does not help: goreleaser keeps the body of a
+release that already exists.
+
 ## A merge is only in the changelog if its subject is a conventional line
 
 The subject line of a merge commit **is** its changelog entry. `cliff.toml`

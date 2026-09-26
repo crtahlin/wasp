@@ -24,12 +24,15 @@ tag=${1:?usage: build-release-notes.sh <tag> [repository]}
 repo=${2:-crtahlin/wasp}
 base=$(cat .upstream-base)
 
-# The newest release tag before this one. A shallow checkout has no tags, so
-# the rollback line then names no version rather than failing the build.
-prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${tag}^" 2>/dev/null || true)
+# The newest stable release tag before this one. Prereleases (v0.2.0-rc1,
+# v0.1.0-test.1) are excluded: the trailing * in --match would otherwise take
+# them, and the rollback line would point operators at a test build. A shallow
+# checkout has no tags, so the rollback line then names no version rather than
+# failing the build.
+prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' "${tag}^" 2>/dev/null || true)
 if [ -n "$prev" ]; then
   prev_line="- **Previous release:** ${prev}."
-  rollback="install the ${prev} package with \`apt-get install --allow-downgrades ./wasp_${prev#v}_amd64.deb\` and restart."
+  rollback="install the ${prev} package for your architecture, for example \`apt-get install --allow-downgrades ./wasp_${prev#v}_amd64.deb\`, and restart."
 else
   prev_line=""
   rollback="install the previous release's package with \`apt-get install --allow-downgrades\` and restart."
