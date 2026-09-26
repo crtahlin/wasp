@@ -50,10 +50,9 @@ type metrics struct {
 	// already hold.
 	//
 	// The split from ConnectsAlreadyConnected is decided by the caller
-	// reading its peer set immediately before the connect, not by the error
-	// the connect returns: p2p.ErrAlreadyConnected is keyed on the remote
-	// address rather than the peer, so a provider held on another underlay
-	// comes back as a plain success. See issue #382.
+	// reading its peer set immediately before the connect, or by the connect
+	// returning p2p.ErrAlreadyConnected, which it does for any peer whose
+	// handshake has finished (#522).
 	//
 	// It is a diagnostic rather than an accounting record. The peer set
 	// reflects peers whose bzz handshake has finished, while the connect

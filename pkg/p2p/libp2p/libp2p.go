@@ -1018,10 +1018,6 @@ func (s *Service) Blocklist(overlay swarm.Address, duration time.Duration, reaso
 	return nil
 }
 
-func buildHostAddress(peerID libp2ppeer.ID) (ma.Multiaddr, error) {
-	return ma.NewMultiaddr(fmt.Sprintf("/p2p/%s", peerID.String()))
-}
-
 func (s *Service) Connect(ctx context.Context, addrs []ma.Multiaddr) (address *bzz.Address, err error) {
 	loggerV1 := s.logger.V(1).Register()
 
@@ -1058,14 +1054,12 @@ func (s *Service) Connect(ctx context.Context, addrs []ma.Multiaddr) (address *b
 			continue
 		}
 
-		hostAddr, err := buildHostAddress(info.ID)
-		if err != nil {
-			return nil, fmt.Errorf("build host address: %w", err)
-		}
-
-		remoteAddr := addr.Decapsulate(hostAddr)
-
-		if overlay, found := s.peers.isConnected(info.ID, remoteAddr); found {
+		// A peer whose bzz handshake has finished is connected, whichever
+		// side opened the connection and over whichever underlay. Matching
+		// on the remote address instead missed a peer that had connected to
+		// us, and the caller then ran a second handshake over the existing
+		// connection (#522).
+		if overlay, found := s.peers.overlay(info.ID); found {
 			address = &bzz.Address{
 				Overlay:   overlay,
 				Underlays: []ma.Multiaddr{addr},
