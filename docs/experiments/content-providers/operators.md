@@ -18,6 +18,12 @@ Everything is off unless the node runs with `providers-enable: true`.
 Only a full node can announce. A light node refuses inbound retrieval, so it
 could not serve what it announced.
 
+Content stored with `POST /wasp/ingest` is pinned already, and the ingest can
+announce it in the same call: send `Swarm-Postage-Batch-Id` with the ingest.
+The response then carries `announced`, and `announceError` when the
+announcement failed. A failed announcement does not fail the ingest, so check
+`announced` rather than the status code, and announce later with step 2 (#503).
+
 ## What announcing costs
 
 - **Stamp slots.** Every 12 hours the node writes one record and one pointer

@@ -1361,6 +1361,12 @@ paths:
         - $ref: "SwarmCommon.yaml#/components/parameters/SwarmCollection"
         - $ref: "SwarmCommon.yaml#/components/parameters/SwarmIndexDocumentParameter"
         - $ref: "SwarmCommon.yaml#/components/parameters/SwarmErrorDocumentParameter"
+        - in: header
+          schema:
+            $ref: "SwarmCommon.yaml#/components/parameters/SwarmPostageBatchId"
+          name: swarm-postage-batch-id
+          required: false
+          description: "When present, the stored reference is announced in the same request, as POST /wasp/providers/{reference} does. The batch stamps only the provider record, never the content. For a collection the manifest root is announced. Refused before the body is read with 403 when providers-enable is off, and with 400 on a light node or with swarm-encrypt."
       requestBody:
         description: "Content to store. A single blob by default, or a tar or multipart archive when Swarm-Collection is set."
         content:
@@ -1392,6 +1398,12 @@ paths:
                   soleSource:
                     type: boolean
                     description: "True when no other node held this content at the moment of ingest. It stops being true once anyone retrieves it, because a forwarding peer caches what it relays."
+                  announced:
+                    type: boolean
+                    description: "Present only when swarm-postage-batch-id was sent. Whether the announcement succeeded. A failed announcement does not fail the ingest: the content is stored and can be announced later with POST /wasp/providers/{reference}."
+                  announceError:
+                    type: string
+                    description: "Why the announcement failed, with the message POST /wasp/providers/{reference} would give. Present only when announced is false."
         "200":
           description: Already held by this node; nothing was stored
           content:
@@ -1406,10 +1418,14 @@ paths:
                     format: int64
                   soleSource:
                     type: boolean
+                  announced:
+                    type: boolean
+                  announceError:
+                    type: string
         "400":
           $ref: "SwarmCommon.yaml#/components/responses/400"
         "403":
-          description: Local ingest is off
+          description: Local ingest is off, or swarm-postage-batch-id was sent and content providers are off
         "500":
           $ref: "SwarmCommon.yaml#/components/responses/500"
         "507":
