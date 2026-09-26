@@ -593,6 +593,37 @@ func TestReverseConnect(t *testing.T) {
 	expectPeers(t, s2, overlay1)
 }
 
+// TestReverseConnectToLightNode connects to a light node that has already
+// connected to us. Connect answers p2p.ErrDialLightNode, as a dial would
+// have, so kademlia keeps the light node out of its full peers, and the light
+// node's connection is kept.
+func TestReverseConnectToLightNode(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	s1, overlay1 := newService(t, 1, libp2pServiceOpts{
+		notifier: mockNotifier(noopCf, noopDf, true),
+		libp2pOpts: libp2p.Options{
+			FullNode: true,
+		},
+	})
+	s2, overlay2 := newService(t, 1, libp2pServiceOpts{notifier: mockNotifier(noopCf, noopDf, true)})
+
+	if _, err := s2.Connect(ctx, serviceUnderlayAddress(t, s1)); err != nil {
+		t.Fatal(err)
+	}
+	expectPeers(t, s2, overlay1)
+	expectPeersEventually(t, s1, overlay2)
+
+	if _, err := s1.Connect(ctx, serviceUnderlayAddress(t, s2)); !errors.Is(err, p2p.ErrDialLightNode) {
+		t.Fatalf("want %v when a light node connected to us first, got %v", p2p.ErrDialLightNode, err)
+	}
+
+	expectPeers(t, s1, overlay2)
+	expectPeers(t, s2, overlay1)
+}
+
 func TestDifferentNetworkIDs(t *testing.T) {
 	t.Parallel()
 

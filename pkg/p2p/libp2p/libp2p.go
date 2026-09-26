@@ -1060,6 +1060,13 @@ func (s *Service) Connect(ctx context.Context, addrs []ma.Multiaddr) (address *b
 		// us, and the caller then ran a second handshake over the existing
 		// connection (#522).
 		if overlay, found := s.peers.overlay(info.ID); found {
+			// A light node that connected to us is held too. Dialling it
+			// would have failed the handshake with ErrDialLightNode, and
+			// callers such as kademlia depend on that error to leave it
+			// out of their full peers. Its own connection is left alone.
+			if full, _ := s.peers.fullnode(info.ID); !full {
+				return nil, p2p.ErrDialLightNode
+			}
 			address = &bzz.Address{
 				Overlay:   overlay,
 				Underlays: []ma.Multiaddr{addr},

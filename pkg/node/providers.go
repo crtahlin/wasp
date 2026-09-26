@@ -94,8 +94,8 @@ func providerConnect(
 		// Note it does not check the overlay, unlike the path below: the
 		// address this branch returns carries whatever overlay we have
 		// registered for that peer id, which need not be the one the record
-		// names. Kademlia does guard that on the same error
-		// (kademlia.go:1099). Preserved rather than fixed here because it is
+		// names. Kademlia does guard that on the same error, in its
+		// connect. Preserved rather than fixed here because it is
 		// pre-existing and reaches only the counter, since Discover adds the
 		// record's overlay to the set before connecting either way.
 		return true, nil
