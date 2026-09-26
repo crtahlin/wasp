@@ -6,9 +6,10 @@ no configuration, what it can be configured to do, what it exposes, and how it
 is built and packaged.
 
 - **Compared with:** Bee **v2.8.2**, the latest released version of upstream Bee
-  on 2026-09-23. Re-checked that day against upstream's published releases:
-  v2.8.2 of 2026-08-26 is still the newest that is not a release candidate, so
-  the comparison point has not moved and no entry was removed.
+  on 2026-09-26. Re-checked that day, before cutting v0.1.5, against upstream's
+  published releases: v2.8.2 of 2026-08-26 is still the newest that is not a
+  release candidate, so the comparison point has not moved and no entry was
+  removed.
 - **wasp described:** [`a20f4812`](https://github.com/crtahlin/wasp/commit/a20f4812),
   2026-09-26, the last commit that changes what a node does. The latest wasp
   release is v0.1.4, which does not contain it.
