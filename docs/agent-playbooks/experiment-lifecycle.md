@@ -76,6 +76,50 @@ make format && make build && make test && make lint && make protocol-freeze
 wire-surface change is something you decided to make, rather than something a
 red check tells you about after the fact.
 
+### Checks that failed in practice, and what to do instead
+
+Each item below cost at least one wasted CI round or a false result on
+2026-09-25 and 2026-09-26 (#498, #499, #500, #511). Do them before the first
+push, not after a red check.
+
+- **Format only the files you changed**, then run `git status`. On some
+  machines `make format` also rewrites dozens of unrelated files, and the
+  formatter can regroup imports in untouched lines of files you did edit.
+  Revert anything you did not mean to change before committing.
+- **Read the lint output before pushing.** `golangci-lint run` on the changed
+  packages; a single `gofmt` finding fails the Lint check.
+- **Commit types are limited** by `commitlint.config.js`: `build`, `chore`,
+  `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `test`. `style` is
+  not one of them. Check the subject before pushing; rewording afterwards means
+  a force push of the branch.
+- **Test addresses must count as public** where the code checks
+  `manet.IsPublicAddr`. The documentation ranges `203.0.113.0/24`,
+  `198.51.100.0/24` and `2001:db8::/32` are **not** public to libp2p, so a test
+  using them silently exercises the private-address branch. Use for example
+  `1.2.3.4`, `5.6.7.8` and `2a00:1450::/32`, as the existing tests do.
+- **Run the race detector on the packages you touched**, and compare a failure
+  with `main` before blaming your change: some packages race inside
+  dependencies on some networks (for example go-libp2p's NAT-PMP code where the
+  router answers NAT-PMP).
+- **A timing-sensitive test that fails once proves nothing either way.** Run it
+  at least 15 times on your branch and on `main` with a compiled test binary
+  (`go test -c`, then `-test.run`) and compare the failure counts.
+
+### Mutation checks that actually prove something
+
+- **A mutation removes the behaviour**, not just its return value. Replacing a
+  `return x` while leaving the wait or the call in place is not a mutation of
+  the wait.
+- **A mutation must compile.** An unused variable or an impossible type
+  assertion fails the build, which your harness may report as "killed" or as
+  "survived". Read the output for each mutation; do not trust a summary.
+- **A test caught only by a hang is a weak test.** Give it its own deadline so
+  the mutation fails with a message, and release anything it started so the
+  test server can shut down.
+- **When a mutation survives, find out why before adding a test.** Twice the
+  cause was the test double, not the code: a fake that finished instantly hid a
+  missing wait, and a wrapper host hid the interface the new path needed.
+
 Upstream's conventions apply in full, `package foo_test` tests, `t.Parallel()`
 only where safe, errors wrapped with `%w`, no casual `go.mod` changes. See the
 upstream half of `AGENTS.md`, plus `CODING.md` and `CODINGSTYLE.md`.

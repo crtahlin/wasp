@@ -60,6 +60,70 @@ bee version                    # fork line
 curl -s localhost:1633/health | jq -r .version
 ```
 
+## Measuring between two nodes
+
+Content-provider and connection changes need a provider and a requester on
+different networks. The procedure below is what worked; every step was learned
+by getting it wrong once.
+
+### Before the run
+
+- **Check that each node's advertised address is current.** Behind NAT, compare
+  the public IP (`curl -s https://api.ipify.org` on the host) with `nat-addr`,
+  or use the port-only form (#500). A stale address makes every dial time out
+  while `/status` still reports the node as reachable.
+- **Confirm the build, not the port.** After a deploy, poll `/health` until the
+  version string matches the build you installed; the old process keeps
+  answering for a few seconds after `systemctl restart`.
+- **Space out SSH logins to one bench host.** Many logins in a short burst are
+  refused for a while; retry after a pause rather than concluding the host is
+  down.
+
+### Fresh requesters
+
+A requester that has never met the provider is the case most changes are for,
+and it cannot be an existing node, which has the provider in its address book.
+
+- Start a throwaway **ultra-light** node per run (`--full-node=false
+  --swap-enable=false`, fresh data directory, its own API and p2p ports), wait
+  for at least 20 peers, use it once, then stop it and delete its directory.
+- It has no chequebook, so it downloads slowly: keep objects small (100,000
+  bytes worked).
+- **Its first connect to a public full node took about 10.5 s** before #511:
+  size any wait for a connection accordingly, and measure the connect on its
+  own with `POST /connect` when a result looks like a timeout.
+- Even a fresh node can learn the provider's address from peer gossip within
+  about a minute, so read the metrics (`bee_providers_hinted_record_dials`,
+  `bee_providers_connects_dialed`) to see which path a success actually took.
+
+### A throwaway responder on a public host
+
+When the change is on the responding side and must be dialled from behind NAT:
+
+- Give it **its own config file** instead of flags. Settings that are lists in
+  the host's config, such as `blockchain-rpc-endpoint`, do not survive being
+  read with `grep` into a single flag.
+- **Wait for `/readiness` to answer 200** before measuring. A fresh full node
+  first catches up on postage events, and until it is ready its inbound handler
+  does not answer handshakes, so dials time out in a way that looks like the
+  behaviour under test.
+- **Dial an explicit IPv4 address** built from the host's known address and
+  the node's peer ID. Early in startup the node may advertise, and listen on,
+  IPv6 only.
+- **Reuse one data directory for the before and after builds**, so the second
+  build starts ready at once.
+- Throttle it (`puller-max-chunks-per-second`) and remove it at the end. On a
+  staking host, ask the operator first.
+
+### Recording
+
+- Every download sends `Swarm-Cache: false`, and every run uses a fresh random
+  object.
+- Record, per run, the HTTP status, the time, a checksum comparison and the
+  counter deltas, and keep the raw log outside the repository.
+- A negative result is recorded next to the positive one that followed it, not
+  replaced by it.
+
 ## Triggering a reserve sample without stake
 
 An **unstaked node never samples.** The redistribution agent fails every round
