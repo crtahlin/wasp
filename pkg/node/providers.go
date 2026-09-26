@@ -60,29 +60,21 @@ func connectedOverlay(p peerConnector, overlay swarm.Address) bool {
 // providerConnect connects to one provider and reports whether the node was
 // already connected to it before the connect ran.
 //
-// The answer cannot be taken from p2ps.Connect's result. It returns
-// p2p.ErrAlreadyConnected only when an open connection's remote address
-// matches the one being dialled, so a peer connected on a different underlay
-// comes back as a plain success and is indistinguishable from a peer that was
-// dialled. A provider record's addresses are liable to differ by construction,
-// since Options.Address filters this node's underlays to public ones while
-// kademlia may hold a private one. See issue #382, which also records why the
-// address keying itself is left alone.
-//
-// So the peer set is read here, immediately before the connect, and the
-// connect itself is left exactly as it was: every error path, the overlay
-// guard and the topology notification all still run, in the same order.
+// p2ps.Connect returns p2p.ErrAlreadyConnected for a peer whose bzz handshake
+// has finished, on any underlay and whichever side opened the connection
+// (#522; before that it matched on the remote address, see #382). The peer
+// set is still read here, immediately before the connect, and the connect
+// itself is left exactly as it was: every error path, the overlay guard and
+// the topology notification all still run, in the same order.
 //
 // This over-reports dials, and by more than the gap between two statements.
 // Peers() lists peers whose bzz handshake has finished, because that is when
-// addIfNotExists writes the registry, while the connect short-circuits as soon
-// as a transport connection exists, which is earlier. A peer whose connection
-// is up but whose handshake is still running therefore reads as absent here
-// and needs no dial there, and is counted as a dial. The window is the length
-// of that concurrent setup, and it is likeliest exactly when both nodes learn
-// of each other at once, which is the discovery case. Closing it means
-// changing the address keying in pkg/p2p, which costs more than the counter is
-// worth; issue #382 records what.
+// addIfNotExists writes the registry, while a transport connection exists
+// earlier. A peer whose connection is up but whose handshake is still
+// running therefore reads as absent here, and the connect then needs no dial,
+// and is counted as a dial. The window is the length of that concurrent
+// setup, and it is likeliest exactly when both nodes learn of each other at
+// once, which is the discovery case.
 //
 // These counters are a diagnostic rather than an accounting record, and that
 // caveat belongs with them rather than only here: see ConnectsDialed.
@@ -102,8 +94,8 @@ func providerConnect(
 		// Note it does not check the overlay, unlike the path below: the
 		// address this branch returns carries whatever overlay we have
 		// registered for that peer id, which need not be the one the record
-		// names. Kademlia does guard that on the same error
-		// (kademlia.go:1099). Preserved rather than fixed here because it is
+		// names. Kademlia does guard that on the same error, in its
+		// connect. Preserved rather than fixed here because it is
 		// pre-existing and reaches only the counter, since Discover adds the
 		// record's overlay to the set before connecting either way.
 		return true, nil

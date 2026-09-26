@@ -400,12 +400,10 @@ func (s *Service) Discover(ctx context.Context, k []byte, set Adder) *HintRun {
 
 // countConnect records the outcome of one connect and logs a failure.
 //
-// alreadyConnected comes from the caller, which decides it by reading its peer
-// set before the connect runs, because the connect's own result cannot say:
-// p2p.ErrAlreadyConnected is keyed on the remote address rather than the peer,
-// so a provider held on another underlay returns a plain success. See issue
-// #382 and the note on ConnectsDialed for what the split does and does not
-// mean.
+// alreadyConnected comes from the caller, which reads its peer set before the
+// connect runs and also counts p2p.ErrAlreadyConnected, which the connect
+// returns for any peer whose handshake has finished (#522). See the note on
+// ConnectsDialed for what the split does and does not mean.
 func (s *Service) countConnect(alreadyConnected bool, err error, overlay swarm.Address, what string) {
 	switch {
 	case err == nil && alreadyConnected:

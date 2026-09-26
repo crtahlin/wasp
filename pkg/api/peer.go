@@ -32,6 +32,14 @@ func (s *Service) peerConnectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bzzAddr, err := s.p2p.Connect(r.Context(), []multiaddr.Multiaddr{paths.MultiAddress})
+	if errors.Is(err, p2p.ErrAlreadyConnected) {
+		// The peer is connected and topology already knows it through that
+		// connection, so there is nothing to notify and nothing to undo.
+		jsonhttp.OK(w, peerConnectResponse{
+			Address: bzzAddr.Overlay.String(),
+		})
+		return
+	}
 	if err != nil {
 		logger.Debug("p2p connect failed", "addresses", paths.MultiAddress, "error", err)
 		logger.Error(nil, "p2p connect failed", "addresses", paths.MultiAddress)

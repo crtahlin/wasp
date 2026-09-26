@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -97,6 +98,38 @@ func TestConnect(t *testing.T) {
 			}),
 		)
 	})
+}
+
+// TestConnectAlreadyConnected covers a connect to a peer this node already
+// holds: it answers 200 with the peer's overlay and leaves the connection
+// alone (#522). It used to answer 500.
+func TestConnectAlreadyConnected(t *testing.T) {
+	t.Parallel()
+
+	underlay := "/ip4/127.0.0.1/tcp/1634/p2p/16Uiu2HAkx8ULY8cTXhdVAcMmLcH9AsTKz6uBQ7DPLKRjMLgBVYkS"
+	overlay := swarm.MustParseHexAddress("ca1e9f3938cc1425c6061b96ad9eb93e134dfe8734ad490164ef20af9d1cf59c")
+
+	var disconnects atomic.Int32
+	testServer, _, _, _ := newTestServer(t, testServerOptions{
+		P2P: mock.New(
+			mock.WithConnectFunc(func(context.Context, []ma.Multiaddr) (*bzz.Address, error) {
+				return &bzz.Address{Overlay: overlay}, p2p.ErrAlreadyConnected
+			}),
+			mock.WithDisconnectFunc(func(swarm.Address, string) error {
+				disconnects.Add(1)
+				return nil
+			}),
+		),
+	})
+
+	jsonhttptest.Request(t, testServer, http.MethodPost, "/connect"+underlay, http.StatusOK,
+		jsonhttptest.WithExpectedJSONResponse(api.PeerConnectResponse{
+			Address: overlay.String(),
+		}),
+	)
+	if n := disconnects.Load(); n != 0 {
+		t.Fatalf("got %d disconnects, want none", n)
+	}
 }
 
 func TestDisconnect(t *testing.T) {

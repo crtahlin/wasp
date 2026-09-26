@@ -500,21 +500,11 @@ func TestDoubleConnectOnAllAddresses(t *testing.T) {
 	}
 }
 
-// TestDoubleConnectOnDifferentAddresses pins CURRENT behaviour, deliberately.
-//
-// p2p.ErrAlreadyConnected is decided by matching the remote address of an open
-// connection rather than by asking whether the peer is connected, so
-// connecting again over a DIFFERENT underlay of a peer we already hold does
-// not take that branch. host.Connect returns without dialling, a second
-// handshake runs over the existing connection, and Connect returns a plain
-// success. A caller cannot tell that from a dial.
-//
-// This test exists so that the behaviour is reproduced rather than only
-// reasoned about, and so that changing it has to change a test rather than
-// happening quietly. Its near neighbours reconnect on the SAME address and
-// assert ErrAlreadyConnected; neither covers this. See issue #382, which
-// records why the address keying is left alone for now and what it would cost
-// to change.
+// TestDoubleConnectOnDifferentAddresses connects again over a different
+// underlay of a peer that is already connected. Connect decides "already
+// connected" per peer, so this returns p2p.ErrAlreadyConnected rather than
+// running a second handshake over the existing connection (#522; #382
+// recorded the earlier address keying).
 func TestDoubleConnectOnDifferentAddresses(t *testing.T) {
 	t.Parallel()
 
@@ -546,18 +536,92 @@ func TestDoubleConnectOnDifferentAddresses(t *testing.T) {
 	expectPeers(t, s2, overlay1)
 	expectPeersEventually(t, s1, overlay2)
 
-	// The defect: a second underlay of a peer we are already connected to.
-	if _, err := s2.Connect(ctx, []ma.Multiaddr{addrs[1]}); err != nil {
-		t.Fatalf("want a plain success on a second underlay, got %v", err)
+	got, err := s2.Connect(ctx, []ma.Multiaddr{addrs[1]})
+	if !errors.Is(err, p2p.ErrAlreadyConnected) {
+		t.Fatalf("want %v on a second underlay, got %v", p2p.ErrAlreadyConnected, err)
+	}
+	if !got.Overlay.Equal(overlay1) {
+		t.Fatalf("got overlay %s, want %s", got.Overlay, overlay1)
 	}
 
-	// Still one peer on each side. That is a statement about the registry's
-	// overlay map, not about how many transport connections are open:
-	// addIfNotExists deliberately records a second connection to a peer it
-	// already holds, so this assertion cannot tell the two apart and does not
-	// claim to.
 	expectPeers(t, s2, overlay1)
 	expectPeers(t, s1, overlay2)
+}
+
+// TestReverseConnect connects to a peer that has already connected to us.
+// The existing connection's remote address is the peer's outbound port, not
+// the address being dialled, which is what the address keying missed: a
+// second bzz handshake then ran over the existing connection and Connect
+// returned nil (#522). Connect returns p2p.ErrAlreadyConnected only before
+// it dials, so that error is the evidence no second handshake ran.
+func TestReverseConnect(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	opts := libp2pServiceOpts{
+		notifier: mockNotifier(noopCf, noopDf, true),
+		libp2pOpts: libp2p.Options{
+			FullNode: true,
+		},
+	}
+	s1, overlay1 := newService(t, 1, opts)
+	s2, overlay2 := newService(t, 1, opts)
+
+	// s2 connects to s1, so s1 holds s2 inbound.
+	if _, err := s2.Connect(ctx, serviceUnderlayAddress(t, s1)); err != nil {
+		t.Fatal(err)
+	}
+	expectPeers(t, s2, overlay1)
+	expectPeersEventually(t, s1, overlay2)
+
+	// s1 connects back to s2.
+	got, err := s1.Connect(ctx, serviceUnderlayAddress(t, s2))
+	if !errors.Is(err, p2p.ErrAlreadyConnected) {
+		t.Fatalf("want %v when the peer connected to us first, got %v", p2p.ErrAlreadyConnected, err)
+	}
+	if !got.Overlay.Equal(overlay2) {
+		t.Fatalf("got overlay %s, want %s", got.Overlay, overlay2)
+	}
+
+	// The same direction again is still already connected.
+	if _, err := s1.Connect(ctx, serviceUnderlayAddress(t, s2)); !errors.Is(err, p2p.ErrAlreadyConnected) {
+		t.Fatalf("want %v on a repeat, got %v", p2p.ErrAlreadyConnected, err)
+	}
+
+	expectPeers(t, s1, overlay2)
+	expectPeers(t, s2, overlay1)
+}
+
+// TestReverseConnectToLightNode connects to a light node that has already
+// connected to us. Connect answers p2p.ErrDialLightNode, as a dial would
+// have, so kademlia keeps the light node out of its full peers, and the light
+// node's connection is kept.
+func TestReverseConnectToLightNode(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	s1, overlay1 := newService(t, 1, libp2pServiceOpts{
+		notifier: mockNotifier(noopCf, noopDf, true),
+		libp2pOpts: libp2p.Options{
+			FullNode: true,
+		},
+	})
+	s2, overlay2 := newService(t, 1, libp2pServiceOpts{notifier: mockNotifier(noopCf, noopDf, true)})
+
+	if _, err := s2.Connect(ctx, serviceUnderlayAddress(t, s1)); err != nil {
+		t.Fatal(err)
+	}
+	expectPeers(t, s2, overlay1)
+	expectPeersEventually(t, s1, overlay2)
+
+	if _, err := s1.Connect(ctx, serviceUnderlayAddress(t, s2)); !errors.Is(err, p2p.ErrDialLightNode) {
+		t.Fatalf("want %v when a light node connected to us first, got %v", p2p.ErrDialLightNode, err)
+	}
+
+	expectPeers(t, s1, overlay2)
+	expectPeers(t, s2, overlay1)
 }
 
 func TestDifferentNetworkIDs(t *testing.T) {
