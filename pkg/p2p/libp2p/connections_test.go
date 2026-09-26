@@ -38,6 +38,7 @@ import (
 	bhost "github.com/libp2p/go-libp2p/p2p/host/basic"
 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 	swarmt "github.com/libp2p/go-libp2p/p2p/net/swarm/testing"
+	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -1618,6 +1619,13 @@ func (h *emptyAddrsHost) Peerstore() peerstore.Peerstore {
 	return h.ps
 }
 
+// IDService passes the wrapped host's identify service through, as the real
+// host exposes it, so the responder takes the identify wait (#511). Without
+// it this wrapper would hide the service and silently test the old wait.
+func (h *emptyAddrsHost) IDService() identify.IDService {
+	return h.Host.(interface{ IDService() identify.IDService }).IDService()
+}
+
 func TestConnectEmptyPeerstoreSkipsAddressbookAndReacher(t *testing.T) {
 	t.Parallel()
 
@@ -1648,9 +1656,16 @@ func TestConnectEmptyPeerstoreSkipsAddressbookAndReacher(t *testing.T) {
 	psWrapper.setTarget(s2.Host().ID())
 	s1.SetHost(&emptyAddrsHost{Host: s1.Host(), ps: psWrapper})
 
+	start := time.Now()
 	_, err := s2.Connect(context.Background(), serviceUnderlayAddress(t, s1))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The responder has no address for the peer, as for a peer behind NAT.
+	// It must answer once identify finishes, not after the whole 10 s
+	// address wait (#511).
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("connect took %v; a peer with no address must not wait out the address timeout", elapsed)
 	}
 
 	expectPeersEventually(t, s1, overlay2)
@@ -1662,5 +1677,18 @@ func TestConnectEmptyPeerstoreSkipsAddressbookAndReacher(t *testing.T) {
 
 	if reachableCalled.Load() {
 		t.Fatal("expected reacher not to be notified for NAT peer")
+	}
+}
+
+// TestServiceUsesIdentifyWait: the real libp2p host exposes its identify
+// service, so a connection is answered when identify finishes rather than
+// after the whole address wait. If this ever fails, the code falls back to
+// the old wait and a peer behind NAT costs 10 s per connection again (#511).
+func TestServiceUsesIdentifyWait(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newService(t, 1, libp2pServiceOpts{})
+	if !s.UsesIdentifyWait() {
+		t.Fatal("the libp2p host does not expose its identify service")
 	}
 }

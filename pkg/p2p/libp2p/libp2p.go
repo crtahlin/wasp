@@ -602,7 +602,7 @@ func (s *Service) handleIncoming(stream network.Stream) {
 	peerID := stream.Conn().RemotePeer()
 	handshakeStream := newStream(stream, s.metrics)
 
-	peerAddrs, err := s.peerMultiaddrs(s.ctx, peerID)
+	peerAddrs, err := s.peerMultiaddrs(s.ctx, stream.Conn())
 	if err != nil {
 		s.logger.Debug("stream handler: handshake: build remote multiaddrs", "peer_id", peerID, "error", err)
 		s.logger.Error(nil, "stream handler: handshake: build remote multiaddrs", "peer_id", peerID)
@@ -1136,7 +1136,7 @@ func (s *Service) Connect(ctx context.Context, addrs []ma.Multiaddr) (address *b
 
 	handshakeStream := newStream(stream, s.metrics)
 
-	peerAddrs, err := s.peerMultiaddrs(ctx, peerID)
+	peerAddrs, err := s.peerMultiaddrs(ctx, stream.Conn())
 	if err != nil {
 		_ = handshakeStream.Reset()
 		_ = stream.Conn().Close()
@@ -1554,12 +1554,21 @@ func (s *Service) determineCurrentNetworkStatus(err error) error {
 	return err
 }
 
-// peerMultiaddrs builds full multiaddresses for a peer using the peerstore.
-func (s *Service) peerMultiaddrs(ctx context.Context, peerID libp2ppeer.ID) ([]ma.Multiaddr, error) {
+// peerMultiaddrs builds full multiaddresses for the remote peer of conn using
+// the peerstore. It waits for identify to finish on conn rather than for an
+// address to appear, so a peer that advertises no usable address is answered
+// at once rather than after the whole timeout (#511).
+func (s *Service) peerMultiaddrs(ctx context.Context, conn network.Conn) ([]ma.Multiaddr, error) {
+	peerID := conn.RemotePeer()
 	waitPeersCtx, cancel := context.WithTimeout(ctx, peerstoreWaitAddrsTimeout)
 	defer cancel()
 
-	mas := waitPeerAddrs(waitPeersCtx, s.host.Peerstore(), peerID)
+	var mas []ma.Multiaddr
+	if ids := identifyWaiterOf(s.host); ids != nil {
+		mas = waitIdentified(waitPeersCtx, ids, s.host.Peerstore(), conn)
+	} else {
+		mas = waitPeerAddrs(waitPeersCtx, s.host.Peerstore(), peerID)
+	}
 
 	return buildFullMAs(mas, peerID)
 }
