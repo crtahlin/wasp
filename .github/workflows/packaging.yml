@@ -20,6 +20,8 @@ on:
       - '.github/workflows/packaging.yml'
       - '.github/workflows/release.yaml'
       - 'scripts/check-release-notes.sh'
+      - 'scripts/build-release-notes.sh'
+      - '.upstream-base'
       - 'README.md'
       - 'CHANGELOG.md'
   push:
@@ -30,6 +32,8 @@ on:
       - '.github/workflows/packaging.yml'
       - '.github/workflows/release.yaml'
       - 'scripts/check-release-notes.sh'
+      - 'scripts/build-release-notes.sh'
+      - '.upstream-base'
       - 'README.md'
       - 'CHANGELOG.md'
   workflow_dispatch:
