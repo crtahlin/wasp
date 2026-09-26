@@ -11,19 +11,16 @@ before:
 release:
   prerelease: auto
 
-# Release notes are supplied by release.yaml with --release-notes, built from
-# the README highlights block and the CHANGELOG.md section for this version.
+# Release notes are supplied by release.yaml with --release-notes, built by
+# scripts/build-release-notes.sh.
 #
-# Without this, goreleaser generates its own notes by listing every commit
-# between tags. That walks ALL parents rather than the first-parent spine, so
-# each change appears twice, once as its merge and once as the branch commit
-# behind it, and the curated changelog this repository builds never reaches the
-# release page. v0.1.4 shipped that way. See #481.
-#
-# --release-notes already suppresses generation; this states the intent and
-# stops the default returning if that argument is ever dropped.
-changelog:
-  disable: true
+# Do NOT set changelog.disable. It looks like the way to stop goreleaser
+# generating its own commit list (which walks all parents and lists every
+# change twice, how v0.1.4 shipped, #481), but the --release-notes file is
+# loaded by the same changelog step, so disabling it publishes an empty page.
+# That is how v0.1.5 shipped (#531). When --release-notes is given, the step
+# returns straight after loading the file and generates nothing, so no setting
+# is needed here. scripts/check-release-notes.sh rejects the setting.
 
 git:
   prerelease_suffix: "-"

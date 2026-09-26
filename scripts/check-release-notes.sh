@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Guard the two extractions that build a release's notes.
+# Guard what builds a release's notes.
 #
-# release.yaml assembles the notes from two places: the highlights block in
-# README.md, and the section for the version being released in CHANGELOG.md.
+# release.yaml builds the notes with scripts/build-release-notes.sh, which takes
+# two parts by pattern: the highlights block in README.md, and the section for
+# the version being released in CHANGELOG.md.
 # Both are pulled out by pattern, so a renamed marker or a changed heading does
 # not fail anything, it silently yields nothing and the release page goes out
 # with empty notes. That is precisely the fault #481 exists to stop, so it is
@@ -14,6 +15,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# --- 0. goreleaser must load the notes ---------------------------------------
+#
+# The --release-notes file is loaded by goreleaser's changelog step, and
+# changelog.disable skips that step, so the page goes out empty. That is how
+# v0.1.5 shipped (#531). Any value but false is refused.
+
+disable=$(python3 -c 'import yaml,sys; c=yaml.safe_load(open(".goreleaser.yml")) or {}; print(str((c.get("changelog") or {}).get("disable", False)).lower())')
+[ "$disable" = "false" ] \
+  || fail ".goreleaser.yml sets changelog.disable to $disable, which stops goreleaser loading --release-notes and publishes an empty page (#531)"
+
+echo "ok: .goreleaser.yml leaves the changelog step on"
 
 # --- 1. the README highlights block ------------------------------------------
 
@@ -67,3 +80,23 @@ entries=$(echo "$section" | grep -c '^- ' || true)
 [ "$entries" -gt 0 ] || fail "the newest CHANGELOG.md section ($heading) has no entries"
 
 echo "ok: CHANGELOG section $heading, $entries entries"
+
+# --- 3. the notes as the release builds them ---------------------------------
+#
+# Runs the release's own script for the newest CHANGELOG version and checks
+# that each of its five parts is there. The tag need not exist yet: the script
+# only uses it for the previous release and the DIFFERENCES link.
+
+version=$(echo "$heading" | sed -n 's/^## \[\([^]]*\)\].*/\1/p')
+[ -n "$version" ] || fail "could not read a version from the CHANGELOG heading \"$heading\""
+notes=$(scripts/build-release-notes.sh "v$version")
+
+echo "$notes" | grep -q '^> \*\*Experimental software\.\*\*' || fail "the built notes have no experimental-software warning"
+echo "$notes" | grep -qF -- "- **Upstream base:** Bee $(cat .upstream-base)." || fail "the built notes do not name the upstream base"
+echo "$notes" | grep -qF -- "- **Rollback:**" || fail "the built notes have no rollback line"
+echo "$notes" | grep -qF "$(echo "$highlights" | grep -m1 . )" || fail "the built notes do not carry the README highlights"
+echo "$notes" | grep -qF "docs/DIFFERENCES.md](https://github.com/" || fail "the built notes have no DIFFERENCES link"
+echo "$notes" | grep -qF "$heading" || fail "the built notes do not carry the CHANGELOG section $heading"
+
+echo "ok: built notes for v$version, $(echo "$notes" | wc -l | tr -d ' ') lines, all five parts"
+

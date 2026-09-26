@@ -104,6 +104,18 @@ Announce what an operator needs to know: which upstream base it carries, which
 experiments are in it, and what the rollback is. Every release note repeats the
 experimental-software warning, people find releases without reading the README.
 
+`scripts/build-release-notes.sh` puts the warning, the upstream base, the
+previous release and the rollback at the top of the notes, followed by the
+README highlights and the changelog section, so none of that is written by hand.
+Add anything release-specific, such as which experiments an operator should
+know about, by editing the release page afterwards.
+
+**Read the page back.** The release job does it in its `Read the published notes
+back` step and turns red if the page lacks the warning or this version's
+changelog section. v0.1.5 went out with an empty page from a green job, because
+`changelog.disable` in `.goreleaser.yml` stops goreleaser loading the notes
+file (#531). Never set it.
+
 ## A merge is only in the changelog if its subject is a conventional line
 
 The subject line of a merge commit **is** its changelog entry. `cliff.toml`

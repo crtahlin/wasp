@@ -64,30 +64,16 @@ jobs:
           echo "BEE_API_VERSION=$(grep '^  version:' openapi/Swarm.yaml | awk '{print $2}')" >> $GITHUB_ENV
           echo "UPSTREAM_BASE=$(cat .upstream-base)" >> $GITHUB_ENV
       - name: Build the release notes
-        # Two extractions, both guarded on every pull request by
-        # scripts/check-release-notes.sh so a renamed marker or a changed
-        # heading fails there rather than publishing empty notes here.
+        # scripts/build-release-notes.sh is the same script
+        # scripts/check-release-notes.sh runs on every pull request, so a
+        # renamed marker or a changed heading fails there rather than
+        # publishing empty notes here.
         #
         # Written outside dist/, because --clean deletes it.
-        #
-        # The CHANGELOG.md section is taken rather than regenerated:
-        # prepare-release.yml committed it minutes earlier and the release is
-        # cut from that merge, so it is already correct, and git-cliff does not
-        # have to be installed in this workflow as well.
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/release-notes.md"
-
-          sed -n '/^<!-- highlights:start -->$/,/^<!-- highlights:end -->$/p' README.md \
-            | sed '1d;$d' > "$notes"
-
-          {
-            echo
-            echo "For every difference from Bee, entry by entry, see [docs/DIFFERENCES.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docs/DIFFERENCES.md)."
-            echo
-            awk '/^## \[/ { if (seen) exit; seen = 1 } seen { print }' CHANGELOG.md
-          } >> "$notes"
-
+          scripts/build-release-notes.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" > "$notes"
           echo "RELEASE_NOTES=$notes" >> "$GITHUB_ENV"
           echo "built $(wc -l < "$notes") lines of release notes"
 
@@ -100,6 +86,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BEE_API_VERSION: ${{ env.BEE_API_VERSION }}
           UPSTREAM_BASE: ${{ env.UPSTREAM_BASE }}
+
+      - name: Read the published notes back
+        # A green release job once published an empty page (#531): the notes
+        # were built correctly and never reached goreleaser. So check the page
+        # itself. Like the deb check below, this runs after the release is out;
+        # a red job means fix the page by hand.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          body=$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json body -q .body)
+          version="${GITHUB_REF_NAME#v}"
+          echo "published body: $(printf '%s\n' "$body" | wc -l) lines"
+          printf '%s\n' "$body" | grep -q '^> \*\*Experimental software\.\*\*' \
+            || { echo "::error::the release page has no experimental-software warning"; exit 1; }
+          printf '%s\n' "$body" | grep -qF "## [${version}]" \
+            || { echo "::error::the release page has no changelog section for ${version}"; exit 1; }
+          echo "release page carries the notes"
 
       - name: Verify the deb upgrades cleanly
         # Runs the real dpkg upgrade test against the built deb, as post-publish
