@@ -31,7 +31,11 @@ round after it:
    the same sender is missing, so `sendAndWait` waited for a receipt that
    could not come until the phase ended.
 4. Ten minutes after the claim, the ambiguous claim was dropped ("pending
-   transactions not found"), freeing the nonce.
+   transactions not found"). Whether that freed the nonce is not checked: if
+   the queued commit was still known to the endpoint, it kept counting, and
+   the gap may have stayed open until the endpoint dropped the commit. The
+   implementation checks the nonce of the node's next transaction in its
+   logs.
 
 Five hours later, another node of the same operator lost a commit the same
 way: HTTP 500 from the same endpoint, transaction never mined, round lost.
@@ -71,19 +75,42 @@ When the active endpoint's send fails and `isTransportFailure(err)` is true:
   order, without changing which endpoint is active;
 - the first endpoint that returns no error ends the loop: return nil, and log
   at info level which endpoint took the transaction;
-- an endpoint answering with a JSON-RPC error whose message contains
-  `already known` or `known transaction` also counts as success: the
-  transaction is in that node's pool;
-- an endpoint answering `nonce too low` means a transaction with this nonce
-  is already mined (this one or an earlier one): stop and return the
-  **original** error, so the transaction stays ambiguous as today;
-- any other JSON-RPC error is an answer about the transaction (for example
-  insufficient funds): stop and return it;
+- an endpoint answering with a JSON-RPC error that means "this transaction
+  is already in my pool" also counts as success. Matched without regard to
+  case: `already known`, `known transaction` (go-ethereum, Erigon) and
+  `AlreadyKnown` (Nethermind result name);
+- an endpoint answering `nonce too low` (go-ethereum) or `OldNonce`
+  (Nethermind) means a transaction with this nonce is already mined, this
+  one or another: stop and return the **original** error, so the transaction
+  stays ambiguous as today;
+- any other JSON-RPC error is an answer about the transaction and is
+  returned, not treated as success. That explicitly includes
+  `replacement transaction underpriced` / `ReplacementNotAllowed`,
+  `transaction underpriced` / `FeeTooLow`, and `insufficient funds`;
 - a transport failure moves on to the next endpoint;
 - if every endpoint failed at the transport level, return the first error,
   as today.
 
-Each attempt uses the caller's context. Reads keep their current failover.
+The go-ethereum strings are verified in go-ethereum v1.17.3
+(`core/txpool/errors.go`, `core/error.go`). The Nethermind names are not
+verified here: the implementation captures real responses from each
+configured provider by sending one raw transaction twice on the Chiado test
+network, and keeps them as test fixtures.
+
+Each attempt uses the caller's context and the same per-attempt timeout as
+reads (`attemptContext`). The loop stops as soon as the caller's context is
+done (`ctx.Err() != nil`), as `call` does, because an expired deadline is
+itself classified as a transport failure and would otherwise run through
+every endpoint.
+
+The active endpoint does not change. Every send therefore still tries the
+failing endpoint first and pays its latency, and reads stay on it until a read
+fails. That is accepted: switching the active endpoint on a write failure is a
+separate decision, and moving a provider to the end of
+`blockchain-rpc-endpoint` already gives the operator that choice.
+
+With a single configured endpoint, the plain backend is used and part 1 does
+nothing. Reads keep their current failover.
 The "not retrying elsewhere" warning is replaced by one warning per failed
 endpoint and an info line for the endpoint that accepted.
 
@@ -92,29 +119,75 @@ counts these attempts.
 
 ### 2. `transaction.Service`: re-broadcast an ambiguous transaction
 
-A send can still end ambiguous (every endpoint failed, or a timeout). While a
-transaction is ambiguous and younger than `AmbiguousPendingTimeout`, the
-pending-transaction monitor re-sends its stored raw bytes
-(`StoredTransaction.Raw`) through the backend every 30 seconds, until the
-backend knows the transaction (`TransactionByHash` finds it) or the timeout
-passes. The bytes are unchanged, so this has the same safety argument as
-part 1, and it closes the nonce gap as soon as any endpoint takes the
-transaction.
+A send can still end ambiguous (every endpoint failed, or a timeout). There
+is no periodic pending-transaction loop today; each pending transaction has
+one goroutine, started by `waitForPendingTx`, that waits for its receipt.
+Restored pending transactions get the same goroutine at start through
+`waitForAllPendingTx`.
 
-`ResendTransaction` is not used for this: it re-signs with a fresh fee, which
-changes the hash.
+For a transaction whose pending key is marked ambiguous, that goroutine also
+re-broadcasts it every `ambiguousRebroadcastInterval` (30 seconds, a package
+variable so that tests do not sleep) with the existing
+`RebroadcastTransaction`, which sends the stored raw bytes unchanged and
+checks the hash. It stops re-broadcasting when any of these holds:
+
+- the backend knows the transaction (`TransactionByHash` finds it), or its
+  receipt arrives;
+- `AmbiguousPendingTimeout` has passed since it was created;
+- another stored pending transaction has the same nonce: it was replaced
+  (`ReplaceTransaction`, used by the revealer) or cancelled
+  (`CancelTransaction`, the API). Re-sending the original after that could
+  let an endpoint whose pool lacks the replacement mine the original
+  instead;
+- `TransactionStatus` reports it cancelled;
+- the service is closed (`t.ctx`, `t.wg`).
+
+The goroutine never takes `t.lock`: `SendWithHook` holds that lock across a
+network send, and a re-broadcast must not wait on it or block it.
+
+Reveals already have their own re-broadcast and replacement in the revealer
+(`revealer.go`). Part 2 applies to them as well; the same-nonce rule above
+makes it stop as soon as the revealer replaces one, and before that a
+re-broadcast of the same bytes is harmless.
+
+`ResendTransaction` is not used: it re-signs with a fresh fee, which changes
+the hash.
 
 ### 3. `sendAndWait`: wait on an ambiguous transaction instead of failing
 
 In `pkg/storageincentives/redistribution`, `sendAndWait` returns at once when
-the send returns an error. When the error is a transport failure **and** a
-transaction hash was returned (the transaction is stored and may be on its
-way), it now waits for the receipt with the caller's context, as it does for
-a successful send. With part 2 re-broadcasting it, a claim whose first send
-failed is mined later in the same claim phase. If the phase ends first, the
-caller's context ends the wait, as today.
+the send returns an error. It now waits for the receipt, with the caller's
+context, when the send error is **not** `transaction.ErrNotBroadcast` and a
+non-zero transaction hash was returned. That is exactly the set of sends
+`storeAndBroadcast` marks as ambiguous: the transaction is stored and may be
+on its way. With part 2 re-broadcasting it, a claim whose first send failed is
+mined later in the same claim phase. If the phase ends first, the caller's
+context ends the wait, as today.
 
-Errors before the broadcast (`notBroadcast`) still return at once.
+The transport-failure classifier is not used here: it is unexported in
+`failover`, which imports `transaction`, so `transaction` and the
+redistribution package cannot reach it without an import cycle. The cost of
+this simpler rule: a send that an endpoint rejected outright (for example
+insufficient funds) also waits until the phase ends instead of failing at
+once. The round is lost either way, and the error is still logged when the
+wait ends.
+
+Errors before the broadcast (`ErrNotBroadcast`, zero hash) still return at
+once.
+
+### Code, tests and documents that change with it
+
+- `TestSendTransactionDoesNotFailOver` (`failover_test.go`) is inverted.
+- The comment above `SendTransaction` in `failover.go` and the
+  "`SendTransaction` does not fail over" paragraph of
+  `docs/experiments/rpc-endpoint-failover/spec.md` are updated to point here.
+- The `failover` package gets a `Metrics()` method; the backend is created in
+  `pkg/node/chain.go` and its collectors are registered with the node's
+  other metrics.
+- `backendmock` already offers `WithSendTransactionFunc` and
+  `WithTransactionByHashFunc`, enough for parts 1 and 2. Part 3 needs a
+  transaction-service fake that returns a hash together with an error.
+- `docs/DIFFERENCES.md` gets a row.
 
 ### Not changed
 
@@ -138,8 +211,13 @@ transactions to its own RPC endpoints.
   is unchanged. Also: second answers `already known` (success), `nonce too
   low` (original error returned), insufficient funds (that error returned),
   all endpoints fail (first error returned, every endpoint tried once).
-- Part 2: a send that failed is re-sent with identical raw bytes every 30
-  seconds until the backend knows it; not after the timeout; never re-signed.
+- Part 2: a send that failed is re-sent with identical raw bytes on each
+  interval until the backend knows it; not after the timeout; not after a
+  same-nonce replacement or cancel is stored; never re-signed; the
+  goroutine ends when the service closes. Also for a pending transaction
+  restored at start.
+- Part 1, context: with the caller's context already done, no endpoint after
+  the first is tried.
 - Part 3: a claim whose send fails at the transport level, then is mined:
   `Claim` returns success within the context; with no receipt before the
   context ends, it returns the context error.
