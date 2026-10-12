@@ -265,6 +265,9 @@ func (t *transactionService) waitForAllPendingTx() error {
 
 	for txHash := range pending {
 		t.waitForPendingTx(txHash)
+		if t.recentAmbiguousTransaction(txHash) != nil {
+			t.rebroadcastAmbiguous(txHash)
+		}
 	}
 
 	return nil
@@ -343,6 +346,7 @@ func (t *transactionService) storeAndBroadcast(ctx context.Context, signedTx *ty
 			t.logger.Error(err, "registering possibly sent transaction as pending failed", "tx", txHash)
 		}
 		t.waitForPendingTx(txHash)
+		t.rebroadcastAmbiguous(txHash)
 		return txHash, sendErr
 	}
 

@@ -6,6 +6,7 @@ package redistribution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -145,7 +146,7 @@ func (c *contract) Claim(ctx context.Context, proofs ChunkInclusionProofs) (comm
 		Value:                big.NewInt(0),
 		Description:          "claim win transaction",
 	}
-	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, nil)
+	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, waitOnAmbiguous, nil)
 	if err != nil {
 		return txHash, fmt.Errorf("claim: %w", err)
 	}
@@ -168,7 +169,7 @@ func (c *contract) Commit(ctx context.Context, obfusHash []byte, round uint64, b
 		Value:                big.NewInt(0),
 		Description:          "commit transaction",
 	}
-	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, beforeBroadcast)
+	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, waitOnAmbiguous, beforeBroadcast)
 	if err != nil {
 		return txHash, fmt.Errorf("commit: obfusHash %v: %w", common.BytesToHash(obfusHash), err)
 	}
@@ -191,7 +192,7 @@ func (c *contract) Reveal(ctx context.Context, storageDepth uint8, reserveCommit
 		Value:                big.NewInt(0),
 		Description:          "reveal transaction",
 	}
-	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, beforeBroadcast)
+	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, failOnAmbiguous, beforeBroadcast)
 	if err != nil {
 		return txHash, fmt.Errorf("reveal: storageDepth %d reserveCommitmentHash %v RandomNonce %v: %w", storageDepth, common.BytesToHash(reserveCommitmentHash), common.BytesToHash(RandomNonce), err)
 	}
@@ -219,7 +220,24 @@ func (c *contract) ReserveSalt(ctx context.Context) ([]byte, error) {
 	return salt[:], nil
 }
 
-func (c *contract) sendAndWait(ctx context.Context, request *transaction.TxRequest, boostPercent int, beforeBroadcast transaction.BeforeBroadcastFunc) (txHash common.Hash, err error) {
+// ambiguousSend says what sendAndWait does when the send itself returned an
+// error after the transaction was stored, so that it may still reach the
+// network (#772).
+type ambiguousSend bool
+
+const (
+	// waitOnAmbiguous waits for the receipt, as for a successful send. The
+	// transaction service re-broadcasts the stored transaction meanwhile, so
+	// a claim or commit whose first send failed can still be mined in its
+	// phase.
+	waitOnAmbiguous ambiguousSend = true
+	// failOnAmbiguous returns the send error at once. The revealer uses it:
+	// it checks its reveal every block and replaces it with raised fees,
+	// which a wait here would hold up until the claim phase.
+	failOnAmbiguous ambiguousSend = false
+)
+
+func (c *contract) sendAndWait(ctx context.Context, request *transaction.TxRequest, boostPercent int, onAmbiguous ambiguousSend, beforeBroadcast transaction.BeforeBroadcastFunc) (txHash common.Hash, err error) {
 	defer func() {
 		err = c.txService.UnwrapABIError(
 			ctx,
@@ -231,7 +249,19 @@ func (c *contract) sendAndWait(ctx context.Context, request *transaction.TxReque
 
 	txHash, err = c.txService.SendWithHook(ctx, request, boostPercent, beforeBroadcast)
 	if err != nil {
-		return txHash, err
+		if onAmbiguous == failOnAmbiguous || errors.Is(err, transaction.ErrNotBroadcast) || txHash == (common.Hash{}) {
+			return txHash, err
+		}
+		c.logger.Warning("sending the transaction returned an error; waiting for it to be mined", "description", request.Description, "tx", txHash, "error", err)
+		sendErr := err
+		receipt, err := c.txService.WaitForReceipt(ctx, txHash)
+		if err != nil {
+			return txHash, errors.Join(sendErr, err)
+		}
+		if receipt.Status == 0 {
+			return txHash, transaction.ErrTransactionReverted
+		}
+		return txHash, nil
 	}
 	receipt, err := c.txService.WaitForReceipt(ctx, txHash)
 	if err != nil {

@@ -113,6 +113,11 @@ push, not after a red check.
 - **A mutation must compile.** An unused variable or an impossible type
   assertion fails the build, which your harness may report as "killed" or as
   "survived". Read the output for each mutation; do not trust a summary.
+- **Check that the mutation was applied.** A scripted text replacement that
+  does not match (wrong indentation, for example) leaves the code unchanged,
+  and the passing tests then look like a surviving mutation. Compare the file
+  with its original before running the tests, and report "not applied"
+  rather than "survived".
 - **A test caught only by a hang is a weak test.** Give it its own deadline so
   the mutation fails with a message, and release anything it started so the
   test server can shut down.
