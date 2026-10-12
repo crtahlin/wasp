@@ -29,7 +29,9 @@ func newMetrics() metrics {
 	}
 }
 
-// Metrics returns the backend's collectors for registration.
+// Metrics returns the backend's collectors for registration. pkg/node
+// registers them through its generic metrics.Collector check on the chain
+// backend; registering them a second time panics at start (#779).
 func (b *Backend) Metrics() []prometheus.Collector {
 	return m.PrometheusCollectorsFromFields(b.metrics)
 }

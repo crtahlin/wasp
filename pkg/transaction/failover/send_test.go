@@ -15,8 +15,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/ethersphere/bee/v2/pkg/metrics"
 	"github.com/ethersphere/bee/v2/pkg/transaction/backendmock"
 	"github.com/ethersphere/bee/v2/pkg/transaction/failover"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // answer is a JSON-RPC error answer, as the rpc client returns it.
@@ -29,8 +31,10 @@ var _ rpc.Error = answer{}
 
 // http500 is the failure seen on mainnet (#772): the endpoint's broker
 // answered with an HTTP 500 around a JSON-RPC error.
-var http500 = rpc.HTTPError{StatusCode: http.StatusInternalServerError, Status: "500 Internal Server Error",
-	Body: []byte(`{"jsonrpc":"2.0","error":{"code":-32701,"message":"broker: node error"}}`)}
+var http500 = rpc.HTTPError{
+	StatusCode: http.StatusInternalServerError, Status: "500 Internal Server Error",
+	Body: []byte(`{"jsonrpc":"2.0","error":{"code":-32701,"message":"broker: node error"}}`),
+}
 
 // recorder records which endpoint got which transaction hash.
 type recorder struct {
@@ -178,5 +182,25 @@ func TestSendTransactionStopsWhenTheCallerGaveUp(t *testing.T) {
 	}
 	if n := secondary.Load(); n != 0 {
 		t.Fatalf("secondary asked %d times after the caller gave up, want 0", n)
+	}
+}
+
+// pkg/node registers the chain backend's metrics through metrics.Collector
+// only, so the backend must satisfy it, and its collectors must register into
+// one registry without a conflict (#779).
+var _ metrics.Collector = (*failover.Backend)(nil)
+
+func TestMetricsRegisterOnce(t *testing.T) {
+	t.Parallel()
+
+	b := newBackend(t, endpoint("primary"), endpoint("secondary"))
+	reg := prometheus.NewRegistry()
+	for _, c := range b.Metrics() {
+		if err := reg.Register(c); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	if err := reg.Register(b.Metrics()[0]); err == nil {
+		t.Fatal("a second registration of the same collector succeeded; the registry check this test relies on is not working")
 	}
 }

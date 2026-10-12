@@ -78,7 +78,6 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/topology/lightnode"
 	"github.com/ethersphere/bee/v2/pkg/tracing"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
-	"github.com/ethersphere/bee/v2/pkg/transaction/failover"
 	"github.com/ethersphere/bee/v2/pkg/util/abiutil"
 	"github.com/ethersphere/bee/v2/pkg/util/ioutil"
 	"github.com/ethersphere/bee/v2/pkg/util/nbhdutil"
@@ -1846,10 +1845,6 @@ func NewBee(
 		apiService.MustRegisterMetrics(saludService.Metrics()...)
 		apiService.MustRegisterMetrics(stateStoreMetrics.Metrics()...)
 		apiService.MustRegisterMetrics(getMetrics(nodeMetrics)...)
-		// Only a node with more than one RPC endpoint has a failover backend.
-		if fb, ok := chainBackend.(*failover.Backend); ok {
-			apiService.MustRegisterMetrics(fb.Metrics()...)
-		}
 
 		if providersService != nil {
 			apiService.MustRegisterMetrics(providersService.Metrics()...)
@@ -1879,6 +1874,8 @@ func NewBee(
 		if pssServiceMetrics, ok := pssService.(metrics.Collector); ok {
 			apiService.MustRegisterMetrics(pssServiceMetrics.Metrics()...)
 		}
+		// This also registers the RPC failover backend's metrics (#772); it
+		// must not be registered again elsewhere (#779).
 		if swapBackendMetrics, ok := chainBackend.(metrics.Collector); ok {
 			apiService.MustRegisterMetrics(swapBackendMetrics.Metrics()...)
 		}
