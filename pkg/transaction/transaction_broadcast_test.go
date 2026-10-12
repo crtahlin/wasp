@@ -39,6 +39,12 @@ type broadcastFixture struct {
 
 	store   storage.StateStorer
 	service transaction.Service
+
+	// what newService needs to build another service on the same store
+	sender  common.Address
+	signer  crypto.Signer
+	backend transaction.Backend
+	monitor transaction.Monitor
 }
 
 func newBroadcastFixture(t *testing.T) *broadcastFixture {
@@ -121,12 +127,21 @@ func newBroadcastFixture(t *testing.T) *broadcastFixture {
 		}),
 	)
 
-	f.service, err = transaction.NewService(log.Noop, sender, backend, signer, f.store, big.NewInt(5), monitor, 0)
+	f.sender, f.signer, f.backend, f.monitor = sender, signer, backend, monitor
+	f.service = f.newService(t)
+	return f
+}
+
+// newService builds a transaction service on the fixture's store and
+// backend, as a node restart would.
+func (f *broadcastFixture) newService(t *testing.T) transaction.Service {
+	t.Helper()
+	s, err := transaction.NewService(log.Noop, f.sender, f.backend, f.signer, f.store, big.NewInt(5), f.monitor, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	testutil.CleanupCloser(t, f.service)
-	return f
+	testutil.CleanupCloser(t, s)
+	return s
 }
 
 func (f *broadcastFixture) sentTxs() []*types.Transaction {

@@ -82,13 +82,11 @@ Retrying a revert on another endpoint would be wrong twice over: it is a correct
 answer, and hiding it behind a second opinion would mask a genuine contract or
 configuration problem.
 
-**`SendTransaction` does not fail over.** If the primary accepted the
-transaction and the response was lost, resending elsewhere risks a duplicate, and
-the two endpoints may have different mempool views so `PendingNonceAt` can
-disagree. bee already persists pending transactions through
-`transaction.Service` and its state store, and has a monitor that watches for
-confirmation. On a send failure the failover layer returns the error and lets
-that existing machinery own the retry. Reads fail over; writes do not.
+**`SendTransaction` does not fail over** in this design. That was changed by
+[#772](https://github.com/crtahlin/wasp/issues/772): the duplicate risk named
+here does not exist when the resend is the same signed bytes, and the retry
+this paragraph left to `transaction.Service` did not exist. See
+`docs/experiments/send-failover-identical-bytes/spec.md`.
 
 **Chain ID is validated per endpoint at startup and any mismatch is fatal.** A
 disagreement means the operator pointed at the wrong network, which is a

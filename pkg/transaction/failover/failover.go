@@ -87,6 +87,7 @@ type Backend struct {
 	endpoints []*endpoint
 	logger    log.Logger
 	maxLag    uint64
+	metrics   metrics
 
 	active  atomic.Int32  // index into endpoints
 	highest atomic.Uint64 // highest block number observed anywhere
@@ -107,7 +108,7 @@ func New(logger log.Logger, maxLag uint64, endpoints ...Endpoint) (*Backend, err
 		maxLag = DefaultMaxBlockLag
 	}
 
-	b := &Backend{logger: logger, maxLag: maxLag}
+	b := &Backend{logger: logger, maxLag: maxLag, metrics: newMetrics()}
 	first := -1
 	for i, e := range endpoints {
 		ep := &endpoint{name: e.Name, dial: e.Dial}
@@ -320,27 +321,6 @@ func (b *Backend) SuggestedFeeAndTip(ctx context.Context, gasPrice *big.Int, boo
 		return res{f, t}, err
 	})
 	return r.fee, r.tip, err
-}
-
-// SendTransaction deliberately does NOT fail over.
-//
-// If the endpoint accepted the transaction and the response was lost, resending
-// elsewhere risks a duplicate; and two endpoints can hold different mempools, so
-// the nonce this was built against may not be the nonce the next one expects.
-// bee already persists pending transactions through transaction.Service and
-// watches them to confirmation, so the retry belongs there, with the state to do
-// it safely. Reads fail over; writes do not.
-func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
-	_, ep, live := b.current()
-	if err := live.SendTransaction(ctx, tx); err != nil {
-		if isTransportFailure(err) {
-			b.logger.Warning("send transaction failed at the transport level; not retrying "+
-				"elsewhere, because a lost response may mean it was accepted",
-				"endpoint", ep.name, "tx", tx.Hash())
-		}
-		return err
-	}
-	return nil
 }
 
 // Close closes every connected endpoint, not only the active one. Endpoints

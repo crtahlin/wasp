@@ -156,8 +156,8 @@ the hash.
 ### 3. `sendAndWait`: wait on an ambiguous transaction instead of failing
 
 In `pkg/storageincentives/redistribution`, `sendAndWait` returns at once when
-the send returns an error. It now waits for the receipt, with the caller's
-context, when the send error is **not** `transaction.ErrNotBroadcast` and a
+the send returns an error. For a **claim or a commit** it now waits for the
+receipt, with the caller's context, when the send error is **not** `transaction.ErrNotBroadcast` and a
 non-zero transaction hash was returned. That is exactly the set of sends
 `storeAndBroadcast` marks as ambiguous: the transaction is stored and may be
 on its way. With part 2 re-broadcasting it, a claim whose first send failed is
@@ -174,6 +174,12 @@ wait ends.
 
 Errors before the broadcast (`ErrNotBroadcast`, zero hash) still return at
 once.
+
+**Reveals keep failing at once** (found while implementing). The revealer
+checks its reveal every block and replaces it with raised fees when it is
+lost or stuck. A wait inside `sendAndWait` would hold that loop until the
+claim phase, so `Reveal` passes `failOnAmbiguous` and `Claim` and `Commit`
+pass `waitOnAmbiguous`.
 
 ### Code, tests and documents that change with it
 
@@ -218,9 +224,10 @@ transactions to its own RPC endpoints.
   restored at start.
 - Part 1, context: with the caller's context already done, no endpoint after
   the first is tried.
-- Part 3: a claim whose send fails at the transport level, then is mined:
-  `Claim` returns success within the context; with no receipt before the
-  context ends, it returns the context error.
+- Part 3: a claim or commit whose send fails at the transport level, then is
+  mined: it returns success within the context; with no receipt before the
+  context ends, it returns both the send error and the context error. A
+  reveal returns the send error at once. `ErrNotBroadcast` never waits.
 - A mutation check for each part: removing the loop, the re-broadcast or the
   wait makes the matching test fail with a message, not a hang.
 
