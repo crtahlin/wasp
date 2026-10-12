@@ -16,3 +16,8 @@ func SetAmbiguousRebroadcastInterval(d time.Duration) func() {
 	old := ambiguousRebroadcastOverride.Swap(int64(d))
 	return func() { ambiguousRebroadcastOverride.Store(old) }
 }
+
+var (
+	RebroadcastWindowOpen = rebroadcastWindowOpen
+	NewerThan             = newerThan
+)

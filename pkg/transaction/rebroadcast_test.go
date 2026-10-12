@@ -7,6 +7,7 @@ package transaction_test
 import (
 	"context"
 	"errors"
+	"math/big"
 	"testing"
 	"time"
 
@@ -143,4 +144,93 @@ func TestAmbiguousTransactionIsRebroadcastAfterARestart(t *testing.T) {
 
 	f.newService(t)
 	waitFor(t, "a re-broadcast after the restart", func() bool { return f.sendsOf(txHash) > before })
+}
+
+// No copy goes out in the last two intervals before the ambiguity times out:
+// after that the nonce may be given to another transaction (review of #775).
+func TestRebroadcastWindowClosesBeforeTheTimeout(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	interval := 30 * time.Second
+	for _, tc := range []struct {
+		age  time.Duration
+		open bool
+	}{
+		{0, true},
+		{transaction.AmbiguousPendingTimeout - 2*interval - time.Second, true},
+		{transaction.AmbiguousPendingTimeout - 2*interval, false},
+		{transaction.AmbiguousPendingTimeout - interval, false},
+		{transaction.AmbiguousPendingTimeout, false},
+	} {
+		if got := transaction.RebroadcastWindowOpen(now.Add(-tc.age), interval, now); got != tc.open {
+			t.Errorf("age %s: window open %v, want %v", tc.age, got, tc.open)
+		}
+	}
+}
+
+func TestNewerThan(t *testing.T) {
+	t.Parallel()
+
+	old := &transaction.StoredTransaction{Created: 100, GasFeeCap: big.NewInt(10)}
+	for _, tc := range []struct {
+		name  string
+		other *transaction.StoredTransaction
+		newer bool
+	}{
+		{"created later", &transaction.StoredTransaction{Created: 101, GasFeeCap: big.NewInt(10)}, true},
+		{"same second, higher fee cap", &transaction.StoredTransaction{Created: 100, GasFeeCap: big.NewInt(11)}, true},
+		{"same second, same fee cap", &transaction.StoredTransaction{Created: 100, GasFeeCap: big.NewInt(10)}, false},
+		{"created earlier", &transaction.StoredTransaction{Created: 99, GasFeeCap: big.NewInt(20)}, false},
+	} {
+		if got := transaction.NewerThan(tc.other, old); got != tc.newer {
+			t.Errorf("%s: newer %v, want %v", tc.name, got, tc.newer)
+		}
+	}
+}
+
+// A replacement whose own send was ambiguous is re-broadcast; the older
+// original does not stop it.
+func TestAmbiguousReplacementIsRebroadcast(t *testing.T) {
+	defer transaction.SetAmbiguousRebroadcastInterval(testInterval)()
+
+	f := newBroadcastFixture(t)
+	original := f.ambiguousSend(t, f.service)
+
+	f.mu.Lock()
+	f.sendErr = errors.New("connection reset")
+	f.mu.Unlock()
+	replacement, err := f.service.ReplaceTransaction(context.Background(), original, nil)
+	if err == nil || replacement == (common.Hash{}) {
+		t.Fatalf("replace: hash %s, error %v; want an ambiguous replacement", replacement, err)
+	}
+	f.mu.Lock()
+	f.sendErr = nil
+	f.mu.Unlock()
+
+	waitFor(t, "a re-broadcast of the replacement", func() bool { return f.sendsOf(replacement) >= 2 })
+}
+
+// Once the nonce is used on chain, by this transaction or another, the
+// transaction is not sent again.
+func TestAmbiguousTransactionIsNotRebroadcastOnceItsNonceIsUsed(t *testing.T) {
+	defer transaction.SetAmbiguousRebroadcastInterval(testInterval)()
+
+	f := newBroadcastFixture(t)
+	txHash := f.ambiguousSend(t, f.service)
+	waitFor(t, "a re-broadcast", func() bool { return f.sendsOf(txHash) >= 2 })
+
+	stored, err := f.service.StoredTransaction(txHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.onchain = stored.Nonce + 1
+	f.mu.Unlock()
+	time.Sleep(5 * testInterval)
+	n := f.sendsOf(txHash)
+	time.Sleep(10 * testInterval)
+	if m := f.sendsOf(txHash); m != n {
+		t.Fatalf("re-broadcast after its nonce was used: %d sends, then %d", n, m)
+	}
 }

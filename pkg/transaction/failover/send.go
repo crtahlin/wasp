@@ -86,6 +86,7 @@ func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) er
 		}
 		var rpcErr rpc.Error
 		if !errors.As(err, &rpcErr) {
+			b.metrics.SendResent.WithLabelValues("answered").Inc()
 			return err
 		}
 		switch classifySendAnswer(err) {
@@ -97,8 +98,10 @@ func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) er
 			// This transaction or another with its nonce is mined; whether it
 			// was this one is for the transaction service to find out, so the
 			// send stays ambiguous, as the first error made it.
+			b.metrics.SendResent.WithLabelValues("answered").Inc()
 			return first
 		default:
+			b.metrics.SendResent.WithLabelValues("answered").Inc()
 			return err
 		}
 	}

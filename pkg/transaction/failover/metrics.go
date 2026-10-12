@@ -12,7 +12,8 @@ import (
 type metrics struct {
 	// SendResent counts sends of a transaction to a further endpoint after
 	// the active one failed at the transport level, by outcome: accepted,
-	// known (already in that endpoint's pool), or failed.
+	// known (already in that endpoint's pool), answered (any other answer,
+	// returned to the caller), or failed (a transport failure there too).
 	SendResent *prometheus.CounterVec
 }
 

@@ -149,3 +149,16 @@ func TestClaimDoesNotWaitWhenNotBroadcast(t *testing.T) {
 		t.Fatalf("waited %d times for a transaction that was never broadcast", waits.Load())
 	}
 }
+
+// A claim whose ambiguous send is mined but reverts reports the revert.
+func TestClaimOnAnAmbiguousSendReportsARevert(t *testing.T) {
+	t.Parallel()
+
+	var waits atomic.Int32
+	c := ambiguousContract(t, &waits, func(context.Context) (*types.Receipt, error) {
+		return &types.Receipt{Status: 0}, nil
+	})
+	if _, err := c.Claim(gasCtx(), randChunkInclusionProofs(t)); !errors.Is(err, transaction.ErrTransactionReverted) {
+		t.Fatalf("claim: %v, want ErrTransactionReverted", err)
+	}
+}
