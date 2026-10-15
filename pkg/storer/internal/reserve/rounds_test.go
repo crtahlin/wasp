@@ -556,6 +556,29 @@ func TestEvictionKeepsServing(t *testing.T) {
 				kept = append(kept, put(target.ID, 5), put(other.ID, 0))
 			}
 
+			// The chunks stored during the eviction are made before it starts.
+			// Since Bee v2.8.3 the reserve takes only valid chunks, and finding
+			// one in bin 6 takes about a hundred hashes, which under the race
+			// detector left too few retrievals inside the eviction.
+			var made []swarm.Chunk
+			for range 512 {
+				made = append(made,
+					chunk.GenerateTestRandomChunkAt(t, baseAddr, 6).WithStamp(postagetesting.MustNewBatchStamp(target.ID)),
+					chunk.GenerateTestRandomChunkAt(t, baseAddr, 0).WithStamp(postagetesting.MustNewBatchStamp(other.ID)))
+			}
+			putNext := func(id []byte, bin int) swarm.Chunk {
+				t.Helper()
+				if len(made) == 0 {
+					return put(id, bin)
+				}
+				ch := made[0]
+				made = made[1:]
+				if err := r.Put(context.Background(), ch); err != nil {
+					t.Fatal(err)
+				}
+				return ch
+			}
+
 			var maxHold time.Duration
 			hooks := reserve.EvictionHooks{
 				After: func(_ int, took time.Duration) { maxHold = max(maxHold, took) },
@@ -590,7 +613,7 @@ func TestEvictionKeepsServing(t *testing.T) {
 				// New chunks into the batch being evicted, at and below the
 				// bin it evicts, and into another batch.
 				t0 := time.Now()
-				added = append(added, put(target.ID, 6), put(other.ID, 0))
+				added = append(added, putNext(target.ID, 6), putNext(other.ID, 0))
 				ch := kept[gets%len(kept)]
 				if err := get(ch); err != nil {
 					t.Fatalf("serving a kept chunk during the eviction: %v", err)
