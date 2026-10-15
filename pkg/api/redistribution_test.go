@@ -203,6 +203,14 @@ func TestRedistributionStatus(t *testing.T) {
 			"round":                   float64(0),
 			"block":                   float64(5),
 			"hasSufficientFunds":      true,
+			// read by the fleet's status script, by name
+			"isFrozen":      false,
+			"isFullySynced": false,
+			"isHealthy":     false,
+			// Bee v2.8.3's fields, read from the same wasp state
+			"enabled":               true,
+			"hasCommittedThisRound": true,
+			"hasRevealedThisRound":  false,
 		} {
 			if got[field] != want {
 				t.Errorf("%s: got %v, want %v", field, got[field], want)

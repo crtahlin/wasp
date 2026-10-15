@@ -206,6 +206,28 @@ func TestShutdownRegistersPushSyncAndRetrieval(t *testing.T) {
 	}
 }
 
+// TestShutdownRegistersProviders checks that the content-providers service,
+// when it runs, is in the Shutdown fan-out next to the closers Bee v2.8.3
+// lists, so its background worker is joined when the node stops; and that
+// a node without it registers no nil closer.
+func TestShutdownRegistersProviders(t *testing.T) {
+	t.Parallel()
+
+	providers := &trackingCloser{}
+	closers := node.NewTestBeeWithProviders(providers).ShutdownClosersByName()
+	got, ok := closers["providers"]
+	if !ok {
+		t.Fatal("providers closer not registered in Shutdown fan-out")
+	}
+	if got != providers {
+		t.Fatal("providers closer registered with the wrong instance")
+	}
+
+	if _, ok := node.NewTestBeeWithProviders(nil).ShutdownClosersByName()["providers"]; ok {
+		t.Fatal("providers closer registered although the service does not run")
+	}
+}
+
 // TestShallowReceiptToleranceFor covers the issue #62 arithmetic: the tolerance
 // is clamped at zero in signed arithmetic, so a doubling greater than the network
 // maximum can never wrap it to a large uint8 and disable the shallow-receipt check.

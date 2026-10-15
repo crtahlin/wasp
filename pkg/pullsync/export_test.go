@@ -139,3 +139,16 @@ func (s *Syncer) StreamLimitExceededCount() float64 {
 
 // UnwrapHeld exposes the hand-off of a held chunk to pss or gsoc.
 func (s *Syncer) UnwrapHeld(ch swarm.Chunk) { s.unwrapHeld(ch) }
+
+// inUse returns how many of the peer's slots are taken.
+func (l *peerStreamLimiter) inUse(peer swarm.Address) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.pools[peer.ByteString()])
+}
+
+// SyncStreamsInUse returns how many sync stream slots the peer holds.
+func (s *Syncer) SyncStreamsInUse(peer swarm.Address) int { return s.syncStreams.inUse(peer) }
+
+// CursorStreamsInUse returns how many cursor stream slots the peer holds.
+func (s *Syncer) CursorStreamsInUse(peer swarm.Address) int { return s.cursorStreams.inUse(peer) }
