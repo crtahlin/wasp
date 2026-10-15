@@ -25,6 +25,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/storageincentives/staking"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
 	"resenje.org/singleflight"
 )
 
@@ -135,6 +136,15 @@ func New(overlay swarm.Address,
 // Next, in the claim phase, we check if we've won, and the cycle repeats. The cycle must occur in the length of one round.
 // blockTime is read each time it is needed, so a change in the chain's block
 // time is followed without a restart (#540).
+// lotteryAttemptTimeout bounds each RPC endpoint attempt of a commit, reveal or
+// claim call. Those calls are marked persistent (#783): an endpoint that
+// accepts a request and never answers is left after this long and the next
+// one is asked, going round the endpoints until the phase ends, and a sent
+// transaction is copied to every endpoint. The sample phase is not marked; its
+// context also bounds the reserve sample. 10 s matches the failover backend's
+// floor for a shared deadline.
+const lotteryAttemptTimeout = 10 * time.Second
+
 func (a *Agent) start(blockTime func() time.Duration, blocksPerRound, blocksPerPhase uint64) {
 	defer a.wg.Done()
 
@@ -148,6 +158,7 @@ func (a *Agent) start(blockTime func() time.Duration, blocksPerRound, blocksPerP
 	}
 
 	phaseEvents.On(commit, func(ctx context.Context) {
+		ctx = transaction.WithPersistentCalls(ctx, lotteryAttemptTimeout)
 		phaseEvents.Cancel(claim)
 
 		round, _ := a.state.currentRoundAndPhase()
@@ -156,12 +167,14 @@ func (a *Agent) start(blockTime func() time.Duration, blocksPerRound, blocksPerP
 	})
 
 	phaseEvents.On(reveal, func(ctx context.Context) {
+		ctx = transaction.WithPersistentCalls(ctx, lotteryAttemptTimeout)
 		phaseEvents.Cancel(commit, sample)
 		round, _ := a.state.currentRoundAndPhase()
 		logErr(reveal, round, a.handleReveal(ctx, round))
 	})
 
 	phaseEvents.On(claim, func(ctx context.Context) {
+		ctx = transaction.WithPersistentCalls(ctx, lotteryAttemptTimeout)
 		phaseEvents.Cancel(reveal)
 		phaseEvents.Publish(sample)
 
