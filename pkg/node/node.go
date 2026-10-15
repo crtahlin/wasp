@@ -173,6 +173,9 @@ type Options struct {
 	// stale this long (#583). Zero, the default, never stops it: a stale node
 	// stays up in a degraded state.
 	PostageStallShutdown time.Duration
+	// PostageSyncBlockRange is the largest page of the postage listener's
+	// adaptive pager (postage-sync-block-range). Zero uses the default.
+	PostageSyncBlockRange uint64
 	// StopWaitForReveal makes a stop wait for a pending storage-lottery
 	// reveal, bounded by the end of its reveal phase (#725).
 	StopWaitForReveal               bool
@@ -1139,7 +1142,7 @@ func NewBee(
 		contractGasLimit,
 	)
 
-	eventListener = listener.New(b.syncingStopped, logger, chainBackend, postageStampContractAddress, postageStampContractABI, blockTime, o.PostageConfirmationDepth, postageSyncingStallingTimeout, postageSyncingBackoffTimeout, listener.WithStallShutdown(o.PostageStallShutdown))
+	eventListener = listener.New(b.syncingStopped, logger, chainBackend, postageStampContractAddress, postageStampContractABI, blockTime, o.PostageConfirmationDepth, postageSyncingStallingTimeout, postageSyncingBackoffTimeout, listener.WithStallShutdown(o.PostageStallShutdown), listener.WithBlockPage(o.PostageSyncBlockRange))
 	b.listenerCloser = eventListener
 
 	// Construct protocols.
@@ -1901,6 +1904,7 @@ func NewBee(
 		apiService.SetRedistributionAgent(agent)
 
 		// api metrics are constructed on api.Service.Configure
+		apiService.MustRegisterMetrics(apiService.Metrics()...)
 		statusMetricsRegistry.MustRegister(apiService.StatusMetrics()...)
 	}
 

@@ -96,6 +96,7 @@ const (
 	optionNameP2PInboundStreamsUnnegPeer   = "p2p-inbound-streams-unnegotiated-per-peer"
 	optionNamePostageContractAddress       = "postage-stamp-address"
 	optionNamePostageContractStartBlock    = "postage-stamp-start-block"
+	optionNamePostageSyncBlockRange        = "postage-sync-block-range"
 	optionNamePriceOracleAddress           = "price-oracle-address"
 	optionNameRedistributionAddress        = "redistribution-address"
 	optionNameStakingAddress               = "staking-address"
@@ -466,6 +467,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(optionNameUltraLightNodeLimit, 0, "light-node slots that ultra-light peers (light peers without a chequebook) may take; 0 means the same as light-node-limit, and a larger value is reduced to it. Raising it lets clients that cannot pay take more of the node's free bandwidth and handshakes; lowering it refuses such clients sooner and sends them to other nodes, while paying light peers keep their slots")
 	cmd.Flags().String(optionNamePostageContractAddress, "", "postage stamp contract address")
 	cmd.Flags().Uint64(optionNamePostageContractStartBlock, 0, "postage stamp contract start block number")
+	cmd.Flags().Uint64(optionNamePostageSyncBlockRange, listener.DefaultBlockPage, "largest number of blocks one eth_getLogs request asks for while syncing postage contract events; the page halves after a failed request and grows back to this size; 0 uses the default of 5000. Raising it means fewer requests during a catch-up but larger responses that an RPC provider may refuse; lowering it means more requests and a slower catch-up")
 	cmd.Flags().String(optionNamePriceOracleAddress, "", "price oracle contract address")
 	cmd.Flags().String(optionNameRedistributionAddress, "", "redistribution contract address")
 	cmd.Flags().String(optionNameStakingAddress, "", "staking contract address")
@@ -500,7 +502,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(optionRedistributionSyncRateThreshold, 0, "pull-sync rate in chunks per second below which the node counts itself synced enough to enter the redistribution draw. Default 0 keeps the strict behaviour of requiring a fully settled sync rate. A positive value is scaled by 2^reserve-capacity-doubling; raising it lets a doubled node participate while still syncing, at the risk of committing an incomplete sample and being frozen. See the reserve-capacity-doubling operator guide.")
 	cmd.Flags().Bool(optionSkipPostageSnapshot, false, "skip postage snapshot")
 	cmd.Flags().Uint64(optionNameMinimumGasTipCap, 0, "minimum gas tip cap in wei for transactions, 0 means use suggested gas tip cap")
-	cmd.Flags().Uint64(optionNameGasLimitFallback, 500_000, "gas limit fallback when estimation fails for contract transactions")
+	cmd.Flags().Uint64(optionNameGasLimitFallback, 900_000, "gas limit fallback when estimation fails for contract transactions")
 	cmd.Flags().Bool(optionNameP2PWSSEnable, false, "Enable Secure WebSocket P2P connections")
 	cmd.Flags().String(optionP2PWSSAddr, ":1635", "p2p wss address")
 	cmd.Flags().String(optionNATWSSAddr, "", "WSS NAT exposed address")

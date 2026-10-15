@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethersphere/bee/v2/pkg/bmt"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/events"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
@@ -247,3 +248,32 @@ const (
 
 // SetDrainWindow shortens the shutdown drain of a real DB for a test.
 func SetDrainWindow(db *DB, d time.Duration) { db.drainWindow = d }
+
+// TransformedAddress exposes the sampler's per-chunk hashing so it can be
+// benchmarked on its own.
+//
+// The exported signature takes a swarm.Chunk and is deliberately held stable
+// even where transformedAddress itself does not, so that the same benchmark
+// source can be run against branches that shape the internal function
+// differently. Only this shim changes between them.
+func TransformedAddress(hasher bmt.Hasher, ch swarm.Chunk, chType swarm.ChunkType) (swarm.Address, error) {
+	return transformedAddress(hasher, ch, chType)
+}
+
+// PutLegacyRogueBinItem writes a reserve bin entry of unspecified chunk type
+// straight into the index, with no chunk data behind it. Since Bee v2.8.3
+// reserve.Put refuses such a chunk, so this is the only way a test can build
+// the legacy entries the sampler's rogue check and the rogue-chunk migration
+// exist for, or an entry in a bin no valid random chunk reaches in practice.
+func (db *DB) PutLegacyRogueBinItem(ctx context.Context, bin uint8, binID uint64, addr swarm.Address, batchID []byte) error {
+	return db.storage.Run(ctx, func(s transaction.Store) error {
+		return s.IndexStore().Put(&reserve.ChunkBinItem{
+			Bin:       bin,
+			BinID:     binID,
+			Address:   addr,
+			BatchID:   batchID,
+			StampHash: make([]byte, swarm.HashSize),
+			ChunkType: swarm.ChunkTypeUnspecified,
+		})
+	})
+}

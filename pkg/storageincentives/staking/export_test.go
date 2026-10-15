@@ -4,7 +4,10 @@
 
 package staking
 
-var Erc20ABI = erc20ABI
+var (
+	Erc20ABI            = erc20ABI
+	CalculateMinDeposit = calculateMinDeposit
+)
 
 // NewLegacyStakeServiceWithFactory exposes the factory-injected constructor so a
 // test can supply mock staking clients instead of real on-chain ones.

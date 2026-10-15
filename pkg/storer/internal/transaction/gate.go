@@ -113,6 +113,11 @@ type closedChunkStore struct{}
 func (closedChunkStore) Get(context.Context, swarm.Address) (swarm.Chunk, error) {
 	return nil, ErrClosed
 }
+
+func (closedChunkStore) GetInto(context.Context, swarm.Address, []byte) (int, error) {
+	return 0, ErrClosed
+}
+
 func (closedChunkStore) Has(context.Context, swarm.Address) (bool, error)      { return false, ErrClosed }
 func (closedChunkStore) Put(context.Context, swarm.Chunk) error                { return ErrClosed }
 func (closedChunkStore) Delete(context.Context, swarm.Address) error           { return ErrClosed }

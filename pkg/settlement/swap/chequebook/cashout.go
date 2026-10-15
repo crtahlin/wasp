@@ -186,6 +186,10 @@ func (s *cashoutService) CashoutStatus(ctx context.Context, chequebookAddress co
 		return nil, err
 	}
 
+	if action.Cheque.CumulativePayout == nil {
+		return nil, fmt.Errorf("nil cumulative payout on cashout action loaded from statestore for chequebook %x: %w", chequebookAddress, ErrNoCheque)
+	}
+
 	_, pending, err := s.backend.TransactionByHash(ctx, action.TxHash)
 	if err != nil {
 		// treat not found as pending

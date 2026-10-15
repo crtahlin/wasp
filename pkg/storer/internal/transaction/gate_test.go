@@ -214,6 +214,10 @@ func TestGateCallsAfterStopAreRefused(t *testing.T) {
 	if _, err := st.ChunkStore().Get(context.Background(), swarm.RandAddress(t)); !errors.Is(err, transaction.ErrClosed) {
 		t.Errorf("chunk Get: %v", err)
 	}
+	// GetInto came with Bee v2.8.3 and is gated like Get.
+	if _, err := st.ChunkStore().GetInto(context.Background(), swarm.RandAddress(t), make([]byte, swarm.SocMaxChunkSize)); !errors.Is(err, transaction.ErrClosed) {
+		t.Errorf("chunk GetInto: %v", err)
+	}
 	if err := st.Run(context.Background(), func(s transaction.Store) error {
 		return s.IndexStore().Put(item)
 	}); !errors.Is(err, transaction.ErrClosed) {

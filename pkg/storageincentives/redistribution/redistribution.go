@@ -149,7 +149,7 @@ func (c *contract) Claim(ctx context.Context, proofs ChunkInclusionProofs) (comm
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             max(sctx.GetGasLimit(ctx), c.gasLimit),
-		MinEstimatedGasLimit: 500_000,
+		MinEstimatedGasLimit: 800_000,
 		Value:                big.NewInt(0),
 		Description:          "claim win transaction",
 	}
@@ -172,7 +172,7 @@ func (c *contract) Commit(ctx context.Context, obfusHash []byte, round uint64, b
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             max(sctx.GetGasLimit(ctx), c.gasLimit),
-		MinEstimatedGasLimit: 500_000,
+		MinEstimatedGasLimit: 800_000,
 		Value:                big.NewInt(0),
 		Description:          "commit transaction",
 	}
@@ -195,7 +195,7 @@ func (c *contract) Reveal(ctx context.Context, storageDepth uint8, reserveCommit
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             max(sctx.GetGasLimit(ctx), c.gasLimit),
-		MinEstimatedGasLimit: 500_000,
+		MinEstimatedGasLimit: 800_000,
 		MinBaseFeeMultiple:   RevealBaseFeeMultiple,
 		Value:                big.NewInt(0),
 		Description:          "reveal transaction",

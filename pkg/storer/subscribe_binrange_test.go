@@ -32,7 +32,9 @@ func TestSubscribeBinOutOfRangeNeverDelivers(t *testing.T) {
 	defer unsub()
 
 	putter := db.ReservePutter()
-	for po := range int(swarm.MaxBins) {
+	// Low bins only: since Bee v2.8.3 the reserve accepts only valid chunks,
+	// and a valid random chunk in a high bin takes about 2^bin attempts.
+	for po := range 8 {
 		for range 3 {
 			if err := putter.Put(context.Background(), chunk.GenerateTestRandomChunkAt(t, baseAddr, po)); err != nil {
 				t.Fatal(err)
