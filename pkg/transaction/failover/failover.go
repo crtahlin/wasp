@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -91,6 +92,13 @@ type Backend struct {
 
 	active  atomic.Int32  // index into endpoints
 	highest atomic.Uint64 // highest block number observed anywhere
+
+	// closed ends the copies of a persistent send (#783) when the backend is
+	// closed; copies tracks them so Close waits for them before it closes
+	// the connections they use.
+	closed      context.Context
+	closeCopies context.CancelFunc
+	copies      sync.WaitGroup
 }
 
 var _ transaction.Backend = (*Backend)(nil)
@@ -109,6 +117,7 @@ func New(logger log.Logger, maxLag uint64, endpoints ...Endpoint) (*Backend, err
 	}
 
 	b := &Backend{logger: logger, maxLag: maxLag, metrics: newMetrics()}
+	b.closed, b.closeCopies = context.WithCancel(context.Background())
 	first := -1
 	for i, e := range endpoints {
 		ep := &endpoint{name: e.Name, dial: e.Dial}
@@ -165,13 +174,22 @@ func (b *Backend) advance(from int, cause error) bool {
 // caller's deadline is shared out among the endpoints still to try (#583).
 var minAttemptTimeout = 10 * time.Second
 
-// attemptContext derives the context for one endpoint attempt. A caller with
-// no deadline keeps its own context, as before. A caller with a deadline gets
+// wrapPause is how long a persistent call (#783) waits before it starts again
+// at the first endpoint, so that endpoints which all fail at once are asked
+// at most once a second per call.
+var wrapPause = time.Second
+
+// attemptContext derives the context for one endpoint attempt. A persistent
+// call (#783) gets its own fixed bound. Otherwise a caller with no deadline
+// keeps its own context, as before, and a caller with a deadline gets
 // that remaining time divided by the connected endpoints still to try, from
 // the active one on, with a floor of minAttemptTimeout, so an endpoint that
 // hangs uses one share and the next one is still asked within the call
 // (#583). The derived context never outlives the caller's.
 func (b *Backend) attemptContext(ctx context.Context, from int) (context.Context, context.CancelFunc) {
+	if attempt, ok := transaction.PersistentCalls(ctx); ok {
+		return context.WithTimeout(ctx, attempt)
+	}
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return ctx, func() {}
@@ -199,9 +217,14 @@ func (b *Backend) attemptContext(ctx context.Context, from int) (context.Context
 // own context has ended, call returns the error instead of moving on: every
 // further endpoint would fail at once on the expired context, and the shared
 // active endpoint would jump past endpoints nobody asked (#583).
+//
+// An ordinary call tries each endpoint once. A persistent call (#783) does not
+// stop after the last: it starts again at the first connected endpoint, after
+// a pause, until an endpoint answers or the caller's context ends.
 func call[T any](ctx context.Context, b *Backend, op func(context.Context, transaction.Backend) (T, error)) (T, error) {
 	var zero T
-	for attempts := 0; attempts < len(b.endpoints); attempts++ {
+	_, persist := transaction.PersistentCalls(ctx)
+	for attempts := 0; persist || attempts < len(b.endpoints); attempts++ {
 		i, ep, live := b.current()
 		actx, cancel := b.attemptContext(ctx, i)
 		v, err := op(actx, live)
@@ -215,12 +238,52 @@ func call[T any](ctx context.Context, b *Backend, op func(context.Context, trans
 		if ctx.Err() != nil {
 			return zero, err
 		}
-		if !b.advance(i, err) {
+		if b.advance(i, err) {
+			continue
+		}
+		if !persist {
 			return zero, fmt.Errorf("failover: all %d endpoints failed, last was %s: %w",
 				len(b.endpoints), ep.name, err)
 		}
+		if !b.startAgain(ctx, i, err) {
+			return zero, err
+		}
 	}
 	return zero, errors.New("failover: exhausted endpoints")
+}
+
+// startAgain moves the active endpoint back to the first connected one for a
+// persistent call that found no further endpoint, then waits wrapPause. It
+// reports false when the caller's context ended during the wait.
+//
+// Moving back to the first is what Recover would do once that endpoint answered
+// its probe; this does it sooner. The compare-and-swap lets a concurrent call
+// that moved first win, as in advance.
+func (b *Backend) startAgain(ctx context.Context, from int, cause error) bool {
+	first := from
+	for i, ep := range b.endpoints {
+		if ep.live.Load() != nil {
+			first = i
+			break
+		}
+	}
+	b.active.CompareAndSwap(int32(from), int32(first))
+	b.metrics.Wraparounds.Inc()
+	b.logger.Warning("all blockchain rpc endpoints failed; starting again at the first",
+		"first", b.endpoints[first].name, "cause", cause)
+	return pause(ctx)
+}
+
+// pause waits wrapPause, and reports false when ctx ends first.
+func pause(ctx context.Context) bool {
+	t := time.NewTimer(wrapPause)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // --- transaction.Backend -----------------------------------------------------
@@ -325,7 +388,12 @@ func (b *Backend) SuggestedFeeAndTip(ctx context.Context, gasPrice *big.Int, boo
 
 // Close closes every connected endpoint, not only the active one. Endpoints
 // that were never reachable have nothing to close.
+//
+// Copies of a persistent send still under way are ended first, and Close
+// waits for them, so none uses a connection after it is closed.
 func (b *Backend) Close() {
+	b.closeCopies()
+	b.copies.Wait()
 	for _, ep := range b.endpoints {
 		if c := ep.live.Load(); c != nil {
 			c.Close()

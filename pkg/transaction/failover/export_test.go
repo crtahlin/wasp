@@ -4,7 +4,12 @@
 
 package failover
 
-import "time"
+import (
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+)
 
 // SetActive forces the active endpoint, so a test can arrange a state that
 // would otherwise need a real failure to reach.
@@ -20,4 +25,28 @@ func SetMinAttemptTimeout(d time.Duration) func() {
 	old := minAttemptTimeout
 	minAttemptTimeout = d
 	return func() { minAttemptTimeout = old }
+}
+
+// SetWrapPause replaces the pause before a persistent call starts again at
+// the first endpoint, and returns a function that restores it.
+func SetWrapPause(d time.Duration) func() {
+	old := wrapPause
+	wrapPause = d
+	return func() { wrapPause = old }
+}
+
+// Wraparounds reads the wrap-around counter.
+func Wraparounds(b *Backend) float64 { return metricValue(b.metrics.Wraparounds) }
+
+// SendCopies reads the copy counter for one result.
+func SendCopies(b *Backend, result string) float64 {
+	return metricValue(b.metrics.SendCopies.WithLabelValues(result))
+}
+
+func metricValue(m prometheus.Metric) float64 {
+	var d dto.Metric
+	if err := m.Write(&d); err != nil {
+		return -1
+	}
+	return d.GetCounter().GetValue()
 }

@@ -15,6 +15,13 @@ type metrics struct {
 	// known (already in that endpoint's pool), answered (any other answer,
 	// returned to the caller), or failed (a transport failure there too).
 	SendResent *prometheus.CounterVec
+	// Wraparounds counts times a persistent call (#783) found no further
+	// endpoint and started again at the first.
+	Wraparounds prometheus.Counter
+	// SendCopies counts copies of an accepted transaction sent to the other
+	// endpoints for a persistent call (#783), by outcome: accepted, known,
+	// answered or failed.
+	SendCopies *prometheus.CounterVec
 }
 
 func newMetrics() metrics {
@@ -25,6 +32,18 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "send_resent_total",
 			Help:      "Sends of a signed transaction to a further endpoint after a transport-level failure, by result.",
+		}, []string{"result"}),
+		Wraparounds: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "wraparounds_total",
+			Help:      "Times a persistent chain call found no further endpoint and started again at the first.",
+		}),
+		SendCopies: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "send_copies_total",
+			Help:      "Copies of an accepted transaction sent to the other endpoints, by result.",
 		}, []string{"result"}),
 	}
 }
