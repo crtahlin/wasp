@@ -92,7 +92,13 @@ signs with the larger of a fresh suggestion (twice the current base fee plus
 the boosted tip) and the old cap and tip raised by 12 %, rounded up (#734). A
 fresh suggestion is about 2/1.42 = 1.4 times above the replace threshold, so a
 base fee that keeps climbing causes one replacement every few blocks, and a base
-fee that stops climbing causes none. A replacement that is mined is the round's
+fee that stops climbing causes none. The existing rule that replaces a reveal pending for `revealReplaceAfterBlocks`
+(6) blocks, whatever its fee, now also runs within the phase, since steps no
+longer wait until the claim phase; a reveal that is includable but slow is
+therefore replaced about every 6 blocks with a cap and tip raised by at least
+12 %. That rule is kept: a pending reveal that no block has taken for 6 blocks
+is more likely to be missing from the block producers' pools than merely
+waiting. A replacement that is mined is the round's
 reveal; any listed reveal that is mined ends the round's steps
 (`listedRevealMined`), so the round is revealed once.
 
