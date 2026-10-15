@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/big"
+	"strconv"
 	"testing"
 	"time"
 
@@ -348,5 +349,81 @@ func TestReserveSampleContinuesOnBatchStoreError(t *testing.T) {
 	requireSameSample(t, "batch store error", want, got)
 	if got.Stats.BelowBalanceIgnored == 0 {
 		t.Fatal("no chunk excluded: the batches read before the failure must still be excluded")
+	}
+}
+
+// TestReserveSampleEquivalentSmallNeighbourhoods compares the two samplers
+// where the cutoff between hashers and assembly decides the result: a
+// neighbourhood with about as many usable chunks as a sample holds. In a
+// large reserve a cutoff set one item too early is hidden, because smaller
+// items keep arriving and fill the sample anyway; here every chunk counts.
+// Each neighbourhood also has two chunks stamped after the consensus time,
+// which are hashed but never enter the sample. 64 anchors per size: with
+// 16 usable chunks a cutoff set one item early changes the sample of an
+// anchor about one time in 16.
+func TestReserveSampleEquivalentSmallNeighbourhoods(t *testing.T) {
+	t.Parallel()
+
+	const (
+		depth    = 4
+		reserves = 4
+		anchors  = 16 // per reserve: one per value of the first 4 bits
+		late     = 2
+	)
+	for _, size := range []int{5, 15, 16, 17, 18, 20} {
+		t.Run("size "+strconv.Itoa(size), func(t *testing.T) {
+			t.Parallel()
+
+			for r := range reserves {
+				baseAddr := swarm.RandAddress(t)
+				opts := dbTestOps(baseAddr, 10_000, nil, nil, time.Second)
+				opts.ValidStamp = func(ch swarm.Chunk) (swarm.Chunk, error) { return ch, nil }
+				st, err := memStorer(t, opts)()
+				if err != nil {
+					t.Fatal(err)
+				}
+				consensus := uint64(time.Now().UnixNano())
+				stamp := func(ts uint64) *postage.Stamp {
+					tsBuf := make([]byte, 8)
+					binary.BigEndian.PutUint64(tsBuf, ts)
+					return postage.NewStamp(postagetesting.MustNewID(), postagetesting.MustNewID()[:8], tsBuf, postagetesting.MustNewSignature())
+				}
+
+				putter := st.ReservePutter()
+				list := make([][]byte, 0, anchors)
+				for a := range anchors {
+					anchor := swarm.RandAddress(t).Bytes()
+					anchor[0] = byte(a<<4) | anchor[0]&0x0f
+					list = append(list, anchor)
+					for i := range size + late {
+						ts := consensus - 1
+						if i >= size {
+							ts = consensus + 1
+						}
+						ch := chunk.GenerateValidRandomChunkAt(t, swarm.NewAddress(anchor), depth-1).WithStamp(stamp(ts))
+						if err := putter.Put(context.Background(), ch); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+
+				for i, anchor := range list {
+					name := "reserve " + strconv.Itoa(r) + " anchor " + strconv.Itoa(i)
+					want, err := st.ReserveSamplePreMerge(context.Background(), anchor, depth, consensus, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					got, err := st.ReserveSample(context.Background(), anchor, depth, consensus, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					requireSameSample(t, name, want, got)
+					requireItemsRehash(t, name, anchor, got.Items)
+					if wantItems := min(size, storer.SampleSize); len(got.Items) != wantItems {
+						t.Fatalf("%s: %d items, want %d", name, len(got.Items), wantItems)
+					}
+				}
+			}
+		})
 	}
 }
