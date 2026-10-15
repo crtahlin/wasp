@@ -70,7 +70,7 @@ failover backend or the transaction service.
      pass, and each retry is a free `eth_call`.
 
    The check lives in `pkg/storageincentives/redistribution` as
-   `IsWrongPhaseOrUnknown(err)`, next to the contract binding, so the agent
+   `PlayCheckRetryable(err)`, next to the contract binding, so the agent
    does not parse revert data itself.
 3. Every retry is counted and logged at debug level with the attempt number
    and the error. A check that succeeds after a retry is counted as recovered.
