@@ -54,8 +54,8 @@ failover backend or the transaction service.
    block time and asks again, up to `playCheckAttempts` calls in total
    (6, so at most 5 waits). It stops early when the context ends. It retries
    on **any** error, not only `WrongPhase()`: the call is a free `eth_call`,
-   the same lag shows up as other errors on some providers, and an error that
-   is not transient costs only a few extra reads.
+   a transport error is just as likely to pass a block later, and an error
+   that is not transient costs only a few extra reads.
 3. Every retry is counted and logged at debug level with the attempt number
    and the error. A check that succeeds after a retry is counted as recovered.
    A check that fails every attempt is logged at warning level ("play check
@@ -68,8 +68,9 @@ Time budget. The sample handler starts at the first block of the claim phase
 and may run until the end of the next commit phase: 76 + 38 = 114 blocks,
 about 570 s at 5 s blocks. A sample of a doubling-2 node takes about 2
 minutes on the operator's nodes. Five waits of one block cost at most 25 s,
-and only when the first call failed; in the traced cases the second call
-succeeds, 5 s later.
+and only when the first call failed. In the traced case the same call
+succeeds one block after the one that reverted, so the expected cost is one
+wait of about 5 s.
 
 New metrics, both counters in the `storageincentives` subsystem:
 
