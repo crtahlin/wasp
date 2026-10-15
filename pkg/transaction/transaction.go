@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
+
 	"github.com/ethersphere/bee/v2/pkg/crypto"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/safe"
@@ -132,6 +133,12 @@ type TxRequest struct {
 	GasFeeCap            *big.Int        // adds a cap to maximum fee user is willing to pay
 	Value                *big.Int        // amount of wei to send
 	Description          string          // optional description
+	// MinBaseFeeMultiple, when above 0 and GasPrice is nil, raises the fee
+	// cap to at least this many times the latest base fee plus the tip.
+	// The fee paid is still the base fee plus the tip; a higher cap only
+	// keeps the transaction includable through more blocks of rising base
+	// fee (#793).
+	MinBaseFeeMultiple uint64
 }
 
 type StoredTransaction struct {
@@ -481,6 +488,9 @@ func (t *transactionService) prepareTransaction(ctx context.Context, request *Tx
 	if err != nil {
 		return nil, err
 	}
+	if request.GasPrice == nil && request.MinBaseFeeMultiple > 0 {
+		gasFeeCap = t.raiseFeeCap(ctx, gasFeeCap, gasTipCap, request.MinBaseFeeMultiple)
+	}
 
 	t.logger.Debug("prepared transaction",
 		"to", request.To,
@@ -502,6 +512,20 @@ func (t *transactionService) prepareTransaction(ctx context.Context, request *Tx
 		GasTipCap: gasTipCap,
 		Data:      request.Data,
 	}), nil
+}
+
+// raiseFeeCap returns gasFeeCap raised to at least multiple times the
+// latest base fee plus gasTipCap. Without a readable base fee it returns
+// gasFeeCap unchanged: the suggestion it came from is still valid.
+func (t *transactionService) raiseFeeCap(ctx context.Context, gasFeeCap, gasTipCap *big.Int, multiple uint64) *big.Int {
+	header, err := t.backend.HeaderByNumber(ctx, nil)
+	if err != nil || header == nil || header.BaseFee == nil {
+		t.logger.Debug("base fee unavailable; keeping the suggested fee cap", "error", err)
+		return gasFeeCap
+	}
+	floor := new(big.Int).Mul(header.BaseFee, new(big.Int).SetUint64(multiple))
+	floor.Add(floor, gasTipCap)
+	return bigMax(gasFeeCap, floor)
 }
 
 func storedTransactionKey(txHash common.Hash) string {

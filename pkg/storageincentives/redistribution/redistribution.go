@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/sctx"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -21,6 +22,12 @@ import (
 const (
 	loggerName      = "redistributionContract"
 	BoostTipPercent = 50
+	// RevealBaseFeeMultiple is the reveal's fee cap in multiples of the
+	// latest base fee (plus the tip), against twice for other transactions:
+	// a reveal that is not included in its phase freezes the stake, and a
+	// cap of four times stays above a base fee rising through about 11 full
+	// blocks. The fee paid is unchanged (#793).
+	RevealBaseFeeMultiple = 4
 )
 
 type Contract interface {
@@ -189,6 +196,7 @@ func (c *contract) Reveal(ctx context.Context, storageDepth uint8, reserveCommit
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             max(sctx.GetGasLimit(ctx), c.gasLimit),
 		MinEstimatedGasLimit: 500_000,
+		MinBaseFeeMultiple:   RevealBaseFeeMultiple,
 		Value:                big.NewInt(0),
 		Description:          "reveal transaction",
 	}

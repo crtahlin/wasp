@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+
 	chaincfg "github.com/ethersphere/bee/v2/pkg/config"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/sctx"
@@ -364,6 +365,11 @@ func TestRedistribution(t *testing.T) {
 					if *request.To == redistributionContractAddress {
 						if !bytes.Equal(expectedCallData[:32], request.Data[:32]) {
 							return common.Hash{}, fmt.Errorf("got wrong call data. wanted %x, got %x", expectedCallData, request.Data)
+						}
+						// the reveal starts with a fee cap of four times the
+						// base fee, the value the spec gives (#793)
+						if request.MinBaseFeeMultiple != 4 {
+							return common.Hash{}, fmt.Errorf("reveal fee cap multiple %d, want 4", request.MinBaseFeeMultiple)
 						}
 						return txHashDeposited, nil
 					}
