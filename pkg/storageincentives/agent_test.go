@@ -302,9 +302,13 @@ func TestAgentParticipationToggle(t *testing.T) {
 				block:       blocksPerRound,
 				balance:     bigBalance,
 			}
+			// The node wins, so the claim phase must claim although the
+			// node was switched off after its commit.
 			contract := &mockContract{
 				t:              t,
 				expectedRadius: 8,
+				isWinner:       true,
+				salt:           testutil.RandBytes(t, swarm.HashSize),
 				beforeCommit: func() {
 					once.Do(func() { close(committed) })
 				},
@@ -329,6 +333,9 @@ func TestAgentParticipationToggle(t *testing.T) {
 			}
 			if got := contract.countCalls(isWinnerCall); got != 1 {
 				t.Fatalf("expected claim-phase winner check, got %d", got)
+			}
+			if got := contract.countCalls(claimCall); got != 1 {
+				t.Fatalf("expected the won round to be claimed while disabled, got %d claims", got)
 			}
 		})
 	})
@@ -620,6 +627,11 @@ type mockContract struct {
 	isPlayingCount  int
 	beforeIsPlaying func()
 	beforeCommit    func()
+	// isWinner is what IsWinner answers.
+	isWinner bool
+	// salt is what ReserveSalt answers; a claim needs one to build its
+	// inclusion proofs.
+	salt []byte
 	// currentRound answers CurrentRound. When nil the call fails, and the
 	// agent commits on its own round, as it did before the round check.
 	currentRound func(ctx context.Context) (uint64, error)
@@ -661,7 +673,7 @@ func (m *mockContract) playingCount() int {
 }
 
 func (m *mockContract) ReserveSalt(context.Context) ([]byte, error) {
-	return nil, nil
+	return m.salt, nil
 }
 
 func (m *mockContract) IsPlaying(_ context.Context, r uint8) (bool, error) {
@@ -681,7 +693,7 @@ func (m *mockContract) IsWinner(context.Context) (bool, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	m.callsList = append(m.callsList, isWinnerCall)
-	return false, nil
+	return m.isWinner, nil
 }
 
 func (m *mockContract) Claim(context.Context, redistribution.ChunkInclusionProofs) (common.Hash, error) {
