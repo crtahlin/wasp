@@ -31,6 +31,21 @@ const (
 	// fees instead of waited for or rebroadcast unchanged.
 	revealReplaceAfterBlocks = 6
 
+	// revealStepBlocks bounds each reveal step, receipt wait included, so
+	// the reveal loop looks at a pending reveal again within the reveal
+	// phase and can replace it with raised fees (#793). Before, the first
+	// step waited for its receipt until the claim phase.
+	revealStepBlocks = 3
+
+	// revealFeeHeadroomBlocks is how many full blocks of rising base fee
+	// a pending reveal's fee cap must still cover; below that it is
+	// replaced. A full block raises the base fee by at most 1/8.
+	revealFeeHeadroomBlocks = 3
+
+	// revealLateWarnBlocks is how many blocks before the claim phase a
+	// reveal that is listed but not mined is logged at warning level.
+	revealLateWarnBlocks = 3
+
 	// commitSettleBlocks is how many blocks past the start of the reveal
 	// phase the backend's head must be before a "not found" or
 	// "cancelled" commit counts as not on chain. The contract accepts
@@ -110,6 +125,9 @@ type Revealer struct {
 
 	earlyCancel context.CancelFunc
 	wg          sync.WaitGroup
+
+	lateMu     sync.Mutex
+	lateWarned map[uint64]struct{} // rounds already warned about a late reveal
 }
 
 var _ RevealGuard = (*Revealer)(nil)
@@ -136,6 +154,7 @@ func NewRevealer(
 		inProgress:     make(map[uint64]struct{}),
 		startupRounds:  make(map[uint64]struct{}),
 		commitGoneAt:   make(map[uint64]uint64),
+		lateWarned:     make(map[uint64]struct{}),
 		earlyCancel:    func() {},
 	}
 
@@ -324,15 +343,28 @@ func (r *Revealer) revealUntil(ctx context.Context, round uint64) bool {
 		case block >= r.claimStart(round):
 			return r.state.HasRevealed(round)
 		case block >= r.revealStart(round):
-			// a receipt wait ends at the claim phase
-			stepCtx, cancel := context.WithTimeout(ctx, time.Duration(r.claimStart(round)-block)*r.blockTime())
+			// A step, receipt wait included, ends after revealStepBlocks
+			// or at the claim phase, whichever is first, so a pending
+			// reveal is looked at again, and replaced with raised fees
+			// when needed, while the reveal phase is open (#793).
+			until := min(r.claimStart(round), block+revealStepBlocks)
+			stepCtx, cancel := context.WithTimeout(ctx, time.Duration(until-block)*r.blockTime())
 			done, err := r.Reveal(stepCtx, round)
+			bounded := until < r.claimStart(round) && ctx.Err() == nil && errors.Is(stepCtx.Err(), context.DeadlineExceeded)
 			cancel()
-			if err != nil {
+			switch {
+			case err != nil && bounded && errors.Is(err, context.DeadlineExceeded):
+				r.logger.Debug("reveal not mined within the step; checking it again", "round", round)
+			case err != nil:
 				r.logger.Error(err, "reveal failed, retrying at the next block", "round", round)
 			}
 			if done {
 				return r.state.HasRevealed(round)
+			}
+			r.warnIfLate(ctx, round)
+			if bounded {
+				// the step used its blocks waiting; look again at once
+				continue
 			}
 		}
 
@@ -405,7 +437,7 @@ func (r *Revealer) revealStep(ctx context.Context, round uint64) (bool, error) {
 			}
 			return true, fmt.Errorf("%w: %s", errRevealReverted, newest)
 		case transaction.TxPending:
-			if !aged && !r.feeTooLow(ctx, newest) {
+			if !aged && !r.feeAtRisk(ctx, newest) {
 				return false, nil
 			}
 			r.logger.Info("reveal: replacing a pending reveal with raised fees", "round", round, "tx", newest)
@@ -415,7 +447,7 @@ func (r *Revealer) revealStep(ctx context.Context, round uint64) (bool, error) {
 			if !r.synced(ctx) {
 				return false, nil
 			}
-			if aged || r.feeTooLow(ctx, newest) {
+			if aged || r.feeAtRisk(ctx, newest) {
 				r.logger.Info("reveal: replacing a lost reveal with raised fees", "round", round, "tx", newest)
 				_, err := r.txService.ReplaceTransaction(ctx, newest, listRevealTx)
 				return false, err
@@ -583,9 +615,12 @@ func (r *Revealer) commitNonceUsed(ctx context.Context, round uint64, commitTx c
 	return nonceUnused
 }
 
-// feeTooLow reports whether the stored fee cap of the transaction is below
-// the latest block's base fee, so it cannot be mined as it is.
-func (r *Revealer) feeTooLow(ctx context.Context, txHash common.Hash) bool {
+// feeAtRisk reports whether the stored fee cap of the transaction is below
+// the base fee that revealFeeHeadroomBlocks full blocks can reach from the
+// latest block's: the latest base fee times (9/8)^revealFeeHeadroomBlocks,
+// rounded up. Such a reveal can be overtaken by the base fee before the
+// next step looks at it, so it is replaced now (#793).
+func (r *Revealer) feeAtRisk(ctx context.Context, txHash common.Hash) bool {
 	stored, err := r.txService.StoredTransaction(txHash)
 	if err != nil || stored.GasFeeCap == nil {
 		return false
@@ -594,7 +629,56 @@ func (r *Revealer) feeTooLow(ctx context.Context, txHash common.Hash) bool {
 	if err != nil || header.BaseFee == nil {
 		return false
 	}
-	return stored.GasFeeCap.Cmp(header.BaseFee) < 0
+	return stored.GasFeeCap.Cmp(baseFeeAfterFullBlocks(header.BaseFee, revealFeeHeadroomBlocks)) < 0
+}
+
+// baseFeeAfterFullBlocks is the highest base fee n full blocks can reach
+// from baseFee: baseFee times (9/8)^n, rounded up.
+func baseFeeAfterFullBlocks(baseFee *big.Int, n int) *big.Int {
+	num := new(big.Int).Exp(big.NewInt(9), big.NewInt(int64(n)), nil)
+	den := new(big.Int).Exp(big.NewInt(8), big.NewInt(int64(n)), nil)
+	v := new(big.Int).Mul(baseFee, num)
+	v.Add(v, new(big.Int).Sub(den, big.NewInt(1)))
+	return v.Div(v, den)
+}
+
+// warnIfLate logs, once per round, a reveal that is listed but not mined
+// within revealLateWarnBlocks of the claim phase, with its fee cap and the
+// latest base fee, so a reveal close to missing its phase is seen before
+// a miss freezes the stake (#793).
+func (r *Revealer) warnIfLate(ctx context.Context, round uint64) {
+	if r.state.HasRevealed(round) {
+		return
+	}
+	txs, _ := r.state.RevealTxs(round)
+	if len(txs) == 0 {
+		return
+	}
+	block, err := r.backend.BlockNumber(ctx)
+	if err != nil || block+revealLateWarnBlocks < r.claimStart(round) || block >= r.claimStart(round) {
+		return
+	}
+	r.lateMu.Lock()
+	_, warned := r.lateWarned[round]
+	for old := range r.lateWarned {
+		if old < round {
+			delete(r.lateWarned, old) // only the current round can still warn
+		}
+	}
+	r.lateWarned[round] = struct{}{}
+	r.lateMu.Unlock()
+	if warned {
+		return
+	}
+	newest := txs[len(txs)-1]
+	var feeCap, baseFee *big.Int
+	if stored, err := r.txService.StoredTransaction(newest); err == nil {
+		feeCap = stored.GasFeeCap
+	}
+	if header, err := r.backend.HeaderByNumber(ctx, nil); err == nil && header != nil {
+		baseFee = header.BaseFee
+	}
+	r.logger.Warning("reveal still pending close to the claim phase", "round", round, "tx", newest, "fee_cap", feeCap, "base_fee", baseFee, "blocks_left", r.claimStart(round)-block)
 }
 
 // synced reports whether the chain backend's latest block is recent, as
