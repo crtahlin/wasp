@@ -257,7 +257,7 @@ func SetDrainWindow(db *DB, d time.Duration) { db.drainWindow = d }
 // source can be run against branches that shape the internal function
 // differently. Only this shim changes between them.
 func TransformedAddress(hasher bmt.Hasher, ch swarm.Chunk, chType swarm.ChunkType) (swarm.Address, error) {
-	return transformedAddress(hasher, ch, chType)
+	return transformedAddress(hasher, ch.Address(), ch.Data(), chType)
 }
 
 // PutLegacyRogueBinItem writes a reserve bin entry of unspecified chunk type
@@ -274,6 +274,25 @@ func (db *DB) PutLegacyRogueBinItem(ctx context.Context, bin uint8, binID uint64
 			BatchID:   batchID,
 			StampHash: make([]byte, swarm.HashSize),
 			ChunkType: swarm.ChunkTypeUnspecified,
+		})
+	})
+}
+
+// PutLegacyBinItemWithData writes a reserve bin entry of the given type and
+// its data straight into the store, bypassing the reserve's validation, as a
+// malformed entry left by an older version or a damaged store would look.
+func (db *DB) PutLegacyBinItemWithData(ctx context.Context, bin uint8, binID uint64, addr swarm.Address, batchID []byte, chType swarm.ChunkType, data []byte) error {
+	return db.storage.Run(ctx, func(s transaction.Store) error {
+		if err := s.ChunkStore().Put(ctx, swarm.NewChunk(addr, data)); err != nil {
+			return err
+		}
+		return s.IndexStore().Put(&reserve.ChunkBinItem{
+			Bin:       bin,
+			BinID:     binID,
+			Address:   addr,
+			BatchID:   batchID,
+			StampHash: make([]byte, swarm.HashSize),
+			ChunkType: chType,
 		})
 	})
 }
