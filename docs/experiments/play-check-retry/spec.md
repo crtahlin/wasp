@@ -74,10 +74,12 @@ failover backend or the transaction service.
    does not parse revert data itself.
 3. Every retry is counted and logged at debug level with the attempt number
    and the error. A check that succeeds after a retry is counted as recovered.
-   A check that fails every attempt is logged at warning level ("play check
-   failed after retries, skipping the round") with the number of attempts and
-   the last error, counted in the existing `is_playing_errors` counter, and
-   returned as today, so the round is skipped exactly as before.
+   A check that fails every attempt, or whose phase ends during a wait, is
+   logged once at warning level ("play check failed after retries, skipping
+   the round") with the number of attempts and the last error, counted in the
+   existing `is_playing_errors` counter, and the round is skipped. It is not
+   also returned as an error, so the sample handler does not log it a second
+   time as `phase failed`.
 4. A `false` answer is never retried: it is the contract's real answer.
 
 Time budget. The sample handler starts at the first block of the claim phase
@@ -140,7 +142,10 @@ previous build: the node then skips a round on a failed check, as before.
 
 Bee v2.8.2 has the same direct call in `handleSample` and the same block
 number estimate in `pkg/transaction/wrapped`, so the defect is in upstream
-code unmodified. The change is a small, self-contained retry around one call
+code unmodified. Checked against `upstream/v2.8.2`: `handleSample` returns the
+`IsPlaying` error and the round is skipped; wasp had not changed those lines.
+The issue carries the `affects-upstream` label and has a row in
+[`docs/UPSTREAM.md`](../../UPSTREAM.md). The change is a small, self-contained retry around one call
 and would apply to Bee as it is.
 
 ## Configuration

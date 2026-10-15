@@ -139,6 +139,7 @@ whether upstream has the problem. See
 | [#576](https://github.com/crtahlin/wasp/issues/576) | Puller: a peer that keeps answering with an empty offer is still retried with no pause | done | `feat/576-puller-no-progress-and-epoch` | [`366f0a53`](https://github.com/crtahlin/wasp/commit/366f0a53) |
 | [#590](https://github.com/crtahlin/wasp/issues/590) | puller: a failed epoch read or write after GetCursors skips the peer's epoch reset for good | done | `feat/576-puller-no-progress-and-epoch` | [`366f0a53`](https://github.com/crtahlin/wasp/commit/366f0a53) |
 | [#725](https://github.com/crtahlin/wasp/issues/725) | storage incentives: a stop between commit and reveal freezes the node for twice as long; wait for the reveal before stopping | done | `feat/725-reveal-before-stop` | [`63c43149`](https://github.com/crtahlin/wasp/commit/63c43149) |
+| [#773](https://github.com/crtahlin/wasp/issues/773) | storage incentives: the play check at the start of the claim phase reverts on a backend one block behind, and the round is skipped | open | `fix/773-play-check-retry` | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
