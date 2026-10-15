@@ -50,12 +50,28 @@ failover backend or the transaction service.
 
 1. `Agent` keeps the `blockTime` function it already receives in `New`.
 2. A new method `Agent.isPlaying(ctx, depth)` replaces the direct call in
-   `handleSample`. It calls `contract.IsPlaying`. On an error it waits one
-   block time and asks again, up to `playCheckAttempts` calls in total
-   (6, so at most 5 waits). It stops early when the context ends. It retries
-   on **any** error, not only `WrongPhase()`: the call is a free `eth_call`,
-   a transport error is just as likely to pass a block later, and an error
-   that is not transient costs only a few extra reads.
+   `handleSample`. It calls `contract.IsPlaying`. On an error that may pass
+   a block later it waits one block time and asks again, up to
+   `playCheckAttempts` calls in total (6, so at most 5 waits). It stops early
+   when the context ends.
+
+   Which errors are retried. The redistribution contract's ABI lists other
+   errors besides `WrongPhase()`, among them `NotStaked()` and
+   `MustStake2Rounds()`. Those hold for the whole round: an unstaked full node
+   gets one every round, and asking again would only add calls and warning
+   lines. The failover backend returns a JSON-RPC error unchanged, so the
+   revert data reaches the agent as a go-ethereum `rpc.DataError`. The rule:
+   - a revert whose data starts with the `WrongPhase()` selector
+     (`0xe2586bcc`): retried;
+   - a revert whose data starts with any other 4-byte selector: not retried,
+     returned at once as today;
+   - any other error, including a revert that carries no data (some providers
+     strip it) and a transport error: retried, since a block later it may
+     pass, and each retry is a free `eth_call`.
+
+   The check lives in `pkg/storageincentives/redistribution` as
+   `IsWrongPhaseOrUnknown(err)`, next to the contract binding, so the agent
+   does not parse revert data itself.
 3. Every retry is counted and logged at debug level with the attempt number
    and the error. A check that succeeds after a retry is counted as recovered.
    A check that fails every attempt is logged at warning level ("play check
@@ -109,7 +125,11 @@ Unit tests (written before the change):
   samples, commits and reveals;
 - a contract that fails on every call: the agent does not play, makes exactly
   `playCheckAttempts` calls, logs the warning, and counts the error once;
-- a contract that answers `false`: exactly one call, no retry.
+- a contract that answers `false`: exactly one call, no retry;
+- a contract that reverts with another selector (`NotStaked()`): exactly one
+  call, no retry, the error returned as today;
+- the classifier: `WrongPhase()` data, other selector, no data, a plain
+  error and a cancelled context, each with the expected answer.
 
 ## Rollout and rollback
 
