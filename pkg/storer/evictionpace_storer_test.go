@@ -207,6 +207,31 @@ func TestEvictionNodeKeepsServing(t *testing.T) {
 				return err
 			}
 
+			// The chunks stored during the eviction are made before it starts.
+			// Since Bee v2.8.3 the reserve takes only valid chunks, and finding
+			// one in bin 6 takes about a hundred hashes, which under the race
+			// detector left too few operations inside the eviction.
+			const pregenerated = 256
+			stampedAt := func(batchID []byte, bin int) swarm.Chunk {
+				return chunk.GenerateTestRandomChunkAt(t, baseAddr, bin).WithStamp(postagetesting.MustNewBatchStamp(batchID))
+			}
+			var pending []swarm.Chunk
+			for range pregenerated {
+				pending = append(pending, stampedAt(target.ID, 6), stampedAt(other.ID, 0))
+			}
+			putNext := func(batchID []byte, bin int) swarm.Chunk {
+				var ch swarm.Chunk
+				if len(pending) > 0 {
+					ch, pending = pending[0], pending[1:]
+				} else {
+					ch = stampedAt(batchID, bin)
+				}
+				if err := st.ReservePutForTest(context.Background(), ch); err != nil {
+					t.Fatal(err)
+				}
+				return ch
+			}
+
 			var rounds atomic.Int64 // rounds completed, counted under the lock
 			done := make(chan error, 1)
 			go func() {
@@ -230,8 +255,8 @@ func TestEvictionNodeKeepsServing(t *testing.T) {
 				default:
 				}
 				before := rounds.Load()
-				added = append(added, putBin0(t, st, baseAddr, target.ID, 1, 6)...)
-				added = append(added, putBin0(t, st, baseAddr, other.ID, 1, 0)...)
+				added = append(added, putNext(target.ID, 6))
+				added = append(added, putNext(other.ID, 0))
 				if err := get(kept[ops%len(kept)]); err != nil {
 					t.Fatalf("serving a kept chunk during the eviction: %v", err)
 				}

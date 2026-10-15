@@ -26,19 +26,25 @@ func TestSubscribeBinOutOfRangeNeverDelivers(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Low bins only: since Bee v2.8.3 the reserve accepts only valid chunks,
+	// and a valid random chunk in a high bin takes about 2^bin attempts. The
+	// chunks are made before the subscription, whose wait is timed.
+	chunks := make([]swarm.Chunk, 0, 8*3)
+	for po := range 8 {
+		for range 3 {
+			chunks = append(chunks, chunk.GenerateTestRandomChunkAt(t, baseAddr, po))
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	binC, unsub, errC := db.SubscribeBin(ctx, 40, 0)
 	defer unsub()
 
 	putter := db.ReservePutter()
-	// Low bins only: since Bee v2.8.3 the reserve accepts only valid chunks,
-	// and a valid random chunk in a high bin takes about 2^bin attempts.
-	for po := range 8 {
-		for range 3 {
-			if err := putter.Put(context.Background(), chunk.GenerateTestRandomChunkAt(t, baseAddr, po)); err != nil {
-				t.Fatal(err)
-			}
+	for _, ch := range chunks {
+		if err := putter.Put(context.Background(), ch); err != nil {
+			t.Fatal(err)
 		}
 	}
 
