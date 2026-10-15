@@ -14,11 +14,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"resenje.org/singleflight"
-
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/storageincentives/redistribution"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
+	"resenje.org/singleflight"
 )
 
 const (
@@ -661,6 +660,11 @@ func (r *Revealer) warnIfLate(ctx context.Context, round uint64) {
 	}
 	r.lateMu.Lock()
 	_, warned := r.lateWarned[round]
+	for old := range r.lateWarned {
+		if old < round {
+			delete(r.lateWarned, old) // only the current round can still warn
+		}
+	}
 	r.lateWarned[round] = struct{}{}
 	r.lateMu.Unlock()
 	if warned {
