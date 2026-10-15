@@ -159,8 +159,14 @@ func (b *Backend) resend(ctx context.Context, tx *types.Transaction, order []int
 // sendCopies sends tx, which the endpoint at index except took, to every other
 // connected endpoint in the background, each attempt bounded by attempt. The
 // caller does not wait for them and their results change nothing for it; they
-// are counted and logged. Close ends the copies still under way.
+// are counted and logged. Close ends the copies still under way, and once
+// Close has begun no copy is started.
 func (b *Backend) sendCopies(tx *types.Transaction, except int, attempt time.Duration) {
+	b.copiesMu.Lock()
+	defer b.copiesMu.Unlock()
+	if b.closed.Err() != nil {
+		return
+	}
 	for k, ep := range b.endpoints {
 		if k == except {
 			continue

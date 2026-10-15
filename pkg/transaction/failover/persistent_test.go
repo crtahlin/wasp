@@ -360,3 +360,21 @@ func TestPersistentSendGoesRoundAgain(t *testing.T) {
 		t.Fatal("ordinary send succeeded; it should make one pass and return the first error")
 	}
 }
+
+// TestPersistentSendAfterCloseSendsNoCopies checks that a send made after
+// Close starts no copy: a copy started then would use a closed connection.
+func TestPersistentSendAfterCloseSendsNoCopies(t *testing.T) {
+	t.Parallel()
+
+	var r sendRecorder
+	b := newBackend(t, r.answering("first", nil), r.answering("second", nil))
+	b.Close()
+
+	if err := b.SendTransaction(persistent(context.Background(), time.Second), testTx()); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := r.got("second"); len(got) != 0 {
+		t.Fatalf("second got %v after Close, want no copy", got)
+	}
+}

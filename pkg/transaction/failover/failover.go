@@ -95,9 +95,11 @@ type Backend struct {
 
 	// closed ends the copies of a persistent send (#783) when the backend is
 	// closed; copies tracks them so Close waits for them before it closes
-	// the connections they use.
+	// the connections they use. copiesMu orders starting a copy against
+	// Close, so no copy starts once Close has begun to wait.
 	closed      context.Context
 	closeCopies context.CancelFunc
+	copiesMu    sync.Mutex
 	copies      sync.WaitGroup
 }
 
@@ -392,7 +394,9 @@ func (b *Backend) SuggestedFeeAndTip(ctx context.Context, gasPrice *big.Int, boo
 // Copies of a persistent send still under way are ended first, and Close
 // waits for them, so none uses a connection after it is closed.
 func (b *Backend) Close() {
+	b.copiesMu.Lock()
 	b.closeCopies()
+	b.copiesMu.Unlock()
 	b.copies.Wait()
 	for _, ep := range b.endpoints {
 		if c := ep.live.Load(); c != nil {
