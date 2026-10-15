@@ -552,13 +552,15 @@ func (s *Syncer) hold(ctx context.Context, ch swarm.Chunk, cause error) (postage
 // unwrapHeld hands a held chunk to pss or gsoc, as a stored one is. Push-sync
 // also unwraps before it checks the stamp, so a message carried by a held
 // chunk is delivered now rather than after the batch store catches up. The
-// holder has verified the chunk's content address.
+// chunk comes from a peer, so a SOC is parsed with FromChunkValidate, which
+// also checks that the chunk's address is the SOC's, as Bee v2.8.3 does in
+// its push-sync and pull-sync handlers.
 func (s *Syncer) unwrapHeld(ch swarm.Chunk) {
 	if cac.Valid(ch) {
 		go s.unwrap(ch)
 		return
 	}
-	if sc, err := soc.FromChunk(ch); err == nil {
+	if sc, err := soc.FromChunkValidate(ch); err == nil {
 		s.gsocHandler(sc)
 	}
 }

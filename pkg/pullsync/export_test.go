@@ -136,3 +136,6 @@ func (s *Syncer) StreamLimitExceededCount() float64 {
 	}
 	return m.GetCounter().GetValue()
 }
+
+// UnwrapHeld exposes the hand-off of a held chunk to pss or gsoc.
+func (s *Syncer) UnwrapHeld(ch swarm.Chunk) { s.unwrapHeld(ch) }
