@@ -43,6 +43,11 @@ const (
 
 	// average tx gas used by transactions issued from agent
 	avgTxGas = 250_000
+
+	// playCheckAttempts is how many times handleSample asks the contract
+	// whether the node plays the coming round when the answer is an error
+	// that may pass a block later (#773).
+	playCheckAttempts = 6
 )
 
 type ChainBackend interface {
@@ -60,6 +65,7 @@ type Agent struct {
 	logger                 log.Logger
 	metrics                metrics
 	backend                ChainBackend
+	blockTime              func() time.Duration
 	blocksPerRound         uint64
 	contract               redistribution.Contract
 	batchExpirer           postagecontract.PostageBatchExpirer
@@ -99,6 +105,7 @@ func New(overlay swarm.Address,
 		overlay:                overlay,
 		metrics:                newMetrics(),
 		backend:                backend,
+		blockTime:              blockTime,
 		logger:                 logger.WithName(loggerName).Register(),
 		contract:               contract,
 		batchExpirer:           batchExpirer,
@@ -433,6 +440,45 @@ func (a *Agent) handleClaim(ctx context.Context, round uint64) error {
 	return nil
 }
 
+// isPlaying asks the contract whether the node plays the coming round. An
+// error that may pass a block later (redistribution.PlayCheckRetryable) is
+// asked again after one block time, up to playCheckAttempts calls, instead of
+// skipping the round on the first failure (#773). When every attempt fails,
+// or the phase ends first, the round is skipped with one warning and counted
+// as a play check error. A false answer is the contract's answer and is never
+// asked again; any other error is returned as before.
+func (a *Agent) isPlaying(ctx context.Context, depth uint8) (bool, error) {
+	for attempt := 1; ; attempt++ {
+		playing, err := a.contract.IsPlaying(ctx, depth)
+		if err == nil {
+			if attempt > 1 {
+				a.metrics.PlayCheckRecovered.Inc()
+			}
+			return playing, nil
+		}
+		if !redistribution.PlayCheckRetryable(err) {
+			return false, err
+		}
+		giveUp := attempt >= playCheckAttempts
+		if !giveUp {
+			a.metrics.PlayCheckRetries.Inc()
+			a.logger.Debug("play check failed, asking again after one block", "attempt", attempt, "error", err)
+			timer := time.NewTimer(a.blockTime())
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				giveUp = true
+			case <-timer.C:
+			}
+		}
+		if giveUp {
+			a.metrics.ErrCheckIsPlaying.Inc()
+			a.logger.Warning("play check failed after retries, skipping the round", "attempts", attempt, "error", err)
+			return false, nil
+		}
+	}
+}
+
 func (a *Agent) handleSample(ctx context.Context, round uint64) (bool, error) {
 	// minimum proximity between the anchor and the stored chunks. The depth
 	// is derived from the same read as the radius increase count, so the
@@ -445,7 +491,7 @@ func (a *Agent) handleSample(ctx context.Context, round uint64) (bool, error) {
 		return false, nil
 	}
 
-	isPlaying, err := a.contract.IsPlaying(ctx, committedDepth)
+	isPlaying, err := a.isPlaying(ctx, committedDepth)
 	if err != nil {
 		a.metrics.ErrCheckIsPlaying.Inc()
 		return false, err

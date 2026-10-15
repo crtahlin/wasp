@@ -312,14 +312,28 @@ this one proves itself.
 
 ## Upstream portability
 
-Upstream Bee has one RPC endpoint and no failover backend. The part it could
-take on its own is the bound: give each storage-incentives chain call an
-attempt timeout and retry the same endpoint until the phase ends. The
-multi-endpoint parts need #109's failover first. The hang itself (no response
-timeout on the RPC client, phase handlers without a deadline) is present in
-upstream by reading `pkg/node/chain.go` and `pkg/storageincentives/agent.go` at
-`upstream/v2.8.2`; it is not reproduced there, so the issue is not tagged
-`affects-upstream`.
+The defect is upstream's too, and #783 carries `affects-upstream`. Checked
+against `upstream/v2.8.2`, the latest Bee release and wasp's base:
+`pkg/node/chain.go` builds the RPC transport with dial, TLS-handshake and
+idle-connection timeouts only, and `pkg/storageincentives/agent.go` runs the
+phase handlers on contexts that only a phase change cancels. A request the
+endpoint accepts and never answers therefore blocks a commit, reveal or claim
+until the phase ends in stock Bee as well. The lost round was measured on a
+wasp node; no stock node was measured.
+
+Upstream has one RPC endpoint and no failover backend, so the parts it could
+take differ:
+
+- **Without #109's failover:** mark the lottery calls the same way and give
+  each attempt the bound, then retry the same endpoint until the phase ends.
+  That is the marker plus a retry loop around the plain backend; a
+  response-header timeout on the RPC transport would be a further backstop
+  for every caller.
+- **With #109's failover:** everything in this spec.
+
+This change itself does not cover wasp nodes with a single endpoint either
+(see the limitation above), so the single-endpoint retry is also the natural
+follow-up here.
 
 ## Configuration
 

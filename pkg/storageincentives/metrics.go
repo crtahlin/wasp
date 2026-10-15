@@ -34,6 +34,10 @@ type metrics struct {
 	ErrClaim          prometheus.Counter
 	ErrWinner         prometheus.Counter
 	ErrCheckIsPlaying prometheus.Counter
+	// PlayCheckRetries counts play checks asked again after a failure, and
+	// PlayCheckRecovered the checks that succeeded after a retry (#773).
+	PlayCheckRetries   prometheus.Counter
+	PlayCheckRecovered prometheus.Counter
 	// RoundMismatch counts commits skipped because the round the node computed
 	// disagreed with the contract's (#540).
 	RoundMismatch prometheus.Counter
@@ -172,6 +176,18 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "is_playing_errors",
 			Help:      "total neighborhood selected errors while processing",
+		}),
+		PlayCheckRetries: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "play_check_retries",
+			Help:      "Play checks asked again after an error that may pass a block later.",
+		}),
+		PlayCheckRecovered: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "play_check_recovered",
+			Help:      "Play checks that succeeded after at least one retry.",
 		}),
 		StopWaitedForReveal: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: m.Namespace,
