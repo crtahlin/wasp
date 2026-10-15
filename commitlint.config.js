@@ -1,4 +1,9 @@
 module.exports = {
+	// Bee's history comes into wasp with every upstream sync, and its
+	// dependency bumps by dependabot can carry headers over 100
+	// characters. Those commits cannot be changed, so they are not
+	// linted. Upstream's v2.8.3 brought the first two.
+	ignores: [(message) => message.includes('Signed-off-by: dependabot[bot]')],
 	rules: {
 		'body-leading-blank': [2, 'always'],
 		'body-case': [0, 'never'],
