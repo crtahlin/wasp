@@ -12,6 +12,13 @@ package storer_test
 // built only with the samplerharness tag, so it is not part of any normal
 // test run.
 //
+// SAMPLER_DATA_DIR is the node's data directory (the one holding statestore/
+// and localstore/), or its localstore/ directly. The harness refuses to run
+// when it finds no store there, when the store's shard count is not the
+// node's, or when the reserve is empty, rather than creating or sampling an
+// empty store. The binary uses the node's 32 sharky shards, not the 4 the
+// package's other tests use (testSharkyShards, set by the build tag).
+//
 // Run it only on a COPY of a stopped node's data directory: opening the store
 // runs the store migrations, which includes Bee v2.8.3's rogue-chunk
 // migration on a directory that has not had it. The reserve worker is not
@@ -38,6 +45,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -113,30 +121,12 @@ func TestSamplerHarness(t *testing.T) {
 	}
 
 	logger := log.NewLogger("sampler-harness", log.WithSink(os.Stderr), log.WithVerbosity(log.VerbosityInfo))
-	stateStore, _, err := node.InitStateStore(logger, dir, 1_000_000)
-	if err != nil {
-		t.Fatalf("state store: %v", err)
-	}
-	defer stateStore.Close()
-	bs, err := batchstore.New(stateStore, func([]byte) error { return nil }, storer.DefaultReserveCapacity, logger)
-	if err != nil {
-		t.Fatalf("batch store: %v", err)
-	}
-
 	ctx := context.Background()
-	db, err := storer.New(ctx, dir, &storer.Options{
-		Logger:          logger,
-		RadiusSetter:    harnessRadiusSetter{},
-		Batchstore:      bs,
-		ValidStamp:      postage.ValidStamp(bs),
-		ReserveCapacity: storer.DefaultReserveCapacity,
-		CacheCapacity:   1_000_000,
-		StorageEngine:   harnessEnv(t, "SAMPLER_STORAGE_ENGINE"),
-	})
+	db, closeStore, err := openHarnessStore(ctx, logger, dir, harnessEnv(t, "SAMPLER_STORAGE_ENGINE"))
 	if err != nil {
-		t.Fatalf("localstore: %v", err)
+		t.Fatal(err)
 	}
-	defer db.Close()
+	defer closeStore()
 
 	result := struct {
 		Anchor         string       `json:"anchor"`
@@ -222,9 +212,93 @@ func TestSamplerHarness(t *testing.T) {
 			t.Fatal(err)
 		}
 	} else {
-		fmt.Println(string(out))
+		if _, err := os.Stdout.Write(append(out, '\n')); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if !result.SamplersAgreed {
 		t.Error("the samplers did not agree")
 	}
+}
+
+// harnessStoreDirs finds the node's data directory and its localstore from
+// dir, which may be either. It requires the localstore's index and sharky
+// directories to exist, so that a wrong path fails instead of opening, and
+// so creating, a new empty store.
+func harnessStoreDirs(dir string) (dataDir, localstoreDir string, err error) {
+	isStore := func(d string) bool {
+		for _, sub := range []string{"indexstore", "sharky"} {
+			if fi, err := os.Stat(filepath.Join(d, sub)); err != nil || !fi.IsDir() {
+				return false
+			}
+		}
+		return true
+	}
+	switch {
+	case isStore(filepath.Join(dir, "localstore")):
+		return dir, filepath.Join(dir, "localstore"), nil
+	case isStore(dir):
+		return filepath.Dir(dir), dir, nil
+	default:
+		return "", "", fmt.Errorf("no localstore with indexstore/ and sharky/ in %s or %s", dir, filepath.Join(dir, "localstore"))
+	}
+}
+
+// checkHarnessShards refuses a store whose sharky shard count is not the
+// one the binary opens stores with. Opening with fewer shards fails every
+// read from the others, and sharky's recovery after an unclean stop can
+// delete their index entries.
+func checkHarnessShards(localstoreDir string) error {
+	shards, err := filepath.Glob(filepath.Join(localstoreDir, "sharky", "shard_[0-9][0-9][0-9]"))
+	if err != nil {
+		return err
+	}
+	if want := storer.SharkyShardLimit(); len(shards) != want {
+		return fmt.Errorf("store has %d sharky shards, this binary opens stores with %d; refusing to open it", len(shards), want)
+	}
+	return nil
+}
+
+// openHarnessStore opens a node's store as the node does, after the checks
+// above, and refuses an empty reserve.
+func openHarnessStore(ctx context.Context, logger log.Logger, dir, engine string) (*storer.DB, func(), error) {
+	dataDir, localstoreDir, err := harnessStoreDirs(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkHarnessShards(localstoreDir); err != nil {
+		return nil, nil, err
+	}
+	stateStore, _, err := node.InitStateStore(logger, dataDir, 1_000_000)
+	if err != nil {
+		return nil, nil, fmt.Errorf("state store: %w", err)
+	}
+	bs, err := batchstore.New(stateStore, func([]byte) error { return nil }, storer.DefaultReserveCapacity, logger)
+	if err != nil {
+		_ = stateStore.Close()
+		return nil, nil, fmt.Errorf("batch store: %w", err)
+	}
+	db, err := storer.New(ctx, localstoreDir, &storer.Options{
+		Logger:          logger,
+		RadiusSetter:    harnessRadiusSetter{},
+		Batchstore:      bs,
+		ValidStamp:      postage.ValidStamp(bs),
+		ReserveCapacity: storer.DefaultReserveCapacity,
+		CacheCapacity:   1_000_000,
+		StorageEngine:   engine,
+	})
+	if err != nil {
+		_ = stateStore.Close()
+		return nil, nil, fmt.Errorf("localstore: %w", err)
+	}
+	closeAll := func() {
+		_ = db.Close()
+		_ = stateStore.Close()
+	}
+	if n := db.ReserveSize(); n == 0 {
+		closeAll()
+		return nil, nil, fmt.Errorf("the reserve in %s is empty; refusing to sample it", localstoreDir)
+	}
+	logger.Info("sampler harness opened store", "localstore", localstoreDir, "reserve_size", db.ReserveSize(), "shards", storer.SharkyShardLimit())
+	return db, closeAll, nil
 }

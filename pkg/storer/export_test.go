@@ -34,6 +34,9 @@ func ReplaceSharkyShardLimit(val int) {
 	sharkyNoOfShards = val
 }
 
+// SharkyShardLimit returns the number of sharky shards stores are opened with.
+func SharkyShardLimit() int { return sharkyNoOfShards }
+
 func (db *DB) WaitForBgCacheWorkers() (unblock func()) {
 	for range defaultBgCacheWorkers {
 		db.cacheLimiter.sem <- struct{}{}
