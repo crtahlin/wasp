@@ -69,10 +69,14 @@ const (
 	// used to set the next retry to it, which this fork removed (#607).
 	// The constant still defines defaultTimeToRetry, and the option is
 	// kept so that upstream merges stay simple.
-	defaultShortRetry       = 10 * time.Second
-	defaultTimeToRetry      = 2 * defaultShortRetry
-	defaultPruneWakeup      = 5 * time.Minute
-	defaultBroadcastBinSize = 6
+	defaultShortRetry  = 10 * time.Second
+	defaultTimeToRetry = 2 * defaultShortRetry
+	defaultPruneWakeup = 5 * time.Minute
+	// Bee v2.8.3 raised it to 6. On the bench a fresh node on the
+	// v2.8.3-based build then sent 2.3 times the hive messages and 9.6
+	// times the peer records of one on the earlier build, above the limit
+	// of 2 times set for the sync, so wasp keeps 2. See DIFFERENCES.md.
+	defaultBroadcastBinSize = 2
 )
 
 // Backoff from peers that drop the connection right after it is made. They
