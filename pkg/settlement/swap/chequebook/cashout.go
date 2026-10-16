@@ -147,8 +147,10 @@ func (s *cashoutService) CashCheque(ctx context.Context, chequebook, recipient c
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             sctx.GetGasLimit(ctx),
 		MinEstimatedGasLimit: CashoutGasLimitFloor,
-		Value:                big.NewInt(0),
-		Description:          "cheque cashout",
+		// When estimation fails, gas-limit-fallback, as in Bee v2.8.3.
+		FallbackOnEstimateError: true,
+		Value:                   big.NewInt(0),
+		Description:             "cheque cashout",
 	}
 
 	txHash, err := s.transactionService.Send(ctx, request, transaction.DefaultTipBoostPercent)
