@@ -34,10 +34,12 @@ type cursorStub struct {
 	calls    map[string]int
 	synced   map[string]map[uint8]bool
 	blocking atomic.Int64
+	inFlight map[string]int // cursors requests running now, per peer
+	maxIn    map[string]int // the most that ever ran at once, per peer
 }
 
 func newCursorStub(bins int) *cursorStub {
-	return &cursorStub{bins: bins, behave: map[string]string{}, release: make(chan struct{}), calls: map[string]int{}, synced: map[string]map[uint8]bool{}}
+	return &cursorStub{bins: bins, behave: map[string]string{}, release: make(chan struct{}), calls: map[string]int{}, synced: map[string]map[uint8]bool{}, inFlight: map[string]int{}, maxIn: map[string]int{}}
 }
 
 func (s *cursorStub) set(peer swarm.Address, b string) {
@@ -50,6 +52,14 @@ func (s *cursorStub) callCount(peer swarm.Address) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls[peer.ByteString()]
+}
+
+// maxInFlight returns the most cursors requests that ever ran at once to
+// the peer.
+func (s *cursorStub) maxInFlight(peer swarm.Address) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxIn[peer.ByteString()]
 }
 
 func (s *cursorStub) binSynced(peer swarm.Address, bin uint8) bool {
@@ -73,7 +83,14 @@ func (s *cursorStub) GetCursors(ctx context.Context, peer swarm.Address) ([]uint
 	s.mu.Lock()
 	s.calls[peer.ByteString()]++
 	b := s.behave[peer.ByteString()]
+	s.inFlight[peer.ByteString()]++
+	s.maxIn[peer.ByteString()] = max(s.maxIn[peer.ByteString()], s.inFlight[peer.ByteString()])
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inFlight[peer.ByteString()]--
+		s.mu.Unlock()
+	}()
 	switch b {
 	case "silent":
 		<-ctx.Done()
@@ -285,4 +302,28 @@ func TestRadiusDecreaseActedOnWithSilentPeer(t *testing.T) {
 		c.kad.Trigger()
 		return c.ps.binSynced(b, 1)
 	}, "bin 1 opened by the radius decrease never synced from B")
+}
+
+// TestCursorRequestsStayWithinPeerLimit checks that the puller never has more
+// than one cursors request running to a peer, however often its requests
+// time out (#695) and it is asked to recalculate. Bee v2.8.3 disconnects a
+// peer that holds more than 4 cursor streams at once, so a puller that let
+// timed-out requests pile up would be disconnected by every v2.8.3 node it
+// syncs from.
+func TestCursorRequestsStayWithinPeerLimit(t *testing.T) {
+	t.Parallel()
+	a := swarm.RandAddress(t)
+	c := newCursorPuller(t, 100*time.Millisecond, "", kadMock.AddrTuple{Addr: a, PO: 1})
+	c.ps.set(a, "silent")
+	c.start(t)
+
+	const wantCalls = 4 * 3
+	waitFor(t, 10*time.Second, func() bool {
+		c.kad.Trigger()
+		return c.ps.callCount(a) >= wantCalls
+	}, "the puller did not retry the cursors request")
+
+	if got := c.ps.maxInFlight(a); got > 1 {
+		t.Fatalf("%d cursors requests ran at once to one peer, want at most 1 (Bee v2.8.3 allows 4)", got)
+	}
 }

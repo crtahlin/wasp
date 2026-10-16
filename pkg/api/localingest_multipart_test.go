@@ -114,7 +114,7 @@ func TestLocalIngestMultipartMalformed(t *testing.T) {
 			t.Parallel()
 
 			store := mockstorer.New()
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:             store,
 				Logger:             log.Noop,
 				Post:               mockpost.New(mockpost.WithAcceptAll()),

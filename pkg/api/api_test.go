@@ -22,6 +22,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/gorilla/websocket"
+	"resenje.org/web"
+
 	"github.com/ethersphere/bee/v2/pkg/accesscontrol"
 	mockac "github.com/ethersphere/bee/v2/pkg/accesscontrol/mock"
 	accountingmock "github.com/ethersphere/bee/v2/pkg/accounting/mock"
@@ -70,8 +73,6 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/transaction/backendmock"
 	transactionmock "github.com/ethersphere/bee/v2/pkg/transaction/mock"
 	"github.com/ethersphere/bee/v2/pkg/util/testutil"
-	"github.com/gorilla/websocket"
-	"resenje.org/web"
 )
 
 var (
@@ -111,6 +112,7 @@ type testServerOptions struct {
 	HintConnectWait    time.Duration
 	LocalIngestEnabled bool
 	WsHeaders          http.Header
+	WsQuery            url.Values
 	DirectUpload       bool
 	Probe              *api.Probe
 
@@ -131,21 +133,27 @@ type testServerOptions struct {
 	BatchStore postage.Storer
 	SyncStatus func() (bool, error)
 
-	BackendOpts         []backendmock.Option
-	Erc20Opts           []erc20mock.Option
-	BeeMode             api.BeeNodeMode
-	RedistributionAgent *storageincentives.Agent
-	NodeStatus          *status.Service
-	PostageSyncHealth   postage.SyncHealth
-	PinIntegrity        api.PinIntegrity
-	WhitelistedAddr     string
-	FullAPIDisabled     bool
-	ChequebookDisabled  bool
-	SwapDisabled        bool
-	Erc20ServiceNil     bool
+	BackendOpts                 []backendmock.Option
+	Erc20Opts                   []erc20mock.Option
+	BeeMode                     api.BeeNodeMode
+	RedistributionAgent         *storageincentives.Agent
+	RedistributionAgentDisabled bool
+	NodeStatus                  *status.Service
+	PostageSyncHealth           postage.SyncHealth
+	PinIntegrity                api.PinIntegrity
+	WhitelistedAddr             string
+	FullAPIDisabled             bool
+	ChequebookDisabled          bool
+	SwapDisabled                bool
+	Erc20ServiceNil             bool
 }
 
-func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.Conn, string, *chanStorer) {
+// newTestServer returns an http client and, when o.WsPath is set, a websocket
+// connection, both wired to an httptest.Server serving the api service, the
+// address that server listens on, the chan storer set up by o.DirectUpload and
+// the api service itself, for tests that need to drive it directly (e.g. over
+// a custom net.Listener) instead of through the httptest.Server.
+func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.Conn, string, *chanStorer, *api.Service) {
 	t.Helper()
 	pk, _ := crypto.GenerateSecp256k1Key()
 	signer := crypto.NewDefaultSigner(pk)
@@ -237,11 +245,13 @@ func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.
 
 	s.SetP2P(o.P2P)
 
-	if o.RedistributionAgent == nil {
-		o.RedistributionAgent, _ = createRedistributionAgentService(t, o.Overlay, o.StateStorer, erc20, transaction, backend, o.BatchStore)
-		s.SetRedistributionAgent(o.RedistributionAgent)
+	if !o.RedistributionAgentDisabled {
+		if o.RedistributionAgent == nil {
+			o.RedistributionAgent, _ = createRedistributionAgentService(t, o.Overlay, o.StateStorer, erc20, transaction, backend, o.BatchStore)
+			s.SetRedistributionAgent(o.RedistributionAgent)
+		}
+		testutil.CleanupCloser(t, o.RedistributionAgent)
 	}
-	testutil.CleanupCloser(t, o.RedistributionAgent)
 
 	s.SetSwarmAddress(&o.Overlay)
 	s.SetProbe(o.Probe)
@@ -300,7 +310,7 @@ func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.
 	)
 
 	if o.WsPath != "" {
-		u := url.URL{Scheme: "ws", Host: ts.Listener.Addr().String(), Path: o.WsPath}
+		u := url.URL{Scheme: "ws", Host: ts.Listener.Addr().String(), Path: o.WsPath, RawQuery: o.WsQuery.Encode()}
 		conn, _, err = websocket.DefaultDialer.Dial(u.String(), o.WsHeaders)
 		if err != nil {
 			t.Fatalf("dial: %v. url %v", err, u.String())
@@ -314,7 +324,7 @@ func newTestServer(t *testing.T, o testServerOptions) (*http.Client, *websocket.
 		}
 	}
 
-	return httpClient, conn, ts.Listener.Addr().String(), chanStore
+	return httpClient, conn, ts.Listener.Addr().String(), chanStore, s
 }
 
 func pipelineFactory(s storage.Putter, encrypt bool, rLevel redundancy.Level) func() pipeline.Interface {
@@ -464,7 +474,7 @@ func TestPostageHeaderError(t *testing.T) {
 		t.Run(endpoint+": empty batch", func(t *testing.T) {
 			t.Parallel()
 
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:       mockStorer,
 				Post:         newTestPostService(),
 				DirectUpload: true,
@@ -479,7 +489,7 @@ func TestPostageHeaderError(t *testing.T) {
 		})
 		t.Run(endpoint+": ok batch", func(t *testing.T) {
 			t.Parallel()
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:       mockStorer,
 				Post:         newTestPostService(),
 				DirectUpload: true,
@@ -495,7 +505,7 @@ func TestPostageHeaderError(t *testing.T) {
 		})
 		t.Run(endpoint+": bad batch", func(t *testing.T) {
 			t.Parallel()
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:       mockStorer,
 				Post:         newTestPostService(),
 				DirectUpload: true,
@@ -515,7 +525,7 @@ func TestPostageHeaderError(t *testing.T) {
 func TestOptions(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{})
+	client, _, _, _, _ := newTestServer(t, testServerOptions{})
 	for _, tc := range []struct {
 		endpoint        string
 		expectedMethods string // expectedMethods contains HTTP methods like GET, POST, HEAD, PATCH, DELETE, OPTIONS. These are in alphabetical sorted order
@@ -566,7 +576,7 @@ func TestPostageDirectAndDeferred(t *testing.T) {
 				t.Parallel()
 
 				mockStorer := mockstorer.New()
-				client, _, _, chanStorer := newTestServer(t, testServerOptions{
+				client, _, _, chanStorer, _ := newTestServer(t, testServerOptions{
 					Storer:       mockStorer,
 					Post:         newTestPostService(),
 					DirectUpload: true,
@@ -602,7 +612,7 @@ func TestPostageDirectAndDeferred(t *testing.T) {
 			t.Parallel()
 
 			mockStorer := mockstorer.New()
-			client, _, _, chanStorer := newTestServer(t, testServerOptions{
+			client, _, _, chanStorer, _ := newTestServer(t, testServerOptions{
 				Storer:       mockStorer,
 				Post:         newTestPostService(),
 				DirectUpload: true,
@@ -817,7 +827,11 @@ func newTestPostService() postage.Service {
 			"",
 			batchOk,
 			big.NewInt(3),
-			11,
+			// batch depth over bucket depth: uploads here are a handful of
+			// chunks with random addresses, and an immutable batch fails the
+			// whole request once one bucket is full, so leave enough room per
+			// bucket for several of them to collide.
+			16,
 			10,
 			1000,
 			true,

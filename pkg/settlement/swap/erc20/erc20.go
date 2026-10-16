@@ -88,8 +88,10 @@ func (c *erc20Service) Transfer(ctx context.Context, address common.Address, val
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		MinEstimatedGasLimit: TransferGasLimitFloor,
-		Value:                big.NewInt(0),
-		Description:          "token transfer",
+		// When estimation fails, gas-limit-fallback, as in Bee v2.8.3.
+		FallbackOnEstimateError: true,
+		Value:                   big.NewInt(0),
+		Description:             "token transfer",
 	}
 
 	txHash, err := c.transactionService.Send(ctx, request, transaction.DefaultTipBoostPercent)

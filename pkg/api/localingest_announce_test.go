@@ -34,7 +34,7 @@ func ingestAnnounceServer(t *testing.T, fake *fakeProviders, mode api.BeeNodeMod
 	if fake != nil {
 		opts.Providers = fake
 	}
-	client, _, _, _ := newTestServer(t, opts)
+	client, _, _, _, _ := newTestServer(t, opts)
 	return client
 }
 
@@ -95,7 +95,7 @@ func TestLocalIngestAnnouncesCollectionRoot(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeProviders{}
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             mockstorer.New(),
 		Logger:             log.Noop,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),

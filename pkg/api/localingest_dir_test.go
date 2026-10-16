@@ -68,7 +68,7 @@ func TestLocalIngestDirAddressEquivalence(t *testing.T) {
 		t.Run("level_"+level, func(t *testing.T) {
 			t.Parallel()
 
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:             mockstorer.New(),
 				Logger:             log.Noop,
 				Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -126,7 +126,7 @@ func TestLocalIngestDirCountsManifestChunks(t *testing.T) {
 	t.Parallel()
 
 	store := mockstorer.New()
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             store,
 		Logger:             log.Noop,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -177,7 +177,7 @@ func TestLocalIngestDirRejectsBadContentType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:             mockstorer.New(),
 				Logger:             log.Noop,
 				Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -210,7 +210,7 @@ func TestLocalIngestBlobUnchangedWithoutCollectionHeader(t *testing.T) {
 	t.Run("tar", func(t *testing.T) {
 		t.Parallel()
 
-		client, _, _, _ := newTestServer(t, testServerOptions{
+		client, _, _, _, _ := newTestServer(t, testServerOptions{
 			Storer:             mockstorer.New(),
 			Logger:             log.Noop,
 			Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -230,7 +230,7 @@ func TestLocalIngestBlobUnchangedWithoutCollectionHeader(t *testing.T) {
 		// The reference of the tar as a blob, which is what this endpoint has
 		// always returned for it.
 		var blob api.LocalIngestResponse
-		client2, _, _, _ := newTestServer(t, testServerOptions{
+		client2, _, _, _, _ := newTestServer(t, testServerOptions{
 			Storer:             mockstorer.New(),
 			Logger:             log.Noop,
 			Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -250,7 +250,7 @@ func TestLocalIngestBlobUnchangedWithoutCollectionHeader(t *testing.T) {
 	t.Run("multipart", func(t *testing.T) {
 		t.Parallel()
 
-		client, _, _, _ := newTestServer(t, testServerOptions{
+		client, _, _, _, _ := newTestServer(t, testServerOptions{
 			Storer:             mockstorer.New(),
 			Logger:             log.Noop,
 			Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -277,7 +277,7 @@ func TestLocalIngestBlobUnchangedWithoutCollectionHeader(t *testing.T) {
 		// into, since it adds manifest nodes. Comparing against the blob
 		// reference of the same bytes is the direct statement.
 		var blob api.LocalIngestResponse
-		client2, _, _, _ := newTestServer(t, testServerOptions{
+		client2, _, _, _, _ := newTestServer(t, testServerOptions{
 			Storer:             mockstorer.New(),
 			Logger:             log.Noop,
 			Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -303,7 +303,7 @@ func TestLocalIngestBlobUnchangedWithoutCollectionHeader(t *testing.T) {
 func TestLocalIngestDirEncryptedIsNotDeterministic(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             mockstorer.New(),
 		Logger:             log.Noop,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -360,7 +360,7 @@ func TestLocalIngestDirLimitMidStreamAnswers507(t *testing.T) {
 	// claim binds while the body is being read.
 	store.SetLocalIngestLimit(2)
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             store,
 		Logger:             log.Noop,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -397,7 +397,7 @@ func TestLocalIngestDirLimitMidStreamAnswers507(t *testing.T) {
 func TestLocalIngestDirDuplicateAnswers200NotSoleSource(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             mockstorer.New(),
 		Logger:             log.Noop,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -442,7 +442,7 @@ func TestLocalIngestDirDuplicateAnswers200NotSoleSource(t *testing.T) {
 func TestLocalIngestDirServesIndexDocument(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             mockstorer.New(),
 		Logger:             log.Noop,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -485,7 +485,7 @@ func TestLocalIngestDirWithoutIndexDocument(t *testing.T) {
 	sink := &syncBuffer{}
 	logger := log.NewLogger("localingest_dir_noindex", log.WithSink(sink), log.WithVerbosity(log.VerbosityDebug)).Build()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             mockstorer.New(),
 		Logger:             logger,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -599,7 +599,7 @@ func TestLocalIngestDirRejectsMalformedArchive(t *testing.T) {
 			t.Parallel()
 
 			store := mockstorer.New()
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:             store,
 				Logger:             log.Noop,
 				Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -639,7 +639,7 @@ func TestLocalIngestDirRejectsSlashIndexDocument(t *testing.T) {
 	t.Parallel()
 
 	store := mockstorer.New()
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             store,
 		Logger:             log.Noop,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),

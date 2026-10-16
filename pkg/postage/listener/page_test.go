@@ -26,7 +26,7 @@ var errRangeTooLarge = errors.New("query returned more than 10000 results")
 // over more than limit blocks, like a provider that limits eth_getLogs. It
 // records the size of every query and whether it was refused.
 type rangeLimitFilterer struct {
-	limit     uint64
+	limit     uint64      // guarded by mu
 	blockDown atomic.Bool // BlockNumber fails, so FilterLogs is never asked
 
 	mu      sync.Mutex
@@ -46,8 +46,8 @@ func (f *rangeLimitFilterer) FilterLogs(ctx context.Context, q ethereum.FilterQu
 		return nil, err
 	}
 	size := q.ToBlock.Uint64() - q.FromBlock.Uint64() + 1
-	refuse := size > f.limit
 	f.mu.Lock()
+	refuse := size > f.limit
 	f.sizes = append(f.sizes, size)
 	f.refused = append(f.refused, refuse)
 	f.mu.Unlock()
@@ -256,5 +256,68 @@ func TestWaitGrowsOnlyWhileStale(t *testing.T) {
 	slices.Sort(before)
 	if median := before[len(before)/2]; median > 50*time.Millisecond {
 		t.Fatalf("median wait before stale %v, want about the 10 ms backoffTime; waits %v", median, before)
+	}
+}
+
+// TestPageWithinConfiguredRange checks postage-sync-block-range, which Bee
+// v2.8.3 added as a fixed page: in wasp it is the largest page of the
+// adaptive pager. The default is 5000, not Bee's 1000; a set range is never
+// exceeded, also when the page grows back after failures; and a refused
+// query still halves the page below it.
+func TestPageWithinConfiguredRange(t *testing.T) {
+	defer listener.SetStaleMaxBackoff(20 * time.Millisecond)()
+
+	if listener.DefaultBlockPage != 5000 {
+		t.Fatalf("default page %d, want 5000", listener.DefaultBlockPage)
+	}
+
+	// The provider first refuses every query, so the page falls to
+	// MinBlockPage; growing back from there by doubling passes the
+	// configured range unless the pager stops at it.
+	const configured = 1500
+	f := &rangeLimitFilterer{limit: listener.MinBlockPage / 2}
+	startStale(t, f, log.Noop, listener.WithBlockPage(configured))
+
+	waitFor(t, "the page at its minimum", func() bool {
+		s, _ := f.log()
+		return len(s) > 0 && s[len(s)-1] == listener.MinBlockPage
+	})
+	// The provider now accepts any range, so the page grows back.
+	f.mu.Lock()
+	f.limit = 1 << 40
+	f.mu.Unlock()
+	waitFor(t, "the page grown back", func() bool {
+		s, _ := f.log()
+		return len(s) > 0 && s[len(s)-1] >= configured
+	})
+	waitFor(t, "more queries", func() bool { s, _ := f.log(); return len(s) >= 40 })
+	sizes, _ := f.log()
+
+	// 1500 and 750 refused first.
+	for i, want := range []uint64{configured, configured / 2} {
+		if sizes[i] != want {
+			t.Fatalf("query %d covered %d blocks, want %d; sizes %v", i, sizes[i], want, sizes[:6])
+		}
+	}
+	if m := slices.Max(sizes); m != configured {
+		t.Fatalf("the largest query covered %d blocks, want the configured %d; first sizes %v", m, configured, sizes[:30])
+	}
+	if last := sizes[len(sizes)-1]; last != configured {
+		t.Fatalf("the page settled at %d blocks, want the configured %d; first sizes %v", last, configured, sizes[:30])
+	}
+}
+
+// TestPageZeroRangeKeepsDefault checks that a range of 0, the value an
+// unset option could pass, keeps the default page.
+func TestPageZeroRangeKeepsDefault(t *testing.T) {
+	defer listener.SetStaleMaxBackoff(20 * time.Millisecond)()
+
+	f := &rangeLimitFilterer{limit: 1 << 40}
+	startStale(t, f, log.Noop, listener.WithBlockPage(0))
+
+	waitFor(t, "a query", func() bool { s, _ := f.log(); return len(s) >= 1 })
+	sizes, _ := f.log()
+	if sizes[0] != listener.DefaultBlockPage {
+		t.Fatalf("first query covered %d blocks with the range set to 0, want the default %d", sizes[0], listener.DefaultBlockPage)
 	}
 }

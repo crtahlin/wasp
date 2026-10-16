@@ -147,8 +147,10 @@ func (s *cashoutService) CashCheque(ctx context.Context, chequebook, recipient c
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             sctx.GetGasLimit(ctx),
 		MinEstimatedGasLimit: CashoutGasLimitFloor,
-		Value:                big.NewInt(0),
-		Description:          "cheque cashout",
+		// When estimation fails, gas-limit-fallback, as in Bee v2.8.3.
+		FallbackOnEstimateError: true,
+		Value:                   big.NewInt(0),
+		Description:             "cheque cashout",
 	}
 
 	txHash, err := s.transactionService.Send(ctx, request, transaction.DefaultTipBoostPercent)
@@ -184,6 +186,10 @@ func (s *cashoutService) CashoutStatus(ctx context.Context, chequebookAddress co
 			}, nil
 		}
 		return nil, err
+	}
+
+	if action.Cheque.CumulativePayout == nil {
+		return nil, fmt.Errorf("nil cumulative payout on cashout action loaded from statestore for chequebook %x: %w", chequebookAddress, ErrNoCheque)
 	}
 
 	_, pending, err := s.backend.TransactionByHash(ctx, action.TxHash)

@@ -130,7 +130,7 @@ func withProvidersBatch() jsonhttptest.Option {
 func TestProvidersOff(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{Storer: mockstorer.New()})
+	client, _, _, _, _ := newTestServer(t, testServerOptions{Storer: mockstorer.New()})
 	ref := swarm.RandAddress(t).String()
 
 	jsonhttptest.Request(t, client, http.MethodPost, "/wasp/providers/"+ref, http.StatusForbidden, withProvidersBatch())
@@ -149,7 +149,7 @@ func TestProvidersAnnounce(t *testing.T) {
 
 	st := mockstorer.New()
 	fake := &fakeProviders{}
-	client, _, _, _ := newTestServer(t, testServerOptions{Storer: st, Providers: fake})
+	client, _, _, _, _ := newTestServer(t, testServerOptions{Storer: st, Providers: fake})
 	ref := swarm.RandAddress(t)
 	path := "/wasp/providers/" + ref.String()
 
@@ -181,7 +181,7 @@ func TestProvidersAnnounceRefused(t *testing.T) {
 		t.Parallel()
 		st := mockstorer.New()
 		pinProvided(t, st, ref)
-		client, _, _, _ := newTestServer(t, testServerOptions{Storer: st, Providers: &fakeProviders{}, BeeMode: api.LightMode})
+		client, _, _, _, _ := newTestServer(t, testServerOptions{Storer: st, Providers: &fakeProviders{}, BeeMode: api.LightMode})
 		jsonhttptest.Request(t, client, http.MethodPost, path, http.StatusBadRequest, withProvidersBatch())
 	})
 
@@ -197,7 +197,7 @@ func TestProvidersAnnounceRefused(t *testing.T) {
 			t.Parallel()
 			st := mockstorer.New()
 			pinProvided(t, st, ref)
-			client, _, _, _ := newTestServer(t, testServerOptions{Storer: st, Providers: &fakeProviders{err: tc.err}})
+			client, _, _, _, _ := newTestServer(t, testServerOptions{Storer: st, Providers: &fakeProviders{err: tc.err}})
 			jsonhttptest.Request(t, client, http.MethodPost, path, tc.code, withProvidersBatch())
 		})
 	}
@@ -213,7 +213,7 @@ func TestProvidersListLookupWithdraw(t *testing.T) {
 		Capability: providers.CapabilityFull,
 	}}}
 	st := mockstorer.New()
-	client, _, _, _ := newTestServer(t, testServerOptions{Storer: st, Providers: fake})
+	client, _, _, _, _ := newTestServer(t, testServerOptions{Storer: st, Providers: fake})
 
 	ref := swarm.RandAddress(t)
 	pinProvided(t, st, ref)
@@ -255,7 +255,7 @@ func TestProvidersHeader(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeProviders{}
-	client, _, _, _ := newTestServer(t, testServerOptions{Storer: mockstorer.New(), Providers: fake})
+	client, _, _, _, _ := newTestServer(t, testServerOptions{Storer: mockstorer.New(), Providers: fake})
 	chunk := "/chunks/" + swarm.RandAddress(t).String()
 
 	for _, bad := range []string{"zz", "/ip4/192.0.2.1/tcp/1634", "abcd"} {
@@ -291,7 +291,7 @@ func TestProvidersDiscoverAfterManyChunks(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeProviders{}
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:    mockstorer.New(),
 		Post:      mockpost.New(mockpost.WithAcceptAll()),
 		Providers: fake,
@@ -358,7 +358,7 @@ func TestProvidersSharedSet(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeProviders{}
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:    mockstorer.New(),
 		Post:      mockpost.New(mockpost.WithAcceptAll()),
 		Providers: fake,
@@ -396,7 +396,7 @@ func TestProvidersEncryptedReference(t *testing.T) {
 
 	fake := &fakeProviders{}
 	st := mockstorer.New()
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:    st,
 		Post:      mockpost.New(mockpost.WithAcceptAll()),
 		Providers: fake,
@@ -422,7 +422,7 @@ func TestProvidersHeaderAllowedByCORS(t *testing.T) {
 	t.Parallel()
 
 	const origin = "example.com"
-	client, _, _, _ := newTestServer(t, testServerOptions{Storer: mockstorer.New(), CORSAllowedOrigins: []string{origin}})
+	client, _, _, _, _ := newTestServer(t, testServerOptions{Storer: mockstorer.New(), CORSAllowedOrigins: []string{origin}})
 
 	h := jsonhttptest.Request(t, client, http.MethodGet, "/chunks/"+swarm.RandAddress(t).String(), http.StatusNotFound,
 		jsonhttptest.WithRequestHeader(api.OriginHeader, origin),
@@ -468,7 +468,7 @@ func TestProvidersHintWaitsForConnection(t *testing.T) {
 
 	run := providers.NewHintRun()
 	fake := &fakeProviders{hintRun: run}
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:    mockstorer.New(),
 		Post:      mockpost.New(mockpost.WithAcceptAll()),
 		Providers: fake,
@@ -505,7 +505,7 @@ func TestProvidersHintWaitIsBounded(t *testing.T) {
 	const limit = 200 * time.Millisecond
 	run := providers.NewHintRun() // never finishes on its own
 	fake := &fakeProviders{hintRun: run}
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:          mockstorer.New(),
 		Post:            mockpost.New(mockpost.WithAcceptAll()),
 		Providers:       fake,
@@ -546,7 +546,7 @@ func TestProvidersHintedNotFoundSaysWhy(t *testing.T) {
 	run.Add(providers.HintOutcome{NoAddress: 1})
 	run.Finish()
 	fake := &fakeProviders{hintRun: run}
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:    mockstorer.New(),
 		Post:      mockpost.New(mockpost.WithAcceptAll()),
 		Providers: fake,

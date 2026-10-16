@@ -42,7 +42,7 @@ func TestBatchTTLFollowsBlockTime(t *testing.T) {
 			t.Parallel()
 
 			bs := mock.New(mock.WithChainState(cs), mock.WithBatch(b))
-			ts, _, _, _ := newTestServer(t, testServerOptions{
+			ts, _, _, _, _ := newTestServer(t, testServerOptions{
 				BatchStore:    bs,
 				BlockTime:     time.Hour, // must be ignored when BlockTimeFunc is set
 				BlockTimeFunc: func() time.Duration { return tc.blockTime },

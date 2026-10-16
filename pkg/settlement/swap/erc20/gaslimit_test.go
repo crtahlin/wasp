@@ -43,4 +43,7 @@ func TestTransferEstimatesGas(t *testing.T) {
 	if got.MinEstimatedGasLimit != erc20.TransferGasLimitFloor {
 		t.Fatalf("got gas floor %d, want %d", got.MinEstimatedGasLimit, erc20.TransferGasLimitFloor)
 	}
+	if !got.FallbackOnEstimateError {
+		t.Fatal("a failed estimate falls back to the floor, want gas-limit-fallback")
+	}
 }

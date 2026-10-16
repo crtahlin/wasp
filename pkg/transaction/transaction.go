@@ -120,7 +120,7 @@ const (
 	MaxGasLimit            = 10_000_000 // Maximum allowed gas limit to prevent excessive values
 	MinGasLimit            = 21_000     // Minimum gas for any transaction
 	GasBufferPercent       = 33         // Add 33% buffer to estimated gas
-	FallbackGasLimit       = 500_000    // Fallback when estimation fails and no minimum is set
+	FallbackGasLimit       = 900_000    // Fallback when estimation fails and no minimum is set
 )
 
 // TxRequest describes a request for a transaction that can be executed.
@@ -133,6 +133,12 @@ type TxRequest struct {
 	GasFeeCap            *big.Int        // adds a cap to maximum fee user is willing to pay
 	Value                *big.Int        // amount of wei to send
 	Description          string          // optional description
+	// FallbackOnEstimateError, when estimation fails, uses the configured
+	// gas-limit-fallback instead of MinEstimatedGasLimit, but never less
+	// than MinEstimatedGasLimit. The chequebook's transactions set it, as
+	// Bee v2.8.3 does by having no minimum there; the lottery calls do not,
+	// and keep falling back to their minimum.
+	FallbackOnEstimateError bool
 	// MinBaseFeeMultiple, when above 0 and GasPrice is nil, raises the fee
 	// cap to at least this many times the latest base fee plus the tip.
 	// The fee paid is still the base fee plus the tip; a higher cap only
@@ -435,11 +441,12 @@ func (t *transactionService) prepareTransaction(ctx context.Context, request *Tx
 				"description", request.Description,
 			)
 
-			if request.MinEstimatedGasLimit > 0 {
+			if request.MinEstimatedGasLimit > 0 && !request.FallbackOnEstimateError {
 				gasLimit = request.MinEstimatedGasLimit
 			} else if len(request.Data) > 0 {
-				// Contract call - use configured fallback
-				gasLimit = t.fallbackGasLimit
+				// Contract call - use configured fallback, never below the
+				// request's minimum
+				gasLimit = max(t.fallbackGasLimit, request.MinEstimatedGasLimit)
 			} else {
 				// Simple transfer - use minimum
 				gasLimit = MinGasLimit

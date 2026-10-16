@@ -27,6 +27,7 @@ type metrics struct {
 	RequestsAbandoned    *prometheus.CounterVec // waiting requests ended because the requester went away (#641)
 	RequestsRefused      *prometheus.CounterVec // requests refused before they were served (#643)
 	RequestsUnwatched    prometheus.Counter     // requests that waited without a watcher (#641)
+	StreamLimitExceeded  prometheus.Counter     // number of peers disconnected for exceeding the concurrent stream limit
 }
 
 func newMetrics() metrics {
@@ -138,6 +139,12 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "requests_unwatched_total",
 			Help:      "Inbound requests that waited for their first chunk without a watcher, because the stream has no read deadline; such a request is not ended when its requester goes away (#641).",
+		}),
+		StreamLimitExceeded: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "stream_limit_exceeded",
+			Help:      "Total peers disconnected for exceeding the concurrent stream limit.",
 		}),
 	}
 }

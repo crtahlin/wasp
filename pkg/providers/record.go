@@ -265,12 +265,11 @@ func signedChunk(signer crypto.Signer, id, payload []byte) (swarm.Chunk, error) 
 // unwrap checks that ch is a valid single owner chunk and returns it with the
 // payload of the chunk it wraps.
 func unwrap(ch swarm.Chunk) (*soc.SOC, []byte, error) {
-	if !soc.Valid(ch) {
-		return nil, nil, fmt.Errorf("%w: not a valid single owner chunk", ErrInvalidRecord)
-	}
-	s, err := soc.FromChunk(ch)
+	// FromChunkValidate both parses the SOC and checks that ch carries the
+	// SOC's own address, so one parse does what soc.Valid and FromChunk did.
+	s, err := soc.FromChunkValidate(ch)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %w", ErrInvalidRecord, err)
+		return nil, nil, fmt.Errorf("%w: not a valid single owner chunk: %w", ErrInvalidRecord, err)
 	}
 	data := s.WrappedChunk().Data()
 	if len(data) < swarm.SpanSize {

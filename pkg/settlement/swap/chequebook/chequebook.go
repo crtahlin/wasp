@@ -328,6 +328,10 @@ func (s *service) LastCheque(beneficiary common.Address) (*SignedCheque, error) 
 		return nil, fmt.Errorf("nil cheque loaded from statestore for beneficiary %x: %w", beneficiary, ErrNoCheque)
 	}
 
+	if lastCheque.CumulativePayout == nil {
+		return nil, fmt.Errorf("nil cumulative payout on cheque loaded from statestore for beneficiary %x: %w", beneficiary, ErrNilCumulativePayout)
+	}
+
 	return lastCheque, nil
 }
 
@@ -395,8 +399,10 @@ func (s *service) Withdraw(ctx context.Context, amount *big.Int) (hash common.Ha
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		MinEstimatedGasLimit: WithdrawGasLimitFloor,
-		Value:                big.NewInt(0),
-		Description:          fmt.Sprintf("chequebook withdrawal of %d BZZ", amount),
+		// When estimation fails, gas-limit-fallback, as in Bee v2.8.3.
+		FallbackOnEstimateError: true,
+		Value:                   big.NewInt(0),
+		Description:             fmt.Sprintf("chequebook withdrawal of %d BZZ", amount),
 	}
 
 	txHash, err := s.transactionService.Send(ctx, request, transaction.DefaultTipBoostPercent)
