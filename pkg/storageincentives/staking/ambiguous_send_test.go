@@ -21,9 +21,10 @@ import (
 )
 
 // TestDepositStakeAfterAmbiguousApprove is the stake deposit's form of
-// #802: the approve's send fails at the transport level (HTTP 429), so the
-// transaction service returns its hash with the error, and the approve's
-// receipt decides whether the deposit goes ahead.
+// #802: the approve's or the deposit's send fails at the transport level
+// (HTTP 429), so the transaction service returns its hash with the error,
+// and the receipt decides whether the deposit goes ahead and is reported
+// as made.
 func TestDepositStakeAfterAmbiguousApprove(t *testing.T) {
 	t.Parallel()
 
@@ -37,12 +38,15 @@ func TestDepositStakeAfterAmbiguousApprove(t *testing.T) {
 	http429 := rpc.HTTPError{StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests"}
 
 	for _, tc := range []struct {
-		name          string
-		approveStatus uint64
-		wantErr       error // nil means the deposit is sent and succeeds
+		name           string
+		approveSendErr error
+		depositSendErr error
+		approveStatus  uint64
+		wantErr        error // nil means the deposit is sent and succeeds
 	}{
-		{name: "mined approve, deposit sent", approveStatus: types.ReceiptStatusSuccessful},
-		{name: "reverted approve, no deposit", approveStatus: types.ReceiptStatusFailed, wantErr: transaction.ErrTransactionReverted},
+		{name: "approve send fails, mined, deposit sent", approveSendErr: http429, approveStatus: types.ReceiptStatusSuccessful},
+		{name: "deposit send fails, mined, deposit made", depositSendErr: http429, approveStatus: types.ReceiptStatusSuccessful},
+		{name: "approve send fails, reverted, no deposit", approveSendErr: http429, approveStatus: types.ReceiptStatusFailed, wantErr: transaction.ErrTransactionReverted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -53,10 +57,10 @@ func TestDepositStakeAfterAmbiguousApprove(t *testing.T) {
 					transactionMock.WithSendFunc(func(_ context.Context, request *transaction.TxRequest, _ int) (common.Hash, error) {
 						switch *request.To {
 						case bzzToken:
-							return approveHash, http429
+							return approveHash, tc.approveSendErr
 						case stakingAddress:
 							deposits.Add(1)
-							return depositHash, nil
+							return depositHash, tc.depositSendErr
 						}
 						return common.Hash{}, errors.New("sent to wrong contract")
 					}),

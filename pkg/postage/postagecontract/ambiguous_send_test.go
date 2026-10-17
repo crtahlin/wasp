@@ -10,6 +10,7 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,11 +54,36 @@ type chainFixture struct {
 	batchID                common.Hash
 
 	approveSendErr error  // returned for the first approve send
+	createSendErr  error  // returned for the first createBatch send
 	approveStatus  uint64 // receipt status of the approve
 	approveMined   bool   // whether the approve gets a receipt at all
 
 	mu   sync.Mutex
 	sent []*types.Transaction
+	log  bytes.Buffer
+}
+
+// logger writes the transaction service's warnings to f.log.
+func (f *chainFixture) logger() log.Logger {
+	return log.NewLogger("test", log.WithSink(&lockedWriter{mu: &f.mu, w: &f.log}), log.WithVerbosity(log.VerbosityWarning))
+}
+
+func (f *chainFixture) logged() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.log.String()
+}
+
+// lockedWriter serialises writes to w with mu.
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 func newChainFixture() *chainFixture {
@@ -80,6 +106,16 @@ func (f *chainFixture) sentTo(to common.Address) []*types.Transaction {
 		}
 	}
 	return out
+}
+
+// distinctSentTo counts the different transactions sent to to; a
+// re-broadcast of the same signed bytes counts once.
+func (f *chainFixture) distinctSentTo(to common.Address) int {
+	seen := map[common.Hash]bool{}
+	for _, tx := range f.sentTo(to) {
+		seen[tx.Hash()] = true
+	}
+	return len(seen)
 }
 
 func (f *chainFixture) byHash(h common.Hash) *types.Transaction {
@@ -117,6 +153,9 @@ func (f *chainFixture) receiptFor(h common.Hash) *types.Receipt {
 
 func (f *chainFixture) contract(t *testing.T) (postagecontract.Interface, postage.Service) {
 	t.Helper()
+	b := postagecontract.BucketDepth
+	postagecontract.BucketDepth = 9
+	t.Cleanup(func() { postagecontract.BucketDepth = b })
 
 	key, err := crypto.GenerateSecp256k1Key()
 	if err != nil {
@@ -152,8 +191,11 @@ func (f *chainFixture) contract(t *testing.T) (postagecontract.Interface, postag
 				}
 			}
 			f.sent = append(f.sent, tx)
-			if *tx.To() == f.bzzToken && first {
+			switch {
+			case *tx.To() == f.bzzToken && first:
 				return f.approveSendErr
+			case *tx.To() == f.postageStamp && first:
+				return f.createSendErr
 			}
 			return nil
 		}),
@@ -199,7 +241,7 @@ func (f *chainFixture) contract(t *testing.T) (postagecontract.Interface, postag
 		}),
 	)
 
-	service, err := transaction.NewService(log.Noop, owner, backend, signer, storemock.NewStateStore(), big.NewInt(5), monitor, 0)
+	service, err := transaction.NewService(f.logger(), owner, backend, signer, storemock.NewStateStore(), big.NewInt(5), monitor, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,15 +256,17 @@ func (f *chainFixture) contract(t *testing.T) (postagecontract.Interface, postag
 // should not happen fails the test with a message instead of hanging it.
 func createBatch(t *testing.T, c postagecontract.Interface) ([]byte, error) {
 	t.Helper()
-	defer func(b uint8) { postagecontract.BucketDepth = b }(postagecontract.BucketDepth)
-	postagecontract.BucketDepth = 9
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, id, err := c.CreateBatch(ctx, big.NewInt(100), 10, false, "label")
+	id, err := createBatchWithin(c, 5*time.Second)
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("CreateBatch did not return within its 5 s deadline: %v", err)
 	}
+	return id, err
+}
+
+func createBatchWithin(c postagecontract.Interface, d time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	_, id, err := c.CreateBatch(ctx, big.NewInt(100), 10, false, "label")
 	return id, err
 }
 
@@ -241,7 +285,7 @@ func TestCreateBatchAfterAmbiguousApprove(t *testing.T) {
 	if !bytes.Equal(id, f.batchID[:]) {
 		t.Fatalf("batch id %x, want %x", id, f.batchID)
 	}
-	if n := len(f.sentTo(f.postageStamp)); n != 1 {
+	if n := f.distinctSentTo(f.postageStamp); n != 1 {
 		t.Fatalf("%d createBatch transactions sent, want 1", n)
 	}
 	if si, _, err := postages.GetStampIssuer(id); err != nil || si == nil {
@@ -267,21 +311,70 @@ func TestCreateBatchAmbiguousApproveReverted(t *testing.T) {
 	}
 }
 
-// TestCreateBatchApproveRefused asserts a send that an endpoint answered
-// with a JSON-RPC error fails at once, as before: the approve gets no
-// receipt here, so waiting for one would run into the test's deadline.
-func TestCreateBatchApproveRefused(t *testing.T) {
+// TestCreateBatchAfterAmbiguousCreate is the second transaction's form of
+// #802: the approve is sent normally, the createBatch send answers 429 and
+// is mined later. The batch must be recorded, and createBatch sent once.
+func TestCreateBatchAfterAmbiguousCreate(t *testing.T) {
 	f := newChainFixture()
-	f.approveSendErr = refusalError{"insufficient funds for gas * price + value"}
+	f.createSendErr = http429
+	c, postages := f.contract(t)
+
+	id, err := createBatch(t, c)
+	if err != nil {
+		t.Fatalf("CreateBatch: %v, want the batch recorded once createBatch is mined", err)
+	}
+	if !bytes.Equal(id, f.batchID[:]) {
+		t.Fatalf("batch id %x, want %x", id, f.batchID)
+	}
+	if n := f.distinctSentTo(f.postageStamp); n != 1 {
+		t.Fatalf("%d createBatch transactions sent, want 1", n)
+	}
+	if si, _, err := postages.GetStampIssuer(id); err != nil || si == nil {
+		t.Fatalf("stamp issuer for the new batch: %v, %v", si, err)
+	}
+}
+
+// TestCreateBatchAfterRefusedApproveMined covers a temporary refusal: an
+// endpoint answers the approve's send with a JSON-RPC error (a full pool),
+// the service re-broadcasts it and it is mined. The batch must be created,
+// because the service treats the answer as an unknown outcome too.
+func TestCreateBatchAfterRefusedApproveMined(t *testing.T) {
+	f := newChainFixture()
+	f.approveSendErr = refusalError{"txpool is full"}
+	c, _ := f.contract(t)
+
+	if _, err := createBatch(t, c); err != nil {
+		t.Fatalf("CreateBatch: %v, want the batch created once the approve is mined", err)
+	}
+	if n := f.distinctSentTo(f.postageStamp); n != 1 {
+		t.Fatalf("%d createBatch transactions sent, want 1", n)
+	}
+}
+
+// TestCreateBatchApproveNeverMined asserts the end of the wait: the
+// approve's send fails and the approve gets no receipt, so CreateBatch
+// returns when the caller's context ends, with the send error, sends no
+// createBatch, and logs the approve's hash at warning level.
+func TestCreateBatchApproveNeverMined(t *testing.T) {
+	f := newChainFixture()
+	f.approveSendErr = http429
 	f.approveMined = false
 	c, _ := f.contract(t)
 
-	_, err := createBatch(t, c)
-	var answer rpc.Error
-	if !errors.As(err, &answer) {
-		t.Fatalf("CreateBatch: %v, want the endpoint's answer", err)
+	_, err := createBatchWithin(c, 300*time.Millisecond)
+	var httpErr rpc.HTTPError
+	if !errors.As(err, &httpErr) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CreateBatch: %v, want the send error and the end of the wait", err)
 	}
-	if n := len(f.sentTo(f.postageStamp)); n != 0 {
-		t.Fatalf("%d createBatch transactions sent after a refused approve, want 0", n)
+	if n := f.distinctSentTo(f.postageStamp); n != 0 {
+		t.Fatalf("%d createBatch transactions sent without a mined approve, want 0", n)
+	}
+	approves := f.sentTo(f.bzzToken)
+	if len(approves) == 0 {
+		t.Fatal("no approve sent")
+	}
+	out := f.logged()
+	if !strings.Contains(out, "may still be mined") || !strings.Contains(out, approves[0].Hash().String()) {
+		t.Fatalf("want a warning naming the approve's hash; log: %q", out)
 	}
 }

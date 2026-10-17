@@ -10,51 +10,65 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/ethersphere/bee/v2/pkg/log"
 )
 
 // SendOutcomeUnknown reports whether a transaction for which Send or
 // SendWithHook returned txHash and err may still be mined (#802).
 //
-// That is the case when the transaction was signed and stored (a hash came
-// back and the error does not wrap ErrNotBroadcast) and the send failed
-// without an answer from the endpoint: a transport error, a timeout or an
-// HTTP error status such as 429. The service then keeps the transaction,
-// counts its nonce as used and sends it again (rebroadcastAmbiguous), so it
-// can be mined later. A JSON-RPC error answer (rpc.Error) means an endpoint
-// read the transaction and refused it, and is a definite failure.
+// That is the case for every send error after the transaction was signed
+// and stored: a hash came back and the error does not wrap ErrNotBroadcast.
+// The service then keeps the transaction, counts its nonce as used and
+// sends it again (rebroadcastAmbiguous), whatever the error was. A JSON-RPC
+// error answer is included: with several endpoints, an earlier endpoint
+// may have taken the transaction before the answer came from another one,
+// and a refusal can be temporary (a full pool, a rate limit inside an HTTP
+// 200). See docs/experiments/ambiguous-send-receipt-wait/spec.md.
 func SendOutcomeUnknown(txHash common.Hash, err error) bool {
-	if err == nil || txHash == (common.Hash{}) || errors.Is(err, ErrNotBroadcast) {
-		return false
-	}
-	var answer rpc.Error
-	return !errors.As(err, &answer)
+	return err != nil && txHash != (common.Hash{}) && !errors.Is(err, ErrNotBroadcast)
 }
 
 // WaitForSentReceipt waits for the receipt of a transaction for which Send
-// returned txHash and sendErr. Without a send error it is WaitForReceipt.
-// When the outcome of the send is unknown (SendOutcomeUnknown), the receipt
-// decides: it waits for it, at most AmbiguousPendingTimeout, the time during
-// which the service keeps the transaction's nonce for it. Any other send
-// error is returned at once.
+// returned txHash and sendErr, using s.WaitForReceipt. Without a send error
+// it is WaitForReceipt. When the outcome of the send is unknown
+// (SendOutcomeUnknown), the receipt decides: it waits for it, at most
+// AmbiguousPendingTimeout, the time during which the service keeps the
+// transaction's nonce for it. When that wait ends without a receipt (the
+// bound or the caller's context), it logs the transaction's hash at
+// warning level, so that an operator can check it on chain before sending
+// the operation again. A send error before the broadcast is returned at
+// once.
 //
-// A caller that sends a second transaction which depends on the first, such
-// as an ERC-20 approve followed by the call that spends the allowance, uses
-// it so that a send which failed at the transport level but was mined later
-// does not abort the operation with the first transaction already on chain.
-// The caller still checks the receipt's status.
-func WaitForSentReceipt(ctx context.Context, s Service, txHash common.Hash, sendErr error) (*types.Receipt, error) {
+// The caller still checks the receipt's status. Service.WaitForSentReceipt
+// calls it with the service's logger.
+func WaitForSentReceipt(ctx context.Context, s Service, logger log.Logger, txHash common.Hash, sendErr error) (*types.Receipt, error) {
 	if sendErr == nil {
 		return s.WaitForReceipt(ctx, txHash)
 	}
 	if !SendOutcomeUnknown(txHash, sendErr) {
 		return nil, sendErr
 	}
-	ctx, cancel := context.WithTimeout(ctx, AmbiguousPendingTimeout)
+	wctx, cancel := context.WithTimeout(ctx, AmbiguousPendingTimeout)
 	defer cancel()
-	receipt, err := s.WaitForReceipt(ctx, txHash)
+	receipt, err := s.WaitForReceipt(wctx, txHash)
 	if err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			// An answer about the transaction, such as
+			// ErrTransactionCancelled: its nonce was used by another.
+			return nil, errors.Join(sendErr, err)
+		}
+		var description string
+		if stored, serr := s.StoredTransaction(txHash); serr == nil {
+			description = stored.Description
+		}
+		logger.Warning("transaction may still be mined; check it on chain before sending it again",
+			"tx", txHash, "description", description, "error", sendErr)
 		return nil, errors.Join(sendErr, err)
 	}
 	return receipt, nil
+}
+
+// WaitForSentReceipt implements Service.
+func (t *transactionService) WaitForSentReceipt(ctx context.Context, txHash common.Hash, sendErr error) (*types.Receipt, error) {
+	return WaitForSentReceipt(ctx, t, t.logger, txHash, sendErr)
 }
