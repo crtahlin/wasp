@@ -180,12 +180,10 @@ func (c *postageContract) sendApproveTransaction(ctx context.Context, amount *bi
 		)
 	}()
 
+	// A send whose outcome is unknown can still be mined; its receipt
+	// decides (#802).
 	txHash, err := c.transactionService.Send(ctx, request, transaction.DefaultTipBoostPercent)
-	if err != nil {
-		return nil, err
-	}
-
-	receipt, err = c.transactionService.WaitForReceipt(ctx, txHash)
+	receipt, err = transaction.WaitForSentReceipt(ctx, c.transactionService, txHash, err)
 	if err != nil {
 		return nil, err
 	}
@@ -216,12 +214,10 @@ func (c *postageContract) sendTransaction(ctx context.Context, callData []byte, 
 		)
 	}()
 
+	// A send whose outcome is unknown can still be mined; its receipt
+	// decides (#802).
 	txHash, err := c.transactionService.Send(ctx, request, transaction.DefaultTipBoostPercent)
-	if err != nil {
-		return nil, err
-	}
-
-	receipt, err = c.transactionService.WaitForReceipt(ctx, txHash)
+	receipt, err = transaction.WaitForSentReceipt(ctx, c.transactionService, txHash, err)
 	if err != nil {
 		return nil, err
 	}
