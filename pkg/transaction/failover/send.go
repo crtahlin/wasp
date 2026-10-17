@@ -81,8 +81,8 @@ func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) er
 	for j := 1; j < len(b.endpoints); j++ {
 		order = append(order, (i+j)%len(b.endpoints))
 	}
-	for {
-		k, done, err := b.resend(ctx, tx, order, first)
+	for dial := true; ; dial = false {
+		k, done, err := b.resend(ctx, tx, order, first, dial)
 		if done {
 			if err == nil && persist {
 				b.sendCopies(tx, k, attempt)
@@ -110,12 +110,17 @@ func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) er
 // to return, or not done when every endpoint failed at the transport level or
 // the caller's context ended (with the context's error).
 //
-// Endpoints with no connection are tried last: each is dialled, and sent to
-// when the dial works (#802). A read skips them and leaves them to Recover,
-// which only probes endpoints ahead of the active one; for a send that every
-// connected endpoint failed, a configured endpoint not tried is a transaction
-// that may be lost, which is worth the cost of a dial.
-func (b *Backend) resend(ctx context.Context, tx *types.Transaction, order []int, first error) (int, bool, error) {
+// When dial is set, endpoints with no connection are tried last: each is
+// dialled, and sent to when the dial works (#802). A read skips them and
+// leaves them to Recover, which only probes endpoints ahead of the active
+// one; for a send that every connected endpoint failed, a configured
+// endpoint not tried is a transaction that may be lost, which is worth the
+// cost of a dial. SendTransaction sets dial only for the first round, so a
+// persistent send that goes round again every second does not dial an
+// unreachable endpoint every second. A connection made here is kept, and
+// the endpoint is then an ordinary connected one for reads and copies too.
+// See docs/experiments/ambiguous-send-receipt-wait/spec.md.
+func (b *Backend) resend(ctx context.Context, tx *types.Transaction, order []int, first error, dial bool) (int, bool, error) {
 	var unconnected []int
 	for _, k := range order {
 		if b.endpoints[k].live.Load() == nil {
@@ -125,6 +130,9 @@ func (b *Backend) resend(ctx context.Context, tx *types.Transaction, order []int
 		if k, done, err := b.resendTo(ctx, tx, k, first); done || err != nil {
 			return k, done, err
 		}
+	}
+	if !dial {
+		return 0, false, nil
 	}
 	for _, k := range unconnected {
 		if k, done, err := b.resendTo(ctx, tx, k, first); done || err != nil {

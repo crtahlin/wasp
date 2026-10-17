@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
@@ -118,5 +119,40 @@ func TestSendTransactionUnconnectedEndpointDown(t *testing.T) {
 	}
 	if n := dials.Load(); n != 1 {
 		t.Fatalf("third endpoint dialled %d times, want 1", n)
+	}
+}
+
+// TestPersistentSendDialsAnUnconnectedEndpointOnce asserts a persistent
+// send, which goes round the endpoints again every pause until one takes
+// the transaction, dials an unreachable endpoint in its first round only,
+// not once a round.
+func TestPersistentSendDialsAnUnconnectedEndpointOnce(t *testing.T) {
+	defer failover.SetWrapPause(time.Millisecond)()
+
+	var (
+		r     recorder
+		dials atomic.Int32
+	)
+	b := newBackend(t,
+		r.endpoint("primary", http429),
+		r.endpoint("secondary", http429),
+		dialled("third", nil, &dials),
+	)
+	t.Cleanup(b.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- b.SendTransaction(persistent(ctx, time.Second), testTx()) }()
+
+	waitFor(t, 5*time.Second, func() bool { return failover.Wraparounds(b) >= 3 })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("persistent send still running after its context ended")
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("unreachable endpoint dialled %d times over %v rounds, want 1", n, failover.Wraparounds(b)+1)
 	}
 }
