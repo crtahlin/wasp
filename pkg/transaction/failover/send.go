@@ -109,51 +109,86 @@ func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) er
 // index of the endpoint that took it and a nil error, or done with the answer
 // to return, or not done when every endpoint failed at the transport level or
 // the caller's context ended (with the context's error).
+//
+// Endpoints with no connection are tried last: each is dialled, and sent to
+// when the dial works (#802). A read skips them and leaves them to Recover,
+// which only probes endpoints ahead of the active one; for a send that every
+// connected endpoint failed, a configured endpoint not tried is a transaction
+// that may be lost, which is worth the cost of a dial.
 func (b *Backend) resend(ctx context.Context, tx *types.Transaction, order []int, first error) (int, bool, error) {
+	var unconnected []int
 	for _, k := range order {
-		if err := ctx.Err(); err != nil {
-			return 0, false, err
-		}
-		c := b.endpoints[k].live.Load()
-		if c == nil {
+		if b.endpoints[k].live.Load() == nil {
+			unconnected = append(unconnected, k)
 			continue
 		}
-		name := b.endpoints[k].name
-		actx, cancel := b.attemptContext(ctx, k)
-		err := c.SendTransaction(actx, tx)
-		cancel()
-		if err == nil {
-			b.metrics.SendResent.WithLabelValues("accepted").Inc()
-			b.logger.Info("transaction accepted by another endpoint", "endpoint", name, "tx", tx.Hash())
-			return k, true, nil
+		if k, done, err := b.resendTo(ctx, tx, k, first); done || err != nil {
+			return k, done, err
 		}
-		if isTransportFailure(err) {
-			b.metrics.SendResent.WithLabelValues("failed").Inc()
-			b.logger.Warning("send transaction failed at the transport level", "endpoint", name, "tx", tx.Hash(), "error", err)
-			continue
-		}
-		var rpcErr rpc.Error
-		if !errors.As(err, &rpcErr) {
-			b.metrics.SendResent.WithLabelValues("answered").Inc()
-			return k, true, err
-		}
-		switch classifySendAnswer(err) {
-		case answerKnown:
-			b.metrics.SendResent.WithLabelValues("known").Inc()
-			b.logger.Info("transaction already known to another endpoint", "endpoint", name, "tx", tx.Hash())
-			return k, true, nil
-		case answerNonceTaken:
-			// This transaction or another with its nonce is mined; whether it
-			// was this one is for the transaction service to find out, so the
-			// send stays ambiguous, as the first error made it.
-			b.metrics.SendResent.WithLabelValues("answered").Inc()
-			return k, true, first
-		default:
-			b.metrics.SendResent.WithLabelValues("answered").Inc()
-			return k, true, err
+	}
+	for _, k := range unconnected {
+		if k, done, err := b.resendTo(ctx, tx, k, first); done || err != nil {
+			return k, done, err
 		}
 	}
 	return 0, false, nil
+}
+
+// resendTo sends tx through the endpoint at index k, dialling it first when
+// it has no connection. It returns as resend does; not done with a nil error
+// means the next endpoint is to be tried.
+func (b *Backend) resendTo(ctx context.Context, tx *types.Transaction, k int, first error) (int, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	ep := b.endpoints[k]
+	name := ep.name
+	actx, cancel := b.attemptContext(ctx, k)
+	defer cancel()
+	var c transaction.Backend
+	if live := ep.live.Load(); live != nil {
+		c = live.Backend
+	} else {
+		if c = b.connect(actx, ep); c == nil {
+			b.metrics.SendResent.WithLabelValues("failed").Inc()
+			b.logger.Warning("could not connect to a blockchain rpc endpoint to send the transaction through it",
+				"endpoint", name, "tx", tx.Hash())
+			return 0, false, nil
+		}
+	}
+	err := c.SendTransaction(actx, tx)
+	if err == nil {
+		b.metrics.SendResent.WithLabelValues("accepted").Inc()
+		b.logger.Info("transaction accepted by another endpoint", "endpoint", name, "tx", tx.Hash())
+		return k, true, nil
+	}
+	if isTransportFailure(err) {
+		b.metrics.SendResent.WithLabelValues("failed").Inc()
+		b.logger.Warning("send transaction failed at the transport level", "endpoint", name, "tx", tx.Hash(), "error", err)
+		return 0, false, nil
+	}
+	var rpcErr rpc.Error
+	if !errors.As(err, &rpcErr) {
+		b.metrics.SendResent.WithLabelValues("answered").Inc()
+		b.logger.Warning("another endpoint refused the transaction", "endpoint", name, "tx", tx.Hash(), "error", err)
+		return k, true, err
+	}
+	switch classifySendAnswer(err) {
+	case answerKnown:
+		b.metrics.SendResent.WithLabelValues("known").Inc()
+		b.logger.Info("transaction already known to another endpoint", "endpoint", name, "tx", tx.Hash())
+		return k, true, nil
+	case answerNonceTaken:
+		// This transaction or another with its nonce is mined; whether it
+		// was this one is for the transaction service to find out, so the
+		// send stays ambiguous, as the first error made it.
+		b.metrics.SendResent.WithLabelValues("answered").Inc()
+		return k, true, first
+	default:
+		b.metrics.SendResent.WithLabelValues("answered").Inc()
+		b.logger.Warning("another endpoint refused the transaction", "endpoint", name, "tx", tx.Hash(), "error", err)
+		return k, true, err
+	}
 }
 
 // sendCopies sends tx, which the endpoint at index except took, to every other
