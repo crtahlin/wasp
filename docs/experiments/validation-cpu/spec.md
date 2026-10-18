@@ -104,7 +104,9 @@ entries. A part that cannot show that is not merged.
   promotion of held chunks, `bee db import`) keeps calling `Put` and keeps the
   full check.
 - **Shadow check.** When `put` receives a verified type it recomputes
-  `storage.ChunkType` for 1 in 1,000 chunks, and for every chunk when the binary
+  `storage.ChunkType` for 1 in 1,000 chunks (every 1,000th call, by an atomic
+  counter, so the rate does not depend on a random source), and for every chunk
+  when the binary
   runs under the race detector or `testing.Testing()` is true. On a mismatch it
   uses the recomputed type, logs at error level and increments
   `wasp_reserve_chunk_type_shadow_mismatch_total`. On a real node this keeps a
@@ -251,9 +253,11 @@ work.
 
 - **Part B equivalence**, in-package tests that run both implementations in one
   binary:
-  - 1,000,000 random keys and messages signed with `Signer.Sign` (headers 27 and
-    28), plus compact signatures with the compressed flag (31 and 32) and with
-    forced overflow-bit headers;
+  - random keys and messages signed with `Signer.Sign` (headers 27 and 28), plus
+    compact signatures with the compressed flag (31 and 32) and with forced
+    overflow-bit headers. The normal test run uses 10,000, so it stays fast under
+    the race detector in CI; 1,000,000 run in the scheduled job and once before
+    merge, selected by an environment variable;
   - every header value from 0 to 255 on valid signatures;
   - edge vectors at the hash level: r or s equal to 0, 1, N-1, N, N+1 and
     2^256-1; r at least P-N with and without the overflow bit; high-S (s replaced
