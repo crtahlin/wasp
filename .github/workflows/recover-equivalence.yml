@@ -1,0 +1,35 @@
+name: Recover equivalence
+
+# The full equivalence check for signature recovery (#810): libsecp256k1 (cgo)
+# against decred's pure-Go code on 1,000,000 random signatures, then the
+# equivalence fuzz target for 2 hours. Too slow for every pull request, so it
+# runs weekly and on demand; the Go workflow runs the short form on every push.
+
+on:
+  schedule:
+    - cron: '41 2 * * 3'          # Wednesdays, 02:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  equivalence:
+    name: Recover equivalence (full)
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      CGO_ENABLED: "1"
+      GOEXPERIMENT: nogreenteagc
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        cache: true
+        go-version-file: go.mod
+    - name: 1,000,000 random signatures
+      run: WASP_RECOVER_EQUIV_N=1000000 go test ./pkg/crypto/ -run 'TestRecoverEquivalence' -count=1 -v -timeout 90m
+    - name: Equivalence fuzz (2 h)
+      run: go test ./pkg/crypto/ -run '^$' -fuzz '^FuzzRecoverEquivalence$' -fuzztime 2h -timeout 150m

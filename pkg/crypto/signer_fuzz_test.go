@@ -13,9 +13,10 @@ import (
 
 // FuzzRecover fuzzes crypto.Recover, which recovers a public key from an
 // attacker-supplied signature over attacker-supplied data. Both byte slices
-// are fuzzed independently. The target exercises the 65-byte length guard and
-// the subsequent make([]byte,65)/btcsig[0]=signature[64]/copy slicing plus the
-// hashWithEthereumPrefix(data) step before btcecdsa.RecoverCompact. It asserts
+// are fuzzed independently. The target exercises the 65-byte length guard, the
+// hashWithEthereumPrefix(data) step and the recovery itself (libsecp256k1 in
+// cgo builds, decred's RecoverCompact otherwise; FuzzRecoverEquivalence
+// compares the two). It asserts
 // that no (signature, data) pair can cause a panic, and that a nil error always
 // yields a non-nil public key.
 func FuzzRecover(f *testing.F) {
