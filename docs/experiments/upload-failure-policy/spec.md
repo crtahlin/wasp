@@ -346,8 +346,11 @@ nothing releases.
     stored stamp with this node's own stamp item for the chunk: if the item
     has a newer timestamp, the node itself stamped the chunk again since, the
     stored stamp would be refused, and the retry does not push. The entry
-    becomes a record with reason `stamp-superseded`; the newer stamp came
-    from another upload of the same content, which pushed the chunk itself.
+    becomes a record with reason `stamp-superseded`. The newer stamp came
+    from another upload of the same content, which may have delivered the
+    chunk; it may also have failed. Either way this tag keeps reporting the
+    chunk as not delivered, and its state stays `failed`, because this tag
+    has no evidence that the chunk arrived.
     Any other refusal shows up as a failed attempt with its usual reason.
   A retry needs the batch to be usable; otherwise it answers 422.
   For a chunk that arrived with its own stamp (`POST /chunks` or
@@ -545,8 +548,8 @@ remaining time of the runs ahead of it, so at most one duration per position
 in the queue. A handler waiting for a queued final pass keeps waiting, or
 stops when its client goes away; the tag shows the outcome either way.
 
-The retry service is built in `pkg/node` and gets two functions injected,
-because `pkg/storer` does not know the postage service:
+The retry service is built in `pkg/node` and gets three functions injected,
+because `pkg/storer` has neither the postage service nor its stamper store:
 
 ```go
 // Restamp signs a new stamp for ch with the same batch index, or returns
@@ -555,9 +558,18 @@ Restamp func(batchID []byte, ch swarm.Chunk) (swarm.Chunk, error)
 // SaveIssuer stores the batch's stamp issuer, as putterSessionWrapper.save
 // does today.
 SaveIssuer func(batchID []byte) error
+// StampTimestamp returns the timestamp of this node's stamp item for the
+// chunk in the batch, and false when there is no item. It backs the
+// stamp-superseded check and the "no stamp item" check of section 3.
+StampTimestamp func(batchID []byte, idAddress swarm.Address) (uint64, bool, error)
 ```
 
-Both are backed by the same `getStamper` the API uses. `SaveIssuer` is the
+`Restamp` and `SaveIssuer` are backed by the same `getStamper` the API uses.
+`StampTimestamp` is backed by a new exported lookup in `pkg/postage`,
+`postage.StampItemTimestamp(store storage.Store, batchID []byte, idAddress swarm.Address) (uint64, bool, error)`,
+because `StampItem`'s chunk-address field is unexported and its constructors
+exist only in `export_test.go`. It reads the item from the stamper store that
+`newStamperPutter` already uses. `SaveIssuer` is the
 save the session calls before a final pass; the retry service itself calls it
 only when it took the issuer for a re-stamp. All its pushes share the
 existing `directUploadLimiter`, so retries and new uploads together never push
@@ -658,7 +670,10 @@ beside `Report`, so the existing `ChunkState` values keep their meaning.
   bodies, the policy branch in `newStamperPutter` and
   `newStampedPutterWithBatch`, the issuer save before the final pass, and the
   handlers' error paths (sections 4 and 5).
-- `cmd/bee/cmd` and `pkg/node`: the four settings.
+- `pkg/postage`: the exported `StampItemTimestamp` lookup.
+- `cmd/bee/cmd` and `pkg/node`: the four settings, and the three injected
+  functions of the retry service (`Restamp`, `SaveIssuer`,
+  `StampTimestamp`).
 - `pkg/storer/mock`: the new method.
 - `openapi/Swarm.yaml`, `openapi/SwarmCommon.yaml`: below.
 - `docs/config-reference.yaml` and `docs/DIFFERENCES.md`: below.
