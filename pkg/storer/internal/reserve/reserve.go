@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/log"
@@ -46,6 +47,14 @@ type Reserve struct {
 	// arrivals counts the chunks Put added to the reserve, that is the
 	// increments of size. Eviction paces itself against its rate (#623).
 	arrivals atomic.Uint64
+	// shadowCalls counts PutVerified calls that reached the type check, and
+	// shadowMismatches the sampled ones whose verified type differed from
+	// storage.ChunkType (wasp #810).
+	shadowCalls      atomic.Uint64
+	shadowMismatches atomic.Uint64
+	// shadowAlways rechecks every verified type instead of a sample: in
+	// race builds and tests.
+	shadowAlways bool
 
 	multx *multex.Multex
 	st    transaction.Storage
@@ -73,6 +82,7 @@ func NewContext(
 	logger log.Logger,
 ) (*Reserve, error) {
 	rs := &Reserve{
+		shadowAlways: raceEnabled || testing.Testing(),
 		baseAddr:     baseAddr,
 		st:           st,
 		capacity:     capacity,
@@ -121,6 +131,53 @@ func NewContext(
 //  3. A new chunk that has the same address belonging to the same stamp index with an already stored chunk will overwrite the existing chunk
 //     if the new chunk has a higher stamp timestamp (regardless of batch type and chunk type, eg CAC & SOC).
 func (r *Reserve) Put(ctx context.Context, chunk swarm.Chunk) error {
+	return r.put(ctx, chunk, swarm.ChunkTypeUnspecified)
+}
+
+// PutVerified is Put for a chunk whose type the caller has already
+// established with the same checks storage.ChunkType runs (cac.Valid, then
+// soc.FromChunkValidate) on this same chunk, so the reserve does not repeat
+// them. Only pullsync and the pushsync handler call it (wasp #810). A
+// sample of calls is still checked against storage.ChunkType; see
+// verifiedChunkType.
+func (r *Reserve) PutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error {
+	if chunkType != swarm.ChunkTypeContentAddressed && chunkType != swarm.ChunkTypeSingleOwner {
+		return fmt.Errorf("verified chunk type %v: %w", chunkType, storage.ErrInvalidChunk)
+	}
+	return r.put(ctx, chunk, chunkType)
+}
+
+// ChunkTypeShadowMismatches returns how many verified chunk types the shadow
+// check found different from storage.ChunkType since the reserve was opened.
+func (r *Reserve) ChunkTypeShadowMismatches() uint64 {
+	return r.shadowMismatches.Load()
+}
+
+// shadowCheckEvery is how often the type a caller passed to PutVerified is
+// recomputed with storage.ChunkType on a node: every shadowCheckEvery-th
+// call. Tests and race builds recompute every call.
+const shadowCheckEvery = 1000
+
+// verifiedChunkType returns the chunk type to store for a chunk passed with
+// a verified type. On a sampled call it recomputes the type with
+// storage.ChunkType and, if the two differ, uses the recomputed type, logs
+// the mismatch and counts it.
+func (r *Reserve) verifiedChunkType(chunk swarm.Chunk, verified swarm.ChunkType) swarm.ChunkType {
+	n := r.shadowCalls.Add(1)
+	if !r.shadowAlways && n%shadowCheckEvery != 0 {
+		return verified
+	}
+	computed := storage.ChunkType(chunk)
+	if computed == verified {
+		return verified
+	}
+	r.shadowMismatches.Add(1)
+	r.logger.Error(nil, "reserve: verified chunk type differs from computed type, using computed type",
+		"chunk_address", chunk.Address(), "verified", verified, "computed", computed)
+	return computed
+}
+
+func (r *Reserve) put(ctx context.Context, chunk swarm.Chunk, verified swarm.ChunkType) error {
 	// batchID lock, Put vs Eviction
 	r.multx.Lock(string(chunk.Stamp().BatchID()))
 	defer r.multx.Unlock(string(chunk.Stamp().BatchID()))
@@ -139,7 +196,12 @@ func (r *Reserve) Put(ctx context.Context, chunk swarm.Chunk) error {
 		return nil
 	}
 
-	chunkType := storage.ChunkType(chunk)
+	chunkType := verified
+	if chunkType == swarm.ChunkTypeUnspecified {
+		chunkType = storage.ChunkType(chunk)
+	} else {
+		chunkType = r.verifiedChunkType(chunk, chunkType)
+	}
 	if chunkType == swarm.ChunkTypeUnspecified {
 		return fmt.Errorf("chunk type unspecified: %w", storage.ErrInvalidChunk)
 	}

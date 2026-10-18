@@ -524,10 +524,30 @@ func (db *DB) ReserveHas(addr swarm.Address, batchID []byte, stampHash []byte) (
 
 // ReservePutter returns a Putter for inserting chunks into the reserve.
 func (db *DB) ReservePutter() storage.Putter {
+	return db.reservePutter(swarm.ChunkTypeUnspecified)
+}
+
+// ReservePutVerified inserts a chunk into the reserve like ReservePutter,
+// for a caller that has already established the chunk's type with
+// cac.Valid and soc.FromChunkValidate on this same chunk, so the reserve
+// does not repeat those checks (wasp #810). Any other caller must use
+// ReservePutter.
+func (db *DB) ReservePutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error {
+	return db.reservePutter(chunkType).Put(ctx, chunk)
+}
+
+// reservePutter returns the reserve Putter; chunkType ChunkTypeUnspecified
+// means the reserve computes the type itself.
+func (db *DB) reservePutter(chunkType swarm.ChunkType) storage.Putter {
 	return putterWithMetrics{
 		storage.PutterFunc(
 			func(ctx context.Context, chunk swarm.Chunk) error {
-				err := db.reserve.Put(ctx, chunk)
+				var err error
+				if chunkType == swarm.ChunkTypeUnspecified {
+					err = db.reserve.Put(ctx, chunk)
+				} else {
+					err = db.reserve.PutVerified(ctx, chunk, chunkType)
+				}
 				if err != nil {
 					db.logger.Debug("reserve put error", "error", err)
 					return fmt.Errorf("reserve putter.Put: %w", err)

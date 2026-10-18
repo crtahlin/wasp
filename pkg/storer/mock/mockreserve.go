@@ -134,7 +134,10 @@ type ReserveStore struct {
 	chunksCalls int
 	subCalls    int
 	putCalls    int
-	setCalls    int
+	// verifiedTypes records the chunk type each ReservePutVerified call
+	// passed, by chunk address (wasp #810).
+	verifiedTypes map[string]swarm.ChunkType
+	setCalls      int
 
 	chunks    map[string]swarm.Chunk
 	evilAddr  swarm.Address
@@ -362,6 +365,28 @@ func (s *ReserveStore) ReservePutter() storage.Putter {
 			return s.put(ctx, c)
 		},
 	)
+}
+
+// ReservePutVerified puts a chunk like ReservePutter and records the type
+// the caller passed.
+func (s *ReserveStore) ReservePutVerified(ctx context.Context, c swarm.Chunk, chunkType swarm.ChunkType) error {
+	s.mtx.Lock()
+	s.putCalls++
+	if s.verifiedTypes == nil {
+		s.verifiedTypes = make(map[string]swarm.ChunkType)
+	}
+	s.verifiedTypes[c.Address().ByteString()] = chunkType
+	s.mtx.Unlock()
+	return s.put(ctx, c)
+}
+
+// VerifiedType returns the chunk type the last ReservePutVerified call for
+// addr passed, and whether there was one.
+func (s *ReserveStore) VerifiedType(addr swarm.Address) (swarm.ChunkType, bool) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	t, ok := s.verifiedTypes[addr.ByteString()]
+	return t, ok
 }
 
 // Put chunks.

@@ -80,6 +80,9 @@ type Receipt struct {
 type Storer interface {
 	storage.PushReporter
 	ReservePutter() storage.Putter
+	// ReservePutVerified stores a chunk whose type the handler has already
+	// established with cac.Valid and soc.FromChunkValidate (#810).
+	ReservePutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error
 }
 
 type PushSync struct {
@@ -258,11 +261,14 @@ func (ps *PushSync) handler(ctx context.Context, p p2p.Peer, stream p2p.Stream) 
 	}
 	chunk.WithStamp(stamp)
 
+	var chunkType swarm.ChunkType
 	if cac.Valid(chunk) {
+		chunkType = swarm.ChunkTypeContentAddressed
 		safe.Go(ps.logger, "pushsync-unwrap-chunk", func() {
 			ps.unwrap(chunk)
 		})
 	} else if sch, err := soc.FromChunkValidate(chunk); err == nil {
+		chunkType = swarm.ChunkTypeSingleOwner
 		ps.logger.Debug("handle gsoc", "peer_address", p.Address, "chunk_address", chunkAddress, "wrapped_chunk_address", sch.WrappedChunk().Address())
 		ps.gsocHandler(sch)
 	} else {
@@ -298,7 +304,7 @@ func (ps *PushSync) handler(ctx context.Context, p p2p.Peer, stream p2p.Stream) 
 			return fmt.Errorf("invalid stamp: %w", err)
 		}
 
-		err = ps.store.ReservePutter().Put(ctx, chunkToPut)
+		err = ps.store.ReservePutVerified(ctx, chunkToPut, chunkType)
 		if err != nil {
 			return fmt.Errorf("reserve put: %w", err)
 		}
