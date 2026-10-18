@@ -1062,6 +1062,7 @@ type testStorer struct {
 	chunksMu       sync.Mutex
 	chunksPut      map[string]swarm.Chunk
 	chunksReported map[string]int
+	verifiedTypes  map[string]swarm.ChunkType
 }
 
 func (ts *testStorer) ReservePutter() storage.Putter {
@@ -1073,6 +1074,23 @@ func (ts *testStorer) ReservePutter() storage.Putter {
 			return nil
 		},
 	)
+}
+
+func (ts *testStorer) ReservePutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error {
+	ts.chunksMu.Lock()
+	if ts.verifiedTypes == nil {
+		ts.verifiedTypes = make(map[string]swarm.ChunkType)
+	}
+	ts.verifiedTypes[chunk.Address().ByteString()] = chunkType
+	ts.chunksMu.Unlock()
+	return ts.ReservePutter().Put(ctx, chunk)
+}
+
+func (ts *testStorer) verifiedType(addr swarm.Address) (swarm.ChunkType, bool) {
+	ts.chunksMu.Lock()
+	defer ts.chunksMu.Unlock()
+	t, ok := ts.verifiedTypes[addr.ByteString()]
+	return t, ok
 }
 
 func (ts *testStorer) Report(ctx context.Context, chunk swarm.Chunk, state storage.ChunkState) error {

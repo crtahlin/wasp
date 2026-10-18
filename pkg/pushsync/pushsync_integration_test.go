@@ -193,6 +193,10 @@ func (t *testIntegrationStorer) ReservePutter() storage.Putter {
 	return t.ChunkStore
 }
 
+func (t *testIntegrationStorer) ReservePutVerified(ctx context.Context, chunk swarm.Chunk, _ swarm.ChunkType) error {
+	return t.Put(ctx, chunk)
+}
+
 func mustGenerateKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
 	k, err := crypto.GenerateSecp256k1Key()

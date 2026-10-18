@@ -167,6 +167,10 @@ type ReserveStore interface {
 	ReserveGet(ctx context.Context, addr swarm.Address, batchID []byte, stampHash []byte) (swarm.Chunk, error)
 	ReserveHas(addr swarm.Address, batchID []byte, stampHash []byte) (bool, error)
 	ReservePutter() storage.Putter
+	// ReservePutVerified is ReservePutter().Put for a chunk whose type the
+	// caller has already established with cac.Valid and
+	// soc.FromChunkValidate on this same chunk (wasp #810).
+	ReservePutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error
 	SubscribeBin(ctx context.Context, bin uint8, start uint64) (<-chan *BinC, func(), <-chan error)
 	ReserveLastBinIDs() ([]uint64, uint64, error)
 	RadiusChecker
@@ -1118,6 +1122,20 @@ func (db *DB) Metrics() []prometheus.Collector {
 			Help:      "Active time of the expired-batch eviction run in progress, not counting time paused for a sample; 0 when none (wasp #663).",
 		},
 		func() float64 { return db.episode.expiryActiveFor(time.Now()).Seconds() },
+	))
+	collectors = append(collectors, prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: "localstore",
+			Name:      "reserve_chunk_type_shadow_mismatch_total",
+			Help:      "Sampled reserve puts whose caller-verified chunk type differed from the recomputed type; the recomputed type was stored (wasp #810).",
+		},
+		func() float64 {
+			if db.reserve == nil {
+				return 0
+			}
+			return float64(db.reserve.ChunkTypeShadowMismatches())
+		},
 	))
 	if v, ok := db.storage.(m.Collector); ok {
 		collectors = append(collectors, v.Metrics()...)

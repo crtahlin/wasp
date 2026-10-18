@@ -415,6 +415,9 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 	}
 
 	chunksToPut := make([]swarm.Chunk, 0, ctr)
+	// chunkTypes[i] is the type the checks below established for
+	// chunksToPut[i]; the reserve stores it without repeating them (#810).
+	chunkTypes := make([]swarm.ChunkType, 0, ctr)
 
 	var (
 		chunkErr error
@@ -479,9 +482,12 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 			continue
 		}
 
+		var chunkType swarm.ChunkType
 		if cac.Valid(chunk) {
+			chunkType = swarm.ChunkTypeContentAddressed
 			go s.unwrap(chunk)
 		} else if sch, err := soc.FromChunkValidate(chunk); err == nil {
+			chunkType = swarm.ChunkTypeSingleOwner
 			s.logger.Debug("sync gsoc", "peer_address", peer, "chunk_address", addr, "wrapped_chunk_address", sch.WrappedChunk().Address())
 			s.gsocHandler(sch)
 		} else {
@@ -491,6 +497,7 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 			continue
 		}
 		chunksToPut = append(chunksToPut, chunk)
+		chunkTypes = append(chunkTypes, chunkType)
 	}
 
 	chunksPut := 0
@@ -499,8 +506,8 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 		s.metrics.Delivered.Add(float64(len(chunksToPut)))
 		s.metrics.LastReceived.WithLabelValues(fmt.Sprintf("%d", bin)).Add(float64(len(chunksToPut)))
 
-		for _, c := range chunksToPut {
-			if err := s.store.ReservePutter().Put(ctx, c); err != nil {
+		for i, c := range chunksToPut {
+			if err := s.store.ReservePutVerified(ctx, c, chunkTypes[i]); err != nil {
 				// in case of these errors, no new items are added to the storage, so it
 				// is safe to continue with the next chunk
 				if errors.Is(err, storage.ErrOverwriteNewerChunk) {

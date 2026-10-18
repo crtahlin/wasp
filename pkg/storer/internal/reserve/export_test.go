@@ -30,3 +30,9 @@ func SetEvictionYield(d time.Duration) func() {
 	evictionYield = d
 	return func() { evictionYield = old }
 }
+
+// SetShadowAlways sets whether every verified chunk type is rechecked
+// (true) or only every shadowCheckEvery-th one (false), as on a node.
+func (r *Reserve) SetShadowAlways(v bool) { r.shadowAlways = v }
+
+const ShadowCheckEvery = shadowCheckEvery
