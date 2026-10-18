@@ -26,10 +26,12 @@ Terms used throughout:
 ## Problem
 
 An operator's uploads see many shallow receipts, and long direct uploads fail
-at the very end. Read on `origin/main` 82c67848f, in code that is unchanged
-from Bee v2.8.2 (`git diff upstream/v2.8.2 origin/main` is empty for
+at the very end. Read on `origin/main` 82c67848f. The core of this path is
+unchanged from Bee v2.8.2: `git diff upstream/v2.8.2 origin/main` is empty for
 `pkg/storer/netstore.go`, `pkg/pusher`, `pkg/api/bytes.go`, `pkg/api/tag.go`,
-`pkg/steward` and `pkg/storer/internal/upload`):
+`pkg/api/chunk_stream.go`, `pkg/steward` and `pkg/storer/internal/upload`.
+`pkg/api/api.go`, `pkg/api/bzz.go`, `pkg/api/chunk.go` and `pkg/api/router.go`
+carry wasp changes, none of them in the upload error paths described here.
 
 1. **The first failed chunk ends the upload, but the client hears it last.**
    `DB.DirectUpload` (`pkg/storer/netstore.go:23-81`) starts one errgroup
@@ -45,15 +47,20 @@ from Bee v2.8.2 (`git diff upstream/v2.8.2 origin/main` is empty for
 2. **Nothing is left to resume from.** The root reference is computed by then
    but not returned. A direct upload has no tag (`bytes.go:59`, `bzz.go:95`
    create one only for deferred or pinned uploads), so nothing records what
-   was pushed. `PUT /stewardship/{ref}` needs every chunk locally
-   (`steward.Reupload`), which a direct upload never has. The client sends the
+   was pushed. `PUT /stewardship/{ref}` (`steward.Reupload`) reads every chunk
+   through `Download(false)`, so it needs every chunk retrievable, locally or
+   from the network; the chunks that failed are exactly the ones that are not.
+   The client sends the
    whole body again, and the node pushes again, and pays push-sync fees again
    for, every chunk that had already arrived. Postage is not lost when the
    client re-uses the same batch: the stamper re-uses a chunk's slot in a
    batch (`pkg/postage/stamper.go:47-56`).
 3. **"No peers" is retried without any limit.** On a light node with no
-   suitable peer, a direct upload waits forever (the pusher sleeps 5 s between
-   tries, `pkg/pusher/pusher.go:137-142`).
+   suitable peer, a direct upload waits forever. The pusher's 5 s sleep after
+   `topology.ErrNotFound` (`pkg/pusher/pusher.go:137-142`) runs after
+   `pushDirect` has already delivered the error, so the upload sends the chunk
+   again at once; only the push-worker slot that the sleeping goroutine still
+   holds slows the loop down.
 4. **Six shallow receipts count as synced, silently.** The pusher counts
    shallow receipts per chunk (`attempts`, `pkg/pusher/inflight.go:50-71`).
    At the sixth (`DefaultRetryCount = 6`, `pusher.go:68`), `pushDirect`
@@ -77,7 +84,16 @@ from Bee v2.8.2 (`git diff upstream/v2.8.2 origin/main` is empty for
    upload this is harmless, because the first push's error still reaches the
    same errgroup. Across two concurrent uploads, the second one reports
    success for a chunk whose only push may still fail.
-7. **Deferred uploads never give up and never report a loss.** `pushDeferred`
+7. **A full node can count an undelivered chunk as stored.** When every peer
+   for a chunk is on the skip list and none is in flight, push-sync on a full
+   node returns `topology.ErrWantSelf` (`pkg/pushsync/pushsync.go:464-473`),
+   and `pushDirect` stores the chunk in this node's own reserve and reports
+   success (`pusher.go:329-335`). The reserve takes the chunk whatever its
+   distance (`reserve.Put` checks no radius), and the next eviction removes it
+   again if it lies outside this node's storage radius. Retrying a chunk
+   several times makes this more likely, because each failed send adds a peer
+   to the chunk's skip list for 5 minutes.
+8. **Deferred uploads never give up and never report a loss.** `pushDeferred`
    retries every push error forever. A chunk whose batch has gone is dropped
    with a warning at log level 1 and counted nowhere (`pusher.go:257-266`,
    `uploadstore.Report` with `ChunkCouldNotSync`). The tag has no field for
@@ -120,20 +136,28 @@ A new request header, `Swarm-Upload-Failure-Policy`, and a new node setting,
 | `bee` | Exactly today's code path, `DB.DirectUpload()` unchanged, as in Bee v2.8.2: no tag, no counters, no budget, the first error at the end. |
 
 The header wins over the setting. An unknown value is refused with 400 at
-the request, and at start for the setting. The policy applies to the direct
-sessions created through `newStamperPutter` and `newStampedPutter`. The header
-is read on `POST /bytes`, `POST /bzz` (single file and collection),
-`POST /chunks` and `POST /soc/{owner}/{id}`; the other API paths that use a
-direct session (`/chunks/stream`, feeds, access control) use the node setting.
-For a deferred or pinned upload the header is ignored: those go through the
-upload store and the pusher, covered by section 7.
+the request, and at start for the setting. For a deferred or pinned upload
+the header is ignored: those go through the upload store and the pusher,
+covered by section 7.
+
+**Which endpoints use the policy.** Direct sessions are created in
+`newStamperPutter` and in `newStampedPutterWithBatch` (reached through
+`newStampedPutter`, for chunks that arrive with their own stamp). Phase 1
+applies the policy per endpoint:
+
+| Endpoint | `retry-at-end` and `fail-fast` | Why |
+|---|---|---|
+| `POST /bytes`, `POST /bzz` (single file and collection) | As described in sections 2 to 6. | The case the experiment is for. |
+| `POST /chunks`, `POST /soc/{owner}/{id}` | The 6 inline attempts of section 2, but **no final pass**: one chunk is not worth holding a request for 30 minutes. A chunk that fails stays in the failed set under its tag, the answer is 500 (`retry-at-end`) or 502 (`fail-fast`) with the tag, and `POST /tags/{id}/retry` can push it later. The reference in the answer is the chunk's address. | Bounded answer time for single-chunk clients. |
+| `GET /chunks/stream` (WebSocket) | Not applied: the stream keeps `DirectUpload()` in phase 1. | The connection-level session lives as long as the connection, and the stream sends its success message per chunk before the push result is known; a per-chunk `Done` with a final pass would stall the stream for up to 30 minutes. The existing false success after a failed per-chunk `Done` (`chunk_stream.go:340-352`) is [#809](https://github.com/crtahlin/wasp/issues/809). |
+| Feeds, access control, `steward.Reupload`, content providers | Not applied: they keep `DirectUpload()` in phase 1 (operator decision, 2026-10-18). | Small writes, or callers with their own retry. Moving them is decided after phase 1 is measured. |
 
 **Why keep `bee`.** It gives the bench a control arm inside the same build,
 so a comparison measures the policy and not two binaries. It also gives an
 operator a way back to Bee's behaviour without a rollback. Its cost is one
-extra branch in `newStamperPutter`; the code it selects is already there,
-because `steward.Reupload` and the content providers keep calling
-`DirectUpload()` in phase 1.
+extra branch in `newStamperPutter` and `newStampedPutterWithBatch`; the code
+it selects is already there, because the callers in the last two rows of the
+table keep calling `DirectUpload()`.
 
 ### 2. Per-chunk outcomes in a new direct session
 
@@ -183,9 +207,19 @@ chunks at a time, `pusher.ConcurrentPushes`), that runs the chunk's attempts:
   with repeated content produces such duplicates). Across sessions, the new
   session asks the pusher for a strict answer (a new `Op.Strict` field): the
   pusher then answers `pusher.ErrInFlight` instead of nil for a chunk already
-  being pushed. The session waits the next backoff and asks again; this does
-  not count as an attempt, and is bounded by the policy's time limits. That
-  ends problem 6 for the new path.
+  being pushed. The session waits the next backoff and asks again. Waiting
+  is bounded: the first 60 s of `ErrInFlight` answers for a chunk do not count
+  as attempts, and after that each one counts as a failed attempt with reason
+  `in-flight`, so the chunk ends within its budget like any other. That ends
+  problem 6 for the new path.
+- **`ErrWantSelf` (problem 7).** For a strict op, `pushDirect` stores the
+  chunk in the reserve and reports it as stored only when the chunk is within
+  this node's committed depth (storage radius plus capacity doubling, the same
+  depth push-sync uses to accept a chunk, `pushsync.go` handler). Otherwise it
+  does not store the chunk and returns `pusher.ErrNoNeighbourhoodPeer`, which
+  counts as a failed attempt with reason `no-peers`. A chunk inside the
+  committed depth really belongs to this node's neighbourhood, so that case
+  keeps Bee's behaviour.
 - **Shallow receipts are counted per session**, not in the pusher's global
   map: for a strict op, `pushDirect` returns every `ErrShallowReceipt` as it
   is, and the session counts. The global map stays for `DirectUpload()` and
@@ -198,7 +232,13 @@ A chunk that uses up its budget is written to the failed-chunk store
 (section 3) and counted as failed. Then:
 
 - with `retry-at-end`, the goroutine ends and releases its slot; the upload
-  continues;
+  continues. **Breaker:** if no chunk of the session has had a successful
+  attempt for 5 minutes (`retryAtEndBreaker`, one skip-list duration) while
+  chunks kept failing, the network is not taking chunks from this node, and
+  continuing would crawl at about 4 chunks per second (128 slots, each held
+  for about 31 s of backoff). The session then stops as `fail-fast` does
+  (section 5): 502, the tag, and the failed set kept. A single success resets
+  the 5 minutes;
 - with `fail-fast`, the session is marked failed. Every later `Put`, including
   one waiting for a limiter slot, returns `ErrUploadFailed` at once.
 
@@ -209,10 +249,10 @@ Failed chunks are kept in the index store, in a new namespace,
 
 | Field | Contents |
 |---|---|
-| key | tag ID, chunk address |
-| `Data` | the chunk's span and data, at most 4,104 bytes |
-| `Stamp` | the stamp the chunk was uploaded with (113 bytes marshalled) |
-| `Reason` | the last error class: `no-push`, `no-peers`, `shallow`, `unconfirmed`, `other` |
+| key | tag ID, the chunk's identity address (`storage.IdentityAddress`), so that two single-owner chunks with the same address and different contents stay apart |
+| `Data` | the chunk's data with its span: at most 4,104 bytes for a content-addressed chunk, 4,201 for a single-owner chunk (`swarm.SocMaxChunkSize`) |
+| `Stamp` | the stamp the chunk was last pushed with (113 bytes marshalled) |
+| `Reason` | the last error class: `no-push`, `no-peers`, `shallow`, `in-flight`, `unconfirmed`, `other`; for record-only entries (below) `batch-gone` |
 | `Attempts` | attempts made so far, inline and in retries |
 | `LastAttempt` | Unix time of the last attempt |
 
@@ -221,17 +261,42 @@ build that does not know the namespace then leaves only index-store entries
 behind after a rollback, never a sharky slot with a reference count that
 nothing releases.
 
-- **Bound: 262,144 chunks for the whole node** (`maxFailedChunks`), about
-  1.1 GB of index store when full. That is about 1 percent of the roughly
-  25 million chunks of a 100 GB upload. When the store is full, an upload that needs to add a
-  chunk fails at once, whatever the policy, with 507 "failed-chunk store is
-  full; delete old tags". Existing failed sets are kept.
+- **Bound: 262,144 entries with data for the whole node**
+  (`maxFailedChunks`), about 1.2 GB of index store when full. That is about
+  1 percent of the roughly 25 million chunks of a 100 GB upload. When the
+  bound is reached, an upload that needs to add a chunk fails at once,
+  whatever the policy, with 507 "failed-chunk store is full; delete old
+  tags". Existing failed sets are kept.
+- **Record-only entries.** A deferred chunk whose batch has gone (section 7)
+  cannot be pushed again, so its entry has no data and no stamp: it only lists
+  the address and the reason `batch-gone`. These entries do not count toward
+  the 262,144 bound; instead each tag keeps at most 10,000 of them, and beyond
+  that only the `failed` counter grows (`GET /tags/{id}/failed` then reports
+  `truncated: true`). They are never removed by the batch sweep, whose
+  condition they meet by definition, only with their tag.
 - **Removal:** when the chunk is pushed in a retry; on `DELETE /tags/{id}`,
-  which removes the tag's failed set; and on a sweep at start and every hour
-  that removes items whose batch no longer exists, because such a chunk can
-  never be pushed with its stamp.
-- **A retry re-uses the stored stamp.** It needs no new postage slot and no
-  access to the batch's stamp issuer.
+  which removes the tag's failed set; and by the **batch sweep**, at start and
+  every hour, which removes entries with data whose batch no longer exists,
+  because such a chunk can never be pushed again. The sweep runs only while
+  the postage listener is caught up (`listener.CaughtUp()`): while the batch
+  store is stale, a batch that is merely not synced yet would look gone, and
+  the sweep would delete chunks that can still be delivered. At start the
+  sweep therefore waits until the listener has caught up once.
+- **A retry re-stamps the chunk.** The stored stamp cannot be trusted at
+  retry time: if the same chunk is stamped again with the same batch in the
+  meantime (a re-upload, or another upload with the same content), the
+  stamper keeps the chunk's index but writes a newer timestamp
+  (`stamper.go:47-56`), and every node that holds the newer stamp refuses the
+  older one with `ErrOverwriteNewerChunk` (`reserve.go:161-165`). A retry with
+  the stored stamp could then never succeed. So every retry, in the final pass
+  and through `POST /tags/{id}/retry`, stamps the chunk again through the
+  batch's stamp issuer (same index, so no new postage slot, and a current
+  timestamp), stores the new stamp in the entry, and saves the issuer when the
+  round ends. A retry needs the batch to be usable; otherwise it answers 422.
+  For a chunk that arrived with its own stamp (`POST /chunks` or
+  `POST /soc` with `Swarm-Postage-Stamp`) the node cannot sign a new stamp; the
+  retry uses the stored one, and if a node refuses it the entry keeps reason
+  `other`. The client can upload such a chunk again with a new stamp.
 
 ### 4. `retry-at-end`: the final pass, and the answer
 
@@ -239,16 +304,23 @@ When the body is read and the reference is known, `Done(ref)`:
 
 1. waits for every chunk goroutine to finish (each is bounded by its budget);
 2. if the failed set is empty, finishes as today;
-3. otherwise runs the **final pass**: rounds over the failed set, one attempt
+3. otherwise **saves the stamp issuer first**. Today `putterSessionWrapper.Done`
+   saves it only after the session's `Done` returns (`api.go:845-847`), which
+   would be up to 30 minutes later; a crash in between would lose the
+   issuer's counters for every chunk of the upload, and the node would then
+   hand out the same indexes again. The new session takes the save function
+   and calls it before the final pass, and once more at the end;
+4. then runs the **final pass**: rounds over the failed set, one attempt
    per chunk per round, 128 at a time. A chunk is tried again only when its
    last attempt is at least 5 minutes old, the push-sync skip-list duration,
    so the peers that refused it are offered it again. The pass ends when the
    set is empty or after `upload-final-retry-duration` (default 30 minutes,
    so 6 rounds), whichever is first.
 
-The final pass runs under a context derived from the request with
-`context.WithoutCancel` and bounded by the duration. A client that
-disconnects during the pass does not stop it; the result is in the tag. A
+The final pass is handed to the retry service of section 6 and runs under
+that service's context, bounded by the duration, not under the request
+context. A client that disconnects during the pass does not stop it; the
+handler stops waiting and the result is in the tag. A
 client whose request timeout is shorter than the final pass should create the
 tag first (`POST /tags`), send it in `Swarm-Tag`, and read the outcome there.
 
@@ -315,18 +387,26 @@ Details:
   first (`POST /tags`) and sending it in `Swarm-Tag`: after a broken
   connection, `GET /tags/{id}` shows `state: failed` and the counters. The
   bench measures both kinds of client.
+- **The tag's outcome.** Before the answer is written, the session stores
+  the outcome `failed` in the tag's failure item (section 6). A `fail-fast`
+  tag never gets an address, because the reference never existed, so without
+  the stored outcome it would read `uploading` forever.
 - **The failed set after `fail-fast`** is kept until `DELETE /tags/{id}` or
   the batch sweep, so that `GET /tags/{id}/failed` can show what failed and
   why. `POST /tags/{id}/retry` refuses it with 409: the upload stopped before
   the reference existed, so retrying those chunks would not complete
-  anything. Re-sending the body with the same batch costs no new postage slots.
+  anything. Re-sending the body with the same batch costs no new postage
+  slots. Letting such a re-upload skip the chunks that were already delivered
+  is a later phase (noted in #806), not phase 1.
 
-There is no failure-rate rule ("more than N failures in a minute") in phase 1.
-With 6 attempts and 31 s of backoff, the first chunk that meets a network that
-takes nothing uses up its budget in well under a minute when push-sync fails
-fast, so a rate rule would rarely answer sooner and would add two more
-tuning values. The bench records the time from the fault to the answer; if it
-is too long, the rate rule is the follow-up.
+There is no failure-rate rule ("more than N failures in a minute") for
+`fail-fast` (operator decision, 2026-10-18). With 6 attempts and 31 s of
+backoff, the first chunk that meets a network that takes nothing uses up its
+budget in well under a minute when push-sync fails fast, so a rate rule would
+rarely answer sooner and would add two more tuning values. The bench records
+the time from the fault to the answer. The breaker of section 2 is a
+different rule: it applies to `retry-at-end` only, and it fires on the
+absence of any success, not on a failure rate.
 
 ### 6. Tags: a tag for every direct upload, and three counters
 
@@ -344,10 +424,19 @@ The tag response gains four fields:
 | `shallow` | Chunks counted as synced only by the six-shallow rule. |
 | `state` | `uploading`, `retrying`, `done` or `failed`, derived when the tag is read (below). |
 
-`state` is derived, not stored: `uploading` while the tag has no address;
-`retrying` while `retrying` is above 0; `failed` when the address is set and
-`failed` is above 0 with no chunk left to try; `done` when the address is set
-and `synced + seen` equals `split`.
+`state` is derived when the tag is read, in this order:
+
+1. the stored outcome, when there is one: `failed` (written by `fail-fast`,
+   by the breaker, and when a final pass or a retry ends with chunks left) or
+   `done` (written when a final pass or a retry empties the set);
+2. `retrying` while `retrying` is above 0;
+3. `uploading` while the tag has no address;
+4. `failed` when the address is set and `failed` is above 0;
+5. `done` when the address is set and `synced + seen` equals `split`;
+6. otherwise `uploading` (a deferred upload whose chunks are still being
+   pushed).
+
+`POST /tags/{id}/retry` clears the stored outcome when it starts.
 
 For a direct upload, the session also fills `split` (chunks put), `sent`
 (chunks with at least one attempt) and `synced` (chunks with a receipt, or
@@ -355,8 +444,10 @@ accepted as shallow), so the tag shows progress as it does for a deferred
 upload. `stored` counts chunks the node kept itself because it is closest
 (`ErrWantSelf`), as in a deferred upload.
 
-The counters `failed`, `retrying` and `shallow` are stored in a new
-namespace, `tagFailureItem`, keyed by tag ID. `TagItem` is not changed: its
+The counters `failed`, `retrying` and `shallow`, the stored outcome, a flag
+`AutoCreated` (the node created the tag for a direct upload) and the time of
+the last change are stored in a new namespace, `tagFailureItem`, keyed by tag
+ID. `TagItem` is not changed: its
 marshalled size is fixed (`tagItemSize`), so a new field there would need a
 migration, and an older build would refuse the item.
 
@@ -375,8 +466,24 @@ migration, and an older build would refuse the item.
 
 A retry is on the tag and not on `PUT /stewardship/{ref}` (the
 `only-failed=true` option considered in the plan): stewardship takes a
-reference and expects every chunk locally, while the failed set belongs to a
-tag and holds only the missing chunks.
+reference and needs every chunk retrievable, while the failed set belongs to
+a tag and holds exactly the chunks that are not.
+
+**Who runs retries: the retry service.** Final passes and `POST /retry` runs
+are owned by one retry service in `pkg/storer`, started with the storer and
+stopped by `DB.Close`. It runs at most one retry per tag and at most 4 tags at
+a time (`maxConcurrentRetries`); a fifth request waits in order, and its tag
+reads `retrying` with no chunk in progress yet. All its pushes share the
+existing `directUploadLimiter`, so retries and new uploads together never push
+more than 128 chunks at once. The service's context ends when the node stops.
+
+**Leaked tags.** A tag the node created for a direct upload and kept, because
+a chunk once failed, stays until the client deletes it. A tag the node created
+for an upload that never finished (the node stopped, or the client went away
+before the body was read) would stay forever. The hourly sweep therefore
+deletes a tag only when all of these hold: `AutoCreated` is set, its failed
+set is empty, and it has not changed for 24 hours. A tag the client created is
+never deleted by the node.
 
 ### 7. The pusher and deferred uploads
 
@@ -397,33 +504,66 @@ The changes in `pkg/pusher`, for deferred uploads and for strict direct ops:
   removes it from the upload store. The tag can then say `done` or `failed`
   instead of staying unfinished. `POST /tags/{id}/retry` works on such a set
   as on a direct upload's.
-- **`retrying` for deferred uploads stays 0 in phase 1.** Counting chunks
-  with a failed attempt needs a mark on each upload item, which is a change of
-  its fixed on-disk format and so a migration. Progress of a deferred upload
-  stays `split - seen - synced - failed`, as clients compute it now.
+- **`retrying` for deferred uploads stays 0 in phase 1** (operator decision,
+  2026-10-18). Counting chunks with a failed attempt needs a mark on each
+  upload item, which is a change of its fixed on-disk format and so a
+  migration. Progress of a deferred upload stays
+  `split - seen - synced - failed`, as clients compute it now.
 
 The new storer call the pusher uses is `ReportFailed(ctx, chunk, reason)`,
 beside `Report`, so the existing `ChunkState` values keep their meaning.
 
-### 8. Metrics and log lines
+### 8. Shutdown and restart
 
-- `bee_storer_direct_upload_attempts_total{result="synced|shallow|failed|in_flight"}`
-- `bee_storer_failed_chunks`, a gauge of items in the failed-chunk store
+- **Node shutdown.** The API server gets 15 s to finish its requests
+  (`node.go`, the `api` shutdown step). An upload still reading its body is
+  cut, as today. Before that, the storer's quit signal ends every session:
+  chunks whose push result is not known yet go into the failed set as
+  `unconfirmed` (the session holds their data), the counters and the outcome
+  are written, and a handler that can still answer does so with 500 and the
+  tag. The retry service stops at the end of the current attempt of each
+  chunk. Nothing in the failed-chunk store is lost: it is in the index store.
+- **Restart.** At start the node sets `retrying` to 0 on every tag that has a
+  failure item, because no retry survives a restart, and stores the outcome
+  `failed` on every tag whose failed set is not empty and that has no outcome
+  yet. Retries do not resume by themselves: the client, or the operator, calls
+  `POST /tags/{id}/retry`. Resuming automatically would push chunks for
+  uploads whose client may have given up, and it is easy to add later if the
+  bench shows it is wanted.
+- **Ownership.** No goroutine started for an upload outlives the storer: the
+  chunk goroutines belong to the session and end with its context; final
+  passes and retries belong to the retry service of section 6.
+
+### 9. Metrics and log lines
+
+- `bee_storer_direct_upload_attempts_total{result="synced|shallow|stored|failed|in_flight"}`
+- `bee_storer_direct_upload_final_pass_chunks_total{result="recovered|still_failed"}`,
+  counted per chunk when a final pass or a retry ends. This is the number the
+  hypothesis needs: how many failed chunks a later retry recovers.
+- `bee_storer_direct_upload_breaker_total`, uploads stopped by the breaker
+- `bee_storer_failed_chunks`, a gauge of entries with data in the
+  failed-chunk store
 - `bee_pusher_shallow_accepted_total`, chunks counted as synced by the
   six-shallow rule, direct and deferred
+- `bee_pusher_want_self_refused_total`, strict ops that reached `ErrWantSelf`
+  for a chunk outside the committed depth (section 2)
 - `bee_pusher_deferred_given_up_total`
-- A warning when an upload ends with failed chunks: tag, count, reference.
-  A warning when the failed-chunk store is full. No peer addresses.
+- A warning when an upload ends with failed chunks: tag, count, reference,
+  and the final pass's recovered and still-failed counts. A warning when the
+  failed-chunk store is full, and when the breaker stops an upload. No peer
+  addresses.
 
 ### Code, tests and documents that change with it
 
 - `pkg/storer`: `DirectUploadWithPolicy`, the failed-chunk store, the tag
-  failure item, `ReportFailed`, the hourly sweep.
-- `pkg/pusher`: `Op.Strict`, `ErrInFlight`, the shallow policy, the give-up
-  check, the missing-batch error for strict ops.
+  failure item, `ReportFailed`, the retry service, the hourly sweep and its
+  gate on the postage listener, the restart reset.
+- `pkg/pusher`: `Op.Strict`, `ErrInFlight`, `ErrNoNeighbourhoodPeer`, the
+  shallow policy, the give-up check, the missing-batch error for strict ops.
 - `pkg/api`: the header, the two endpoints, the tag fields, the answer
-  bodies, the policy branch in `newStamperPutter` and `newStampedPutter`, and
-  the handlers' error paths (sections 4 and 5).
+  bodies, the policy branch in `newStamperPutter` and
+  `newStampedPutterWithBatch`, the issuer save before the final pass, and the
+  handlers' error paths (sections 4 and 5).
 - `cmd/bee/cmd` and `pkg/node`: the four settings.
 - `pkg/storer/mock`: the new method.
 - `openapi/Swarm.yaml`, `openapi/SwarmCommon.yaml`: below.
@@ -439,19 +579,39 @@ beside `Report`, so the existing `ChunkState` values keep their meaning.
   `UploadIncompleteResponse` (`code`, `message`, `reference`, `tag`,
   `failed`) and `FailedChunksResponse` (`total`, `chunks` with `address`,
   `reason`, `attempts`, `lastAttempt`).
-- **`Swarm.yaml`:** the parameter on `POST /bytes`, `POST /bzz`,
-  `POST /chunks` and `POST /soc/{owner}/{id}`; the 201 headers; a 500
-  response with `UploadIncompleteResponse` and a 502 for `fail-fast`; 507 for
-  a full failed-chunk store; the paths `/tags/{id}/failed` (GET) and
-  `/tags/{id}/retry` (POST). Each affected endpoint notes the divergence from
-  Bee, as the API description requires.
+- **`Swarm.yaml`:** the parameter and the response codes below, and the paths
+  `/tags/{id}/failed` (GET) and `/tags/{id}/retry` (POST). Each affected
+  endpoint notes the divergence from Bee, as the API description requires.
+  `FailedChunksResponse` also has `truncated`.
+
+**Table: response codes added or changed, per endpoint**
+
+| Endpoint | Code | When |
+|---|---|---|
+| `POST /bytes`, `POST /bzz` | 201 | As today, plus `Swarm-Failed-Chunks`, `Swarm-Shallow-Chunks` and, if a chunk ever failed, `Swarm-Tag`. |
+| | 400 | Unknown `Swarm-Upload-Failure-Policy` value. |
+| | 422 | Batch missing or not usable during the upload (new case: a missing batch found by the pusher). |
+| | 500 | `retry-at-end` ended with failed chunks: `UploadIncompleteResponse` with `reference`. |
+| | 502 | `fail-fast` stopped, or the breaker stopped a `retry-at-end` upload: `UploadIncompleteResponse` without `reference`. |
+| | 507 | The failed-chunk store is full. |
+| `POST /chunks`, `POST /soc/{owner}/{id}` | 201, 400, 422, 507 | As for `/bytes`. |
+| | 500, 502 | The chunk used up its attempts, under `retry-at-end` or `fail-fast`; `reference` is the chunk address. |
+| `GET /tags/{id}` | 200 | Four new fields. |
+| `GET /tags/{id}/failed` | 200 | `FailedChunksResponse`. |
+| | 400 | `offset` or `limit` invalid, or `limit` above 10,000. |
+| | 404 | Unknown tag. |
+| `POST /tags/{id}/retry` | 202 | Retry queued or started; body: the tag. |
+| | 404 | Unknown tag. |
+| | 409 | A retry of this tag is already queued or running, or the tag has no reference (`fail-fast`, breaker). |
+| | 422 | The batch of the failed chunks is not usable, so they cannot be re-stamped. |
 - A minor version step in each file: the changes only add fields, values and
   paths.
 
 ### Not changed
 
-- `DB.DirectUpload()`, and so `steward.Reupload` and the content providers.
-  Moving them to the new session is a follow-up once phase 1 is measured.
+- `DB.DirectUpload()`, and so `GET /chunks/stream`, feeds, access control,
+  `steward.Reupload` and the content providers. Moving them is decided after
+  phase 1 is measured.
 - Push-sync: `maxPushErrors`, `skiplistDur`, the shallow-receipt tolerance,
   the receipt check.
 - The redundancy pipeline and every reference: the same body with the same
