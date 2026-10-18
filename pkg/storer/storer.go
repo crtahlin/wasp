@@ -1130,7 +1130,12 @@ func (db *DB) Metrics() []prometheus.Collector {
 			Name:      "reserve_chunk_type_shadow_mismatch_total",
 			Help:      "Sampled reserve puts whose caller-verified chunk type differed from the recomputed type; the recomputed type was stored (wasp #810).",
 		},
-		func() float64 { return float64(db.reserve.ChunkTypeShadowMismatches()) },
+		func() float64 {
+			if db.reserve == nil {
+				return 0
+			}
+			return float64(db.reserve.ChunkTypeShadowMismatches())
+		},
 	))
 	if v, ok := db.storage.(m.Collector); ok {
 		collectors = append(collectors, v.Metrics()...)

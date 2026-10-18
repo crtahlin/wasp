@@ -11,6 +11,7 @@ import (
 
 	chunk "github.com/ethersphere/bee/v2/pkg/storage/testing"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // TestReservePutterComputesChunkType checks that ReservePutter, used by every
@@ -78,5 +79,29 @@ func TestReservePutVerifiedStoresChunk(t *testing.T) {
 	}
 	if got := db.Reserve().ChunkTypeShadowMismatches(); got != 0 {
 		t.Fatalf("shadow check mismatches %d, want 0", got)
+	}
+}
+
+// TestMetricsWithoutReserve checks that the metrics of a node without a
+// reserve (a light node) can be collected; the shadow mismatch counter
+// reads the reserve.
+func TestMetricsWithoutReserve(t *testing.T) {
+	t.Parallel()
+
+	db, err := memStorer(t, dbTestOps(swarm.RandAddress(t), 0, nil, nil, time.Minute))()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.Reserve() != nil {
+		t.Fatal("test needs a storer without a reserve")
+	}
+	reg := prometheus.NewRegistry()
+	for _, c := range db.Metrics() {
+		if err := reg.Register(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := reg.Gather(); err != nil {
+		t.Fatal(err)
 	}
 }

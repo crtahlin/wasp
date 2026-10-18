@@ -9,12 +9,12 @@ is built and packaged.
   published 2026-10-15. Re-checked on 2026-10-15 for the sync of v2.8.3: every
   entry was compared with v2.8.3, the entries it covers were removed, and the
   ones it changes were rewritten.
-- **wasp described:** the head of `sync/upstream/v2.8.3`, the sync of Bee
-  v2.8.3, not yet merged. When it merges, its merge commit replaces this line.
-  The latest wasp release is v0.1.5, which is based on Bee v2.8.2.
-- **wasp's upstream base:** v2.8.3 once the sync is merged. Until then
-  [`.upstream-base`](../.upstream-base) still says v2.8.2: it changes with the
-  merge.
+- **wasp described:** `main` with the merge of
+  [#812](https://github.com/crtahlin/wasp/pull/812). The sync of Bee v2.8.3
+  merged as `655db9b0f`. The latest wasp release is v0.1.5, which is based on
+  Bee v2.8.2.
+- **wasp's upstream base:** v2.8.3, as [`.upstream-base`](../.upstream-base)
+  says.
 
 The comparison is always with the latest **released** Bee, never with upstream
 `master`. An operator choosing between the two clients chooses between releases,
