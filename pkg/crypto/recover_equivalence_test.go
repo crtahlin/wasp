@@ -292,7 +292,10 @@ func TestRecoverEquivalenceEdgeVectors(t *testing.T) {
 		if k.Sign() == 0 {
 			continue
 		}
-		rx, ry := btcec.S256().ScalarBaseMult(scalar32(k))
+		_, pk := btcec.PrivKeyFromBytes(scalar32(k)) // pk = kG
+		u := pk.SerializeUncompressed()              // 0x04 || x || y
+		rx := new(big.Int).SetBytes(u[1:33])
+		ryOdd := u[64] & 1
 		if rx.Cmp(curveN) >= 0 {
 			continue
 		}
@@ -303,7 +306,7 @@ func TestRecoverEquivalenceEdgeVectors(t *testing.T) {
 		}
 		e := new(big.Int).Mul(si, k)
 		e.Mod(e, curveN)
-		recid := byte(ry.Bit(0))
+		recid := ryOdd
 		if compare(t, sigFrom(rx, si, 27+recid), scalar32(e)) != bothReject {
 			t.Fatal("a point at infinity is accepted")
 		}
