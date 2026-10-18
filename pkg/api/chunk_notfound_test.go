@@ -37,7 +37,7 @@ func chunkServerFailingWith(t *testing.T, err error) *http.Client {
 		ChunkStore: inmemchunkstore.New(),
 		err:        err,
 	})
-	client, _, _, _ := newTestServer(t, testServerOptions{Storer: st})
+	client, _, _, _, _ := newTestServer(t, testServerOptions{Storer: st})
 	return client
 }
 

@@ -98,7 +98,7 @@ func (db *DB) ProbeSample(ctx context.Context, anchor []byte, committedDepth uin
 		}
 
 		taddrStart := time.Now()
-		_, err = transformedAddress(hasher, ch, getChunkType(ch))
+		_, err = transformedAddress(hasher, ch.Address(), ch.Data(), storage.ChunkType(ch))
 		stats.TaddrDuration += time.Since(taddrStart)
 		if err != nil {
 			return stats, fmt.Errorf("probe sample: transformed address: %w", err)

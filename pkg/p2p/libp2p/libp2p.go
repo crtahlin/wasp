@@ -733,7 +733,7 @@ func (s *Service) handleIncoming(stream network.Stream) {
 		// light limit and for full peers in a saturated bin, so it is not
 		// reported at error level.
 		if !errors.Is(err, handshake.ErrPicker) {
-			s.logger.Error(nil, "stream handler: handshake: handle failed", "peer_id", peerID)
+			s.logger.Warning("stream handler: handshake: handle failed", "peer_id", peerID)
 		}
 		_ = handshakeStream.Reset()
 		_ = stream.Conn().Close()
@@ -1062,6 +1062,7 @@ func (s *Service) AddProtocol(p p2p.ProtocolSpec) (err error) {
 			loggerV1 := logger.V(1).Build()
 
 			s.metrics.HandledStreamCount.Inc()
+			s.metrics.ProtocolHandlerCallCount.WithLabelValues(p.Name, p.Version, ss.Name).Inc()
 			if err := ss.Handler(ctx, p2p.Peer{Address: overlay, FullNode: full}, stream); err != nil {
 				var de *p2p.DisconnectError
 				if errors.As(err, &de) {
@@ -1377,7 +1378,7 @@ func (s *Service) Connect(ctx context.Context, addrs []ma.Multiaddr) (address *b
 		return nil, fmt.Errorf("libp2p connect: peer %s does not exist %w", overlay, p2p.ErrPeerNotFound)
 	}
 
-	s.metrics.CreatedConnectionCount.Inc()
+	s.metrics.incCreatedConnection(stream.Conn().RemoteMultiaddr())
 
 	// Kademlia dialled this full peer itself, so the address of the
 	// connection counts as a known full peer's.
@@ -1814,8 +1815,8 @@ type connectionNotifier struct {
 	network.Notifiee
 }
 
-func (c *connectionNotifier) Connected(_ network.Network, _ network.Conn) {
-	c.metrics.HandledConnectionCount.Inc()
+func (c *connectionNotifier) Connected(_ network.Network, conn network.Conn) {
+	c.metrics.observeHandledConnection(conn.RemoteMultiaddr())
 }
 
 // isNetworkOrHostUnreachableError determines based on the

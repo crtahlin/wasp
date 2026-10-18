@@ -29,6 +29,11 @@ func NewTestBeeWithClosers(pushSync, retrieval io.Closer) *Bee {
 	}
 }
 
+// NewTestBeeWithProviders builds a Bee with only the providers closer set.
+func NewTestBeeWithProviders(providers io.Closer) *Bee {
+	return &Bee{providersCloser: providers}
+}
+
 // ShutdownClosersByName returns the Shutdown fan-out closers keyed by name.
 func (b *Bee) ShutdownClosersByName() map[string]io.Closer {
 	m := make(map[string]io.Closer)

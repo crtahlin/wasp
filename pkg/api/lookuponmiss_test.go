@@ -51,7 +51,7 @@ func soleSource(t *testing.T, cs *inmemchunkstore.ChunkStore) func() bool {
 func newMissServer(t *testing.T, fake *fakeProviders) (*http.Client, *inmemchunkstore.ChunkStore) {
 	t.Helper()
 	cs := inmemchunkstore.New()
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:    mockstorer.NewWithChunkStore(cs),
 		Post:      mockpost.New(mockpost.WithAcceptAll()),
 		Providers: fake,
@@ -255,7 +255,7 @@ func TestProvidersNoRootRefetchWhenIneligible(t *testing.T) {
 	reads := func(p api.Providers, hinted bool) int64 {
 		t.Helper()
 		cs := &countingStore{ChunkStore: inmemchunkstore.New(), addr: missing}
-		client, _, _, _ := newTestServer(t, testServerOptions{
+		client, _, _, _, _ := newTestServer(t, testServerOptions{
 			Storer:    mockstorer.NewWithChunkStore(cs),
 			Post:      mockpost.New(mockpost.WithAcceptAll()),
 			Providers: p,

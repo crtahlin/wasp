@@ -29,8 +29,16 @@ import (
 // loggerName is the tree path name of the logger for this package.
 const loggerName = "listener"
 
+// DefaultBlockPage is the default largest number of blocks requested in a
+// single FilterLogs call while paging (postage-sync-block-range). Bee v2.8.3
+// added the setting with a default of 1000 and a fixed page; wasp keeps its
+// earlier fixed page of 5000 as the default and uses the setting as the
+// largest page of its adaptive pager, which halves the page after a failed
+// log query and grows it back after successful ones (#583). With 5000 a
+// catch-up makes a fifth of the log queries it would make with 1000.
+const DefaultBlockPage = uint64(5000)
+
 const (
-	blockPage          = 5000      // how many blocks to sync every time we page
 	blockPageSnapshot  = 50000     // how many blocks to sync every time from snapshot
 	defaultBatchFactor = uint64(5) // minimal number of blocks to sync at once
 
@@ -107,6 +115,7 @@ type listener struct {
 	metrics                     metrics
 	stallingTimeout             time.Duration
 	backoffTime                 time.Duration
+	blockPage                   uint64
 	syncingStopped              *syncutil.Signaler
 	blockNumberTimeout          time.Duration
 	filterLogsTimeout           time.Duration
@@ -166,6 +175,7 @@ func New(
 		metrics:                     newMetrics(),
 		stallingTimeout:             stallingTimeout,
 		backoffTime:                 backoffTime,
+		blockPage:                   DefaultBlockPage,
 		blockNumberTimeout:          blockNumberTimeout,
 		filterLogsTimeout:           filterLogsTimeout,
 		watchInterval:               staleWatchInterval,
@@ -195,6 +205,18 @@ func monoNow() int64 { return int64(time.Since(processStart)) }
 
 // Option configures a listener.
 type Option func(*listener)
+
+// WithBlockPage sets the largest number of blocks one log query asks for
+// (postage-sync-block-range). The adaptive pager starts at this size, halves
+// it after a failed log query down to minBlockPage, and never grows past it.
+// Zero keeps DefaultBlockPage.
+func WithBlockPage(n uint64) Option {
+	return func(l *listener) {
+		if n > 0 {
+			l.blockPage = n
+		}
+	}
+}
 
 // WithStallShutdown stops the node once the batch store has been stale for d
 // (postage-stall-shutdown). Zero, the default, never stops it (#583).
@@ -408,7 +430,7 @@ func (l *listener) Listen(ctx context.Context, from uint64, updater postage.Even
 	l.logger.Debug("batch factor", "value", batchFactor)
 
 	// Type assertion to detect if backend is SnapshotLogFilterer
-	pageSize := uint64(blockPage)
+	pageSize := l.blockPage
 	_, isSnapshot := l.ev.(interface{ GetBatchSnapshot() []byte })
 	if isSnapshot {
 		pageSize = blockPageSnapshot
@@ -530,6 +552,7 @@ func (l *listener) Listen(ctx context.Context, from uint64, updater postage.Even
 				l.setLastErr(err)
 				failedCall()
 				lastConfirmedBlock = 0
+				paged = false
 				continue
 			}
 			l.headOkAt.Store(time.Now().UnixNano())

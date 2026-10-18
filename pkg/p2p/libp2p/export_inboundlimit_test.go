@@ -126,7 +126,17 @@ func (s *Service) InboundAdmitted(bucket string) float64 {
 
 func (s *Service) KnownFullAddresses() float64 { return gaugeValue(s.metrics.KnownFullAddresses) }
 
-func (s *Service) HandledConnections() float64 { return counterValue(s.metrics.HandledConnectionCount) }
+// HandledConnections sums the handled-connection counter over its transport
+// and public labels, which Bee v2.8.3 added.
+func (s *Service) HandledConnections() float64 {
+	var sum float64
+	for _, tr := range transportLabelValues {
+		for _, pub := range publicLabelValues {
+			sum += counterValue(s.metrics.HandledConnectionCount.WithLabelValues(tr, pub))
+		}
+	}
+	return sum
+}
 
 func (s *Service) ObserveReachability(r network.Reachability) { s.observeReachability(r) }
 

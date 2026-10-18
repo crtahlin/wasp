@@ -5,6 +5,10 @@
 package pullsync
 
 import (
+	"context"
+
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
@@ -78,3 +82,73 @@ func (s *Syncer) RequestsRefused(reason string) float64 {
 
 // ReasonBinOutOfRange is the refusal reason for a bin the reserve cannot hold.
 const ReasonBinOutOfRange = reasonBinOutOfRange
+
+// Exported protocol identifiers for tests and fuzzers that need to open or
+// register the pullsync stream through the p2p streamtest recorder.
+const (
+	ProtocolName    = protocolName
+	ProtocolVersion = protocolVersion
+	StreamName      = streamName
+)
+
+const (
+	MaxPeerSyncStreams   = maxPeerSyncStreams
+	MaxPeerCursorStreams = maxPeerCursorStreams
+)
+
+var (
+	ErrStreamLimitExceeded = errStreamLimitExceeded
+	NewPeerStreamLimiter   = newPeerStreamLimiter
+)
+
+func (l *peerStreamLimiter) Acquire(peer swarm.Address) (func(), bool) { return l.acquire(peer) }
+func (l *peerStreamLimiter) Clear(peer swarm.Address)                  { l.clear(peer) }
+
+// Handler exposes the pullsync stream handler.
+func (s *Syncer) Handler(ctx context.Context, p p2p.Peer, stream p2p.Stream) error {
+	return s.handler(ctx, p, stream)
+}
+
+// CursorHandler exposes the cursor stream handler.
+func (s *Syncer) CursorHandler(ctx context.Context, p p2p.Peer, stream p2p.Stream) error {
+	return s.cursorHandler(ctx, p, stream)
+}
+
+// FillSyncStreams takes all sync stream slots of the peer.
+func (s *Syncer) FillSyncStreams(peer swarm.Address) {
+	for range maxPeerSyncStreams {
+		s.syncStreams.acquire(peer)
+	}
+}
+
+// FillCursorStreams takes all cursor stream slots of the peer.
+func (s *Syncer) FillCursorStreams(peer swarm.Address) {
+	for range maxPeerCursorStreams {
+		s.cursorStreams.acquire(peer)
+	}
+}
+
+// StreamLimitExceededCount returns the stream limit exceeded metric value.
+func (s *Syncer) StreamLimitExceededCount() float64 {
+	var m dto.Metric
+	if err := s.metrics.StreamLimitExceeded.Write(&m); err != nil {
+		return -1
+	}
+	return m.GetCounter().GetValue()
+}
+
+// UnwrapHeld exposes the hand-off of a held chunk to pss or gsoc.
+func (s *Syncer) UnwrapHeld(ch swarm.Chunk) { s.unwrapHeld(ch) }
+
+// inUse returns how many of the peer's slots are taken.
+func (l *peerStreamLimiter) inUse(peer swarm.Address) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.pools[peer.ByteString()])
+}
+
+// SyncStreamsInUse returns how many sync stream slots the peer holds.
+func (s *Syncer) SyncStreamsInUse(peer swarm.Address) int { return s.syncStreams.inUse(peer) }
+
+// CursorStreamsInUse returns how many cursor stream slots the peer holds.
+func (s *Syncer) CursorStreamsInUse(peer swarm.Address) int { return s.cursorStreams.inUse(peer) }

@@ -20,7 +20,7 @@ func TestReadiness(t *testing.T) {
 	t.Run("probe not set", func(t *testing.T) {
 		t.Parallel()
 
-		testServer, _, _, _ := newTestServer(t, testServerOptions{})
+		testServer, _, _, _, _ := newTestServer(t, testServerOptions{})
 
 		// When probe is not set readiness endpoint should indicate that API is not ready
 		jsonhttptest.Request(t, testServer, http.MethodGet, "/readiness", http.StatusBadRequest)
@@ -32,7 +32,7 @@ func TestReadiness(t *testing.T) {
 		probe := api.NewProbe()
 		// Readiness now also requires a connected peer, so give the node one.
 		// The zero-peer case is covered separately below.
-		testServer, _, _, _ := newTestServer(t, testServerOptions{
+		testServer, _, _, _, _ := newTestServer(t, testServerOptions{
 			Probe:        probe,
 			TopologyOpts: []topologymock.Option{topologymock.WithPeers(swarm.RandAddress(t))},
 		})
@@ -66,7 +66,7 @@ func TestReadiness(t *testing.T) {
 		probe.SetReady(api.ProbeStatusOK)
 
 		// No peers configured on the topology driver.
-		testServer, _, _, _ := newTestServer(t, testServerOptions{
+		testServer, _, _, _, _ := newTestServer(t, testServerOptions{
 			Probe: probe,
 		})
 
@@ -88,7 +88,7 @@ func TestReadiness(t *testing.T) {
 		probe := api.NewProbe()
 		probe.SetReady(api.ProbeStatusOK)
 
-		testServer, _, _, _ := newTestServer(t, testServerOptions{
+		testServer, _, _, _, _ := newTestServer(t, testServerOptions{
 			Probe:        probe,
 			TopologyOpts: []topologymock.Option{topologymock.WithPeers(swarm.RandAddress(t))},
 		})

@@ -116,9 +116,11 @@ func verifyPinCollection(
 	verifyChunks(t, st, chunks, has)
 }
 
-// TestMain exists to adjust the time.Now function to a fixed value.
+// TestMain sets the sharky shard count the package's stores use:
+// testSharkyShards, 4 to keep test stores small, or the node's 32 in the
+// samplerharness build, which opens real stores.
 func TestMain(m *testing.M) {
-	storer.ReplaceSharkyShardLimit(4)
+	storer.ReplaceSharkyShardLimit(testSharkyShards)
 	defer func() {
 		storer.ReplaceSharkyShardLimit(32)
 	}()

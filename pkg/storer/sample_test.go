@@ -13,7 +13,9 @@ import (
 
 	"github.com/ethersphere/bee/v2/pkg/bmt"
 	"github.com/ethersphere/bee/v2/pkg/cac"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
 	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/soc"
 
 	postagetesting "github.com/ethersphere/bee/v2/pkg/postage/testing"
 	chunk "github.com/ethersphere/bee/v2/pkg/storage/testing"
@@ -773,5 +775,82 @@ func TestReserveSampleSortWindowCapped(t *testing.T) {
 	if want := storer.MaxSamplerSortWindow; sample.Stats.SortWindow != want {
 		t.Fatalf("asked for a window of %d, sampler used %d, want it capped to %d",
 			opts.SamplerSortWindow, sample.Stats.SortWindow, want)
+	}
+}
+
+// TestSampleVectorSOC is the SOC counterpart of TestSampleVectorCAC, taken
+// from Bee v2.8.3. The sampler reads the wrapped CAC straight out of the raw
+// chunk data instead of rebuilding it through soc.UnwrapCAC. Neither asserted
+// address depends on the signature, so the vector survives the ECDSA nonce.
+func TestSampleVectorSOC(t *testing.T) {
+	chunkContent := make([]byte, swarm.ChunkSize)
+	for i := range chunkContent {
+		chunkContent[i] = byte(i % 256)
+	}
+	wrappedCh, err := cac.New(chunkContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := make([]byte, swarm.HashSize)
+	for i := range id {
+		id[i] = byte(i + 1)
+	}
+	// Fixed key, so that the owner and with it the SOC address is constant.
+	privKeyData := make([]byte, 32)
+	for i := range privKeyData {
+		privKeyData[i] = byte(i + 1)
+	}
+	ch, err := soc.New(id, wrappedCh).Sign(crypto.NewDefaultSigner(crypto.Secp256k1PrivateKeyFromBytes(privKeyData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch = ch.WithStamp(postagetesting.MustNewStamp())
+
+	anchor := []byte("swarm-test-anchor-deterministic!")
+	const (
+		wantChunkAddr       = "6f8d756905e023c9a6cb9f11dd22feec5c6fcfff33d9115bae3be210be162ebb"
+		wantTransformedAddr = "014d0e6a4caeaebe37bed9d7fb76d1049122e2e9e5659d4528537f6162d670bc"
+	)
+
+	prev := bmt.SIMDOptIn()
+	t.Cleanup(func() { bmt.SetSIMDOptIn(prev) })
+	for _, simd := range []bool{false, true} {
+		bmt.SetSIMDOptIn(simd)
+		sample, err := storer.MakeSampleUsingChunks([]swarm.Chunk{ch}, anchor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sample.Items) != 1 {
+			t.Fatalf("simd %t: expected 1 sample item, got %d", simd, len(sample.Items))
+		}
+		if got := sample.Items[0].ChunkAddress.String(); got != wantChunkAddr {
+			t.Errorf("simd %t: chunk address %s, want %s", simd, got, wantChunkAddr)
+		}
+		if got := sample.Items[0].TransformedAddress.String(); got != wantTransformedAddr {
+			t.Errorf("simd %t: transformed address %s, want %s", simd, got, wantTransformedAddr)
+		}
+	}
+}
+
+// TestTransformedAddressInvalidLength is taken from Bee v2.8.3: data too
+// short or too long for its chunk type is an error, not a panic. In wasp the
+// sampler skips such a chunk and counts it.
+func TestTransformedAddressInvalidLength(t *testing.T) {
+	t.Parallel()
+
+	hasher := bmt.NewPrefixHasher([]byte("anchor"))
+	addr := swarm.RandAddress(t)
+	for _, tc := range []struct {
+		typ  swarm.ChunkType
+		size int
+	}{
+		{swarm.ChunkTypeContentAddressed, bmt.SpanSize - 1},
+		{swarm.ChunkTypeContentAddressed, swarm.ChunkWithSpanSize + 1},
+		{swarm.ChunkTypeSingleOwner, swarm.SocMinChunkSize - 1},
+		{swarm.ChunkTypeSingleOwner, swarm.SocMaxChunkSize + 1},
+	} {
+		if _, err := storer.TransformedAddress(hasher, swarm.NewChunk(addr, make([]byte, tc.size)), tc.typ); err == nil {
+			t.Errorf("type %v, %d bytes: want an error", tc.typ, tc.size)
+		}
 	}
 }

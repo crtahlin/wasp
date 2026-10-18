@@ -121,6 +121,8 @@ func TestRecordRejected(t *testing.T) {
 		{"other network", good, k, w, networkID + 1},
 		{"owner is not the address key", foreign, k, w, networkID},
 		{"not a single owner chunk", swarm.NewChunk(good.Address(), good.Data()[:40]), k, w, networkID},
+		// a correctly signed record delivered under another address
+		{"address is not the record's", swarm.NewChunk(swarm.RandAddress(t), good.Data()), k, w, networkID},
 	} {
 		if _, err := providers.VerifyRecord(tc.ch, tc.k, tc.w, tc.networkID); !errors.Is(err, providers.ErrInvalidRecord) {
 			t.Errorf("%s: got %v, want ErrInvalidRecord", tc.name, err)

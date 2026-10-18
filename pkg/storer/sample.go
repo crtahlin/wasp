@@ -8,20 +8,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/bmt"
-	"github.com/ethersphere/bee/v2/pkg/cac"
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	"github.com/ethersphere/bee/v2/pkg/safe"
 	"github.com/ethersphere/bee/v2/pkg/sharky"
 	"github.com/ethersphere/bee/v2/pkg/soc"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	chunk "github.com/ethersphere/bee/v2/pkg/storage/testing"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/chunkstamp"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/chunkstore"
@@ -68,9 +70,43 @@ const maxLoadedChunkBuffer = 4096
 
 // loadedChunk carries a chunk from the reading stage to the hashing stage,
 // keeping the bin item alongside it because the hasher needs its type and batch.
+// The data sits in a pooled buffer (buf[:n]), which the hasher returns to the
+// pool; only the data of a sample candidate is copied out of it.
 type loadedChunk struct {
-	item  *reserve.ChunkBinItem
-	chunk swarm.Chunk
+	item *reserve.ChunkBinItem
+	buf  *[]byte
+	n    int
+}
+
+// sampleBufPool holds the readers' chunk buffers. Reading into a reused
+// buffer, as Bee v2.8.3 does with GetInto, saves an allocation per chunk,
+// millions per sample.
+var sampleBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, swarm.SocMaxChunkSize)
+		return &b
+	},
+}
+
+// sampleCutoff is the transformed address of the last item of a full sample,
+// shared between the assembly and the hashers. A hashed chunk above it
+// cannot enter the sample, so the hasher does not forward its data. The
+// cutoff only falls once the sample is full, so a hasher that reads an older
+// one forwards more than it needs, never less.
+type sampleCutoff struct {
+	max atomic.Pointer[[]byte]
+}
+
+// candidate reports whether taddr may still enter the sample.
+func (c *sampleCutoff) candidate(taddr swarm.Address) bool {
+	m := c.max.Load()
+	return m == nil || bytes.Compare(taddr.Bytes(), *m) <= 0
+}
+
+// set records the last item of a full sample.
+func (c *sampleCutoff) set(taddr swarm.Address) {
+	m := bytes.Clone(taddr.Bytes())
+	c.max.Store(&m)
 }
 
 // maxSamplerSortWindow caps how many bin items the ordering stage may hold
@@ -219,7 +255,12 @@ func (db *DB) reserveSample(
 		db.recordReserveSampleMetrics(duration, allStats, workers, err)
 	}()
 
-	excludedBatchIDs, err := db.batchesBelowValue(minBatchBalance)
+	// Unlike Bee v2.8.3, a batch store error does not end the sample: the
+	// batches read before the error are still excluded and the sample goes
+	// on, as before the port. A node that does not sample loses the round
+	// for certain; one that samples with a partial exclusion set loses it
+	// only if an excluded batch's chunk would enter the sample.
+	isExcludedBatch, err := db.batchExclusionFilter(minBatchBalance)
 	if err != nil {
 		db.logger.Error(err, "get batches below value")
 	}
@@ -283,7 +324,7 @@ func (db *DB) reserveSample(
 			// meant every stage after this one paid for chunks that were always
 			// going to be discarded — since #11 that includes an index lookup
 			// per chunk and a slot in the sort window.
-			if _, found := excludedBatchIDs[string(ch.BatchID)]; found {
+			if isExcludedBatch != nil && isExcludedBatch(ch.BatchID) {
 				stats.BelowBalanceIgnored++
 				return false, nil
 			}
@@ -357,6 +398,7 @@ func (db *DB) reserveSample(
 	// never binds at sane settings.
 	loadedBuf := min(3*readers, maxLoadedChunkBuffer)
 	loadedC := make(chan loadedChunk, loadedBuf)
+	var cutoff sampleCutoff
 
 	db.logger.Debug("reserve sampler workers",
 		"readers", readers, "hashers", workers, "sort_window", sortWindow)
@@ -371,12 +413,19 @@ func (db *DB) reserveSample(
 			defer readersWg.Done()
 			wstat := SampleStats{}
 			defer func() { addStats(wstat) }()
+			// One handle per reader rather than one per chunk, as in Bee
+			// v2.8.3: building it allocates. GetInto, like Get, holds the
+			// chunk's address lock across the lookup and the read, so the
+			// ordering stage's reasoning above still holds.
+			chunkStore := db.ChunkStore()
 
 			for chItem := range readC {
+				buf := sampleBufPool.Get().(*[]byte)
 				chunkLoadStart := time.Now()
-				chunk, err := db.ChunkStore().Get(ctx, chItem.Address)
+				n, err := chunkStore.GetInto(ctx, chItem.Address, *buf)
 				chunkLoadDuration := time.Since(chunkLoadStart)
 				if err != nil {
+					sampleBufPool.Put(buf)
 					wstat.ChunkLoadFailed++
 					db.logger.Debug("failed loading chunk", "chunk_address", chItem.Address, "error", err)
 					continue
@@ -384,8 +433,9 @@ func (db *DB) reserveSample(
 				wstat.ChunkLoadDuration += chunkLoadDuration
 
 				select {
-				case loadedC <- loadedChunk{item: chItem, chunk: chunk}:
+				case loadedC <- loadedChunk{item: chItem, buf: buf, n: n}:
 				case <-ctx.Done():
+					sampleBufPool.Put(buf)
 					return ctx.Err()
 				}
 			}
@@ -407,20 +457,41 @@ func (db *DB) reserveSample(
 			defer func() { addStats(wstat) }()
 
 			for lc := range loadedC {
+				data := (*lc.buf)[:lc.n]
 				taddrStart := time.Now()
-				taddr, err := transformedAddress(hasher, lc.chunk, lc.item.ChunkType)
+				taddr, err := transformedAddress(hasher, lc.item.Address, data, lc.item.ChunkType)
 				if err != nil {
-					return err
+					// Unlike Bee v2.8.3, a malformed chunk is skipped and
+					// counted rather than failing the whole sample, which
+					// would lose the round over one bad chunk.
+					sampleBufPool.Put(lc.buf)
+					wstat.MalformedChunk++
+					db.logger.Debug("skipping malformed chunk", "chunk_address", lc.item.Address, "error", err)
+					continue
 				}
 				wstat.TaddrDuration += time.Since(taddrStart)
 
-				select {
-				case sampleItemChan <- SampleItem{
+				// Only a chunk that can still enter the sample carries its
+				// data on. Bee v2.8.3 drops the data of every chunk and reads
+				// a candidate's data again at assembly; that doubles the reads
+				// of candidates, and a single owner chunk stored again in
+				// between would give an item whose data does not match its
+				// transformed address.
+				if !cutoff.candidate(taddr) {
+					sampleBufPool.Put(lc.buf)
+					wstat.NotCandidate++
+					continue
+				}
+				item := SampleItem{
 					TransformedAddress: taddr,
-					ChunkAddress:       lc.chunk.Address(),
-					ChunkData:          lc.chunk.Data(),
+					ChunkAddress:       lc.item.Address,
+					ChunkData:          bytes.Clone(data),
 					Stamp:              postage.NewStamp(lc.item.BatchID, nil, nil, nil),
-				}:
+				}
+				sampleBufPool.Put(lc.buf)
+
+				select {
+				case sampleItemChan <- item:
 				case <-ctx.Done():
 					return ctx.Err()
 				}
@@ -504,6 +575,9 @@ func (db *DB) reserveSample(
 
 			insert(item)
 			stats.SampleInserts++
+			if len(sampleItems) == SampleSize {
+				cutoff.set(sampleItems[len(sampleItems)-1].TransformedAddress)
+			}
 		}
 	}
 	addStats(stats)
@@ -540,39 +614,59 @@ func le(a, b swarm.Address) bool {
 	return bytes.Compare(a.Bytes(), b.Bytes()) == -1
 }
 
-func (db *DB) batchesBelowValue(until *big.Int) (map[string]struct{}, error) {
-	res := make(map[string]struct{})
-
+// batchExclusionFilter returns a filter that reports whether a batch's value
+// is below until, or nil when no batch is excluded. Keys are fixed-size
+// arrays, as in Bee v2.8.3, so a lookup does not convert the batch ID to a
+// string. When the batch store fails, the filter covers the batches read
+// before the failure and the error is returned with it.
+func (db *DB) batchExclusionFilter(until *big.Int) (func([]byte) bool, error) {
 	if until == nil {
-		return res, nil
+		return nil, nil
 	}
 
+	set := make(map[[32]byte]struct{})
 	err := db.batchstore.Iterate(func(b *postage.Batch) (bool, error) {
 		if b.Value.Cmp(until) < 0 {
-			res[string(b.ID)] = struct{}{}
+			var id [32]byte
+			copy(id[:], b.ID)
+			set[id] = struct{}{}
 		}
 		return false, nil
 	})
+	if len(set) == 0 {
+		return nil, err
+	}
 
-	return res, err
+	return func(batchID []byte) bool {
+		var id [32]byte
+		copy(id[:], batchID)
+		_, found := set[id]
+		return found
+	}, err
 }
 
-func transformedAddress(hasher bmt.Hasher, chunk swarm.Chunk, chType swarm.ChunkType) (swarm.Address, error) {
+func transformedAddress(hasher bmt.Hasher, addr swarm.Address, data []byte, chType swarm.ChunkType) (swarm.Address, error) {
 	switch chType {
 	case swarm.ChunkTypeContentAddressed:
-		return transformedAddressCAC(hasher, chunk)
+		return transformedAddressCAC(hasher, data)
 	case swarm.ChunkTypeSingleOwner:
-		return transformedAddressSOC(hasher, chunk)
+		return transformedAddressSOC(hasher, addr, data)
 	default:
 		return swarm.ZeroAddress, fmt.Errorf("chunk type [%v] is not valid", chType)
 	}
 }
 
-func transformedAddressCAC(hasher bmt.Hasher, chunk swarm.Chunk) (swarm.Address, error) {
+func transformedAddressCAC(hasher bmt.Hasher, data []byte) (swarm.Address, error) {
+	if len(data) < bmt.SpanSize {
+		return swarm.ZeroAddress, errors.New("chunk data too short for span")
+	}
+	if len(data) > swarm.ChunkWithSpanSize {
+		return swarm.ZeroAddress, errors.New("chunk data too large for cac")
+	}
 	hasher.Reset()
-	hasher.SetHeader(chunk.Data()[:bmt.SpanSize])
+	hasher.SetHeader(data[:bmt.SpanSize])
 
-	_, err := hasher.Write(chunk.Data()[bmt.SpanSize:])
+	_, err := hasher.Write(data[bmt.SpanSize:])
 	if err != nil {
 		return swarm.ZeroAddress, err
 	}
@@ -580,20 +674,23 @@ func transformedAddressCAC(hasher bmt.Hasher, chunk swarm.Chunk) (swarm.Address,
 	return swarm.NewAddress(hasher.Sum(nil)), nil
 }
 
-func transformedAddressSOC(hasher bmt.Hasher, socChunk swarm.Chunk) (swarm.Address, error) {
-	// Calculate transformed address from wrapped chunk
-	cacChunk, err := soc.UnwrapCAC(socChunk)
-	if err != nil {
-		return swarm.ZeroAddress, err
+func transformedAddressSOC(hasher bmt.Hasher, socAddr swarm.Address, data []byte) (swarm.Address, error) {
+	if len(data) < swarm.SocMinChunkSize {
+		return swarm.ZeroAddress, errors.New("chunk data too short for soc")
 	}
-	taddrCac, err := transformedAddressCAC(hasher, cacChunk)
+	if len(data) > swarm.SocMaxChunkSize {
+		return swarm.ZeroAddress, errors.New("chunk data too large for soc")
+	}
+	// Calculate transformed address from wrapped chunk
+	cursor := swarm.HashSize + swarm.SocSignatureSize
+	taddrCac, err := transformedAddressCAC(hasher, data[cursor:])
 	if err != nil {
 		return swarm.ZeroAddress, err
 	}
 
 	// Hash address and transformed address to make transformed address for this SOC
 	sHasher := swarm.NewHasher()
-	if _, err := sHasher.Write(socChunk.Address().Bytes()); err != nil {
+	if _, err := sHasher.Write(socAddr.Bytes()); err != nil {
 		return swarm.ZeroAddress, err
 	}
 	if _, err := sHasher.Write(taddrCac.Bytes()); err != nil {
@@ -615,9 +712,17 @@ type SampleStats struct {
 	ValidStampDuration        time.Duration
 	BatchesBelowValueDuration time.Duration
 	RogueChunk                int64
-	ChunkLoadDuration         time.Duration
-	ChunkLoadFailed           int64
-	StampLoadFailed           int64
+	// MalformedChunk counts chunks skipped because their data could not be
+	// hashed for the sample: too short or too long for their type. Bee
+	// v2.8.3 fails the whole sample on such a chunk.
+	MalformedChunk int64
+	// NotCandidate counts hashed chunks whose data was not passed on to the
+	// assembly, because their transformed address was above the last item
+	// of a sample that was already full.
+	NotCandidate      int64
+	ChunkLoadDuration time.Duration
+	ChunkLoadFailed   int64
+	StampLoadFailed   int64
 	// ReadConcurrency is how many chunk loads were kept in flight. Recorded so
 	// a measurement can say what it measured, and so a test can tell that the
 	// setting reached the sampler at all rather than being quietly ignored.
@@ -673,6 +778,8 @@ func (s *SampleStats) add(other SampleStats) {
 	s.ValidStampDuration += other.ValidStampDuration
 	s.BatchesBelowValueDuration += other.BatchesBelowValueDuration
 	s.RogueChunk += other.RogueChunk
+	s.MalformedChunk += other.MalformedChunk
+	s.NotCandidate += other.NotCandidate
 	s.ChunkLoadDuration += other.ChunkLoadDuration
 	s.ChunkLoadFailed += other.ChunkLoadFailed
 	s.StampLoadFailed += other.StampLoadFailed
@@ -714,7 +821,7 @@ func RandSample(t *testing.T, anchor []byte) Sample {
 func MakeSampleUsingChunks(chunks []swarm.Chunk, anchor []byte) (Sample, error) {
 	items := make([]SampleItem, len(chunks))
 	for i, ch := range chunks {
-		tr, err := transformedAddress(bmt.NewPrefixHasher(anchor), ch, getChunkType(ch))
+		tr, err := transformedAddress(bmt.NewPrefixHasher(anchor), ch.Address(), ch.Data(), storage.ChunkType(ch))
 		if err != nil {
 			return Sample{}, err
 		}
@@ -738,15 +845,6 @@ func newStamp(s swarm.Stamp) *postage.Stamp {
 	return postage.NewStamp(s.BatchID(), s.Index(), s.Timestamp(), s.Sig())
 }
 
-func getChunkType(chunk swarm.Chunk) swarm.ChunkType {
-	if cac.Valid(chunk) {
-		return swarm.ChunkTypeContentAddressed
-	} else if soc.Valid(chunk) {
-		return swarm.ChunkTypeSingleOwner
-	}
-	return swarm.ChunkTypeUnspecified
-}
-
 func (db *DB) recordReserveSampleMetrics(duration time.Duration, stats *SampleStats, workers int, err error) {
 	status := "success"
 	if err != nil {
@@ -759,6 +857,8 @@ func (db *DB) recordReserveSampleMetrics(duration time.Duration, stats *SampleSt
 		"chunks_iterated":                      float64(stats.TotalIterated),
 		"chunk_bin_scanned":                    float64(stats.ChunkBinScanned),
 		"chunks_load_failed":                   float64(stats.ChunkLoadFailed),
+		"malformed_chunks":                     float64(stats.MalformedChunk),
+		"rogue_chunks":                         float64(stats.RogueChunk),
 		"stamp_validations":                    float64(stats.SampleInserts),
 		"invalid_stamps":                       float64(stats.InvalidStamp),
 		"below_balance_ignored":                float64(stats.BelowBalanceIgnored),

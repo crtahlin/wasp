@@ -41,7 +41,7 @@ func localIngestContent(t *testing.T, size int) []byte {
 func TestLocalIngestDisabled(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer: mockstorer.New(),
 		Logger: log.Noop,
 	})
@@ -66,7 +66,7 @@ func TestLocalIngestAddressEquivalence(t *testing.T) {
 		t.Run("level_"+level, func(t *testing.T) {
 			t.Parallel()
 
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:             mockstorer.New(),
 				Logger:             log.Noop,
 				Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -116,7 +116,7 @@ func TestLocalIngestAddressEquivalence(t *testing.T) {
 func TestLocalIngestUsesUploadRedundancyDefault(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             mockstorer.New(),
 		Logger:             log.Noop,
 		Post:               mockpost.New(mockpost.WithAcceptAll()),
@@ -154,7 +154,7 @@ func TestLocalIngestUsesUploadRedundancyDefault(t *testing.T) {
 func TestLocalIngestDuplicate(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             mockstorer.New(),
 		Logger:             log.Noop,
 		LocalIngestEnabled: true,
@@ -190,7 +190,7 @@ func TestLocalIngestLimitPreflight(t *testing.T) {
 	storerMock := mockstorer.New()
 	storerMock.SetLocalIngestLimit(1)
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             storerMock,
 		Logger:             log.Noop,
 		LocalIngestEnabled: true,
@@ -232,7 +232,7 @@ func TestLocalIngestLimitMidStream(t *testing.T) {
 	storerMock := mockstorer.New()
 	storerMock.SetLocalIngestLimit(uint64(api.CalculateNumberOfChunks(swarm.ChunkSize*8, false)))
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             storerMock,
 		Logger:             log.Noop,
 		LocalIngestEnabled: true,
@@ -277,7 +277,7 @@ func TestLocalIngestLimitCrossedInsideSum(t *testing.T) {
 	// replicas included, rather than hard-coding a number that redundancy
 	// changes could silently invalidate.
 	unlimited := mockstorer.New()
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             unlimited,
 		Logger:             log.Noop,
 		LocalIngestEnabled: true,
@@ -297,7 +297,7 @@ func TestLocalIngestLimitCrossedInsideSum(t *testing.T) {
 	limited := mockstorer.New()
 	limited.SetLocalIngestLimit(full.Chunks - 1)
 
-	client2, _, _, _ := newTestServer(t, testServerOptions{
+	client2, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             limited,
 		Logger:             log.Noop,
 		LocalIngestEnabled: true,
@@ -332,7 +332,7 @@ func TestLocalIngestConcurrentPuts(t *testing.T) {
 
 	storerMock := mockstorer.New()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             storerMock,
 		Logger:             log.Noop,
 		LocalIngestEnabled: true,
@@ -379,7 +379,7 @@ func TestLocalIngestWarnsBelowTheLimit(t *testing.T) {
 	// Calibrate: find how many chunks this content needs, then set a limit it
 	// lands above 90% of without reaching.
 	calib := mockstorer.New()
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:             calib,
 		Logger:             log.Noop,
 		LocalIngestEnabled: true,
@@ -410,7 +410,7 @@ func TestLocalIngestWarnsBelowTheLimit(t *testing.T) {
 
 			storerMock := mockstorer.New()
 			storerMock.SetLocalIngestLimit(tc.limit)
-			client, _, _, _ := newTestServer(t, testServerOptions{
+			client, _, _, _, _ := newTestServer(t, testServerOptions{
 				Storer:             storerMock,
 				Logger:             logger,
 				LocalIngestEnabled: true,

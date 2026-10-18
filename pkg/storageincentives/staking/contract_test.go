@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -26,6 +27,214 @@ import (
 var stakingContractABI = abiutil.MustParseABI(chaincfg.Testnet.StakingABI)
 
 const stakingHeight = uint8(0)
+
+func TestCalculateMinDeposit(t *testing.T) {
+	t.Parallel()
+
+	minStake := staking.MinimumStakeAmount
+	committedAtMin := new(big.Int).Div(minStake, big.NewInt(1000)) // potential/price at price 1000
+
+	tests := []struct {
+		name        string
+		potential   *big.Int
+		committed   *big.Int
+		price       uint32
+		height      uint8
+		stakeExists bool
+		want        *big.Int
+	}{
+		{
+			name:        "first deposit height 0",
+			potential:   big.NewInt(0),
+			committed:   big.NewInt(0),
+			price:       1000,
+			height:      0,
+			stakeExists: false,
+			want:        minStake,
+		},
+		{
+			name:        "first deposit height 1",
+			potential:   big.NewInt(0),
+			committed:   big.NewInt(0),
+			price:       1000,
+			height:      1,
+			stakeExists: false,
+			want:        new(big.Int).Mul(minStake, big.NewInt(2)),
+		},
+		{
+			name:        "subsequent with surplus is one plur",
+			potential:   new(big.Int).Mul(minStake, big.NewInt(2)),
+			committed:   committedAtMin,
+			price:       1000,
+			height:      0,
+			stakeExists: true,
+			want:        big.NewInt(1),
+		},
+		{
+			name:        "exact cover is one plur",
+			potential:   new(big.Int).Set(minStake),
+			committed:   committedAtMin,
+			price:       1000,
+			height:      0,
+			stakeExists: true,
+			want:        big.NewInt(1),
+		},
+		{
+			name:        "price increase requires gap",
+			potential:   new(big.Int).Set(minStake),
+			committed:   committedAtMin,
+			price:       1001,
+			height:      0,
+			stakeExists: true,
+			want:        committedAtMin,
+		},
+		{
+			name:        "height doubles required potential",
+			potential:   new(big.Int).Mul(minStake, big.NewInt(2)),
+			committed:   committedAtMin,
+			price:       1001,
+			height:      1,
+			stakeExists: true,
+			want:        new(big.Int).Mul(committedAtMin, big.NewInt(2)),
+		},
+		{
+			name:        "price drop keeps height floor above commitment",
+			potential:   new(big.Int).Set(minStake),
+			committed:   new(big.Int).Div(new(big.Int).Set(minStake), big.NewInt(48000)),
+			price:       24000,
+			height:      1,
+			stakeExists: true,
+			want:        new(big.Int).Set(minStake),
+		},
+		{
+			name:        "commitment gap stays above height floor",
+			potential:   new(big.Int).Set(minStake),
+			committed:   committedAtMin,
+			price:       1001,
+			height:      1,
+			stakeExists: true,
+			want:        new(big.Int).Mul(committedAtMin, big.NewInt(1002)),
+		},
+		{
+			name:        "existing slashed stake does not restore initial floor",
+			potential:   new(big.Int).Div(minStake, big.NewInt(10)),
+			committed:   committedAtMin,
+			price:       100,
+			height:      0,
+			stakeExists: true,
+			want:        big.NewInt(1),
+		},
+		{
+			name:        "initialized stake with zero potential does not restore initial floor",
+			potential:   big.NewInt(0),
+			committed:   big.NewInt(0),
+			price:       200,
+			height:      0,
+			stakeExists: true,
+			want:        big.NewInt(1),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := staking.CalculateMinDeposit(tc.potential, tc.committed, tc.price, tc.height, tc.stakeExists)
+			if got.Cmp(tc.want) != 0 {
+				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProofHeightBypassViaDeposit asserts the invariant that pkg/node/node.go
+// enforces before UpdateHeight: a node must not write height h on-chain unless
+// its potential stake is at least 2^h * MinimumStakeAmount.
+//
+// Scenario: staked exactly MIN at h=0 with oracle price 48000, price then
+// dropped to 24000, node restarted with --reserve-capacity-doubling=1.
+// node.go skips UpdateHeight (potential 1e17 < 2e17). Staking.sol would accept
+// 1 PLUR on an existing stake (no DecreasedCommitment, no BelowMinimumStake).
+// GetMinDeposit must return MIN*2^h - potential; one PLUR less returns
+// *MinDepositError; the reported minimum sends manageStake at height h with
+// potential+deposit >= MIN*2^h.
+func TestProofHeightBypassViaDeposit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	owner := common.HexToAddress("abcd")
+	stakingAddr := common.HexToAddress("ffff")
+	oracleAddr := common.HexToAddress("1111")
+	bzzAddr := common.HexToAddress("eeee")
+	nonce := common.BytesToHash(make([]byte, 32))
+	const height = uint8(1)
+
+	potential := new(big.Int).Set(staking.MinimumStakeAmount)               // 1e17, staked at h=0
+	committed := new(big.Int).Div(potential, big.NewInt(48000))             // committed at price 48000
+	balance := new(big.Int).Mul(staking.MinimumStakeAmount, big.NewInt(10)) // plenty of BZZ
+	const price = uint32(24000)                                             // oracle floor after the drop
+
+	requiredPotential := new(big.Int).Lsh(new(big.Int).Set(staking.MinimumStakeAmount), uint(height))
+
+	manageStakeSig := stakingContractABI.Methods["manageStake"].ID
+	var sentHeight *uint8
+
+	contract := staking.New(
+		owner, stakingAddr, stakingContractABI, bzzAddr,
+		transactionMock.New(
+			transactionMock.WithCallFunc(newStakeCallFunc(t, stakingAddr, oracleAddr, bzzAddr, committed, potential, balance, price)),
+			transactionMock.WithSendFunc(func(_ context.Context, req *transaction.TxRequest, _ int) (common.Hash, error) {
+				if *req.To == stakingAddr && bytes.Equal(req.Data[:4], manageStakeSig) {
+					args, err := stakingContractABI.Methods["manageStake"].Inputs.Unpack(req.Data[4:])
+					if err != nil {
+						return common.Hash{}, err
+					}
+					h := args[2].(uint8)
+					sentHeight = &h
+				}
+				return common.HexToHash("01"), nil
+			}),
+			transactionMock.WithWaitForReceiptFunc(func(context.Context, common.Hash) (*types.Receipt, error) {
+				return &types.Receipt{Status: 1}, nil
+			}),
+		),
+		nonce, 0, height,
+	)
+
+	minDeposit, err := contract.GetMinDeposit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("GET /stake would report minimumDeposit=%s PLUR (potential=%s, needed for h=%d: %s)", minDeposit, potential, height, requiredPotential)
+
+	wantMin := new(big.Int).Sub(requiredPotential, potential)
+	if minDeposit.Cmp(wantMin) != 0 {
+		t.Fatalf("GetMinDeposit = %s, want MIN*2^h - potential = %s", minDeposit, wantMin)
+	}
+
+	oneLess := new(big.Int).Sub(new(big.Int).Set(minDeposit), big.NewInt(1))
+	_, err = contract.DepositStake(ctx, oneLess)
+	var minErr *staking.MinDepositError
+	if !errors.As(err, &minErr) {
+		t.Fatalf("deposit one PLUR below minimum: got %v, want *MinDepositError", err)
+	}
+
+	sentHeight = nil
+	_, err = contract.DepositStake(ctx, minDeposit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sentHeight == nil {
+		t.Fatal("manageStake was not sent")
+	}
+	if *sentHeight != height {
+		t.Fatalf("manageStake height = %d, want %d", *sentHeight, height)
+	}
+	newPotential := new(big.Int).Add(potential, minDeposit)
+	if newPotential.Cmp(requiredPotential) < 0 {
+		t.Fatalf("potential %s + deposit %s = %s, want >= %s", potential, minDeposit, newPotential, requiredPotential)
+	}
+}
 
 func TestIsOverlayFrozen(t *testing.T) {
 	t.Parallel()
@@ -382,6 +591,97 @@ func TestDepositStake(t *testing.T) {
 		_, err := contract.DepositStake(ctx, stakedAmount)
 		if !errors.Is(err, staking.ErrInsufficientStakeAmount) {
 			t.Fatal(fmt.Errorf("wanted %w, got %w", staking.ErrInsufficientStakeAmount, err))
+		}
+	})
+
+	t.Run("below commitment minimum does not send transaction", func(t *testing.T) {
+		t.Parallel()
+
+		oracleAddr := common.HexToAddress("1111")
+		potential := new(big.Int).Set(staking.MinimumStakeAmount)
+		committed := new(big.Int).Div(potential, big.NewInt(1000))
+		price := uint32(1001)
+
+		contract := staking.New(
+			owner,
+			stakingContractAddress,
+			stakingContractABI,
+			bzzTokenAddress,
+			transactionMock.New(
+				transactionMock.WithSendFunc(func(ctx context.Context, request *transaction.TxRequest, boost int) (txHash common.Hash, err error) {
+					t.Fatal("transaction should not be sent")
+					return common.Hash{}, nil
+				}),
+				transactionMock.WithCallFunc(newStakeCallFunc(t, stakingContractAddress, oracleAddr, bzzTokenAddress, committed, potential, potential, price)),
+			),
+			nonce,
+			0,
+			stakingHeight,
+		)
+
+		_, err := contract.DepositStake(ctx, big.NewInt(1))
+		if !errors.Is(err, staking.ErrInsufficientStakeAmount) {
+			t.Fatal(fmt.Errorf("wanted %w, got %w", staking.ErrInsufficientStakeAmount, err))
+		}
+
+		var minErr *staking.MinDepositError
+		if !errors.As(err, &minErr) {
+			t.Fatal("expected MinDepositError")
+		}
+		if minErr.Minimum.Cmp(committed) != 0 {
+			t.Fatalf("minimum got %s, want %s", minErr.Minimum, committed)
+		}
+	})
+
+	t.Run("meets commitment minimum", func(t *testing.T) {
+		t.Parallel()
+
+		oracleAddr := common.HexToAddress("1111")
+		potential := new(big.Int).Set(staking.MinimumStakeAmount)
+		committed := new(big.Int).Div(potential, big.NewInt(1000))
+		price := uint32(1001)
+		addAmount := committed
+		balance := new(big.Int).Add(potential, addAmount)
+
+		expectedCallData, err := stakingContractABI.Pack("manageStake", nonce, addAmount, stakingHeight)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		contract := staking.New(
+			owner,
+			stakingContractAddress,
+			stakingContractABI,
+			bzzTokenAddress,
+			transactionMock.New(
+				transactionMock.WithSendFunc(func(ctx context.Context, request *transaction.TxRequest, boost int) (txHash common.Hash, err error) {
+					if *request.To == bzzTokenAddress {
+						return txHashApprove, nil
+					}
+					if *request.To == stakingContractAddress {
+						if !bytes.Equal(expectedCallData[:80], request.Data[:80]) {
+							return common.Hash{}, fmt.Errorf("got wrong call data. wanted %x, got %x", expectedCallData, request.Data)
+						}
+						return txHashDeposited, nil
+					}
+					return common.Hash{}, errors.New("sent to wrong contract")
+				}),
+				transactionMock.WithWaitForReceiptFunc(func(ctx context.Context, txHash common.Hash) (receipt *types.Receipt, err error) {
+					if txHash == txHashDeposited || txHash == txHashApprove {
+						return &types.Receipt{Status: 1}, nil
+					}
+					return nil, errors.New("unknown tx hash")
+				}),
+				transactionMock.WithCallFunc(newStakeCallFunc(t, stakingContractAddress, oracleAddr, bzzTokenAddress, committed, potential, balance, price)),
+			),
+			nonce,
+			0,
+			stakingHeight,
+		)
+
+		_, err = contract.DepositStake(ctx, addAmount)
+		if err != nil {
+			t.Fatal(err)
 		}
 	})
 
@@ -1235,6 +1535,150 @@ func TestGetCommittedStake(t *testing.T) {
 	})
 }
 
+func TestGetMinDeposit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	owner := common.HexToAddress("abcd")
+	stakingAddress := common.HexToAddress("ffff")
+	oracleAddr := common.HexToAddress("1111")
+	bzzTokenAddress := common.HexToAddress("eeee")
+	nonce := common.BytesToHash(make([]byte, 32))
+
+	t.Run("first deposit", func(t *testing.T) {
+		t.Parallel()
+
+		contract := staking.New(
+			owner,
+			stakingAddress,
+			stakingContractABI,
+			bzzTokenAddress,
+			transactionMock.New(
+				transactionMock.WithCallFunc(func(ctx context.Context, request *transaction.TxRequest) (result []byte, err error) {
+					if *request.To == stakingAddress {
+						return getPotentialStakeResponse(t, big.NewInt(0)), nil
+					}
+					return nil, errors.New("unexpected call")
+				}),
+			),
+			nonce,
+			0,
+			stakingHeight,
+		)
+
+		got, err := contract.GetMinDeposit(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Cmp(staking.MinimumStakeAmount) != 0 {
+			t.Fatalf("got %s, want %s", got, staking.MinimumStakeAmount)
+		}
+	})
+
+	t.Run("price increase", func(t *testing.T) {
+		t.Parallel()
+
+		potential := new(big.Int).Set(staking.MinimumStakeAmount)
+		committed := new(big.Int).Div(potential, big.NewInt(1000))
+		price := uint32(1001)
+
+		contract := staking.New(
+			owner,
+			stakingAddress,
+			stakingContractABI,
+			bzzTokenAddress,
+			transactionMock.New(
+				transactionMock.WithCallFunc(newStakeCallFunc(t, stakingAddress, oracleAddr, bzzTokenAddress, committed, potential, potential, price)),
+			),
+			nonce,
+			0,
+			stakingHeight,
+		)
+
+		got, err := contract.GetMinDeposit(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Cmp(committed) != 0 {
+			t.Fatalf("got %s, want %s", got, committed)
+		}
+	})
+
+	t.Run("initialized stake with zero potential", func(t *testing.T) {
+		t.Parallel()
+
+		contract := staking.New(
+			owner,
+			stakingAddress,
+			stakingContractABI,
+			bzzTokenAddress,
+			transactionMock.New(
+				transactionMock.WithCallFunc(func(ctx context.Context, request *transaction.TxRequest) (result []byte, err error) {
+					if *request.To == stakingAddress {
+						return getStakeResponseWithLastUpdated(t, big.NewInt(0), big.NewInt(0), big.NewInt(1000)), nil
+					}
+					return nil, errors.New("unexpected call")
+				}),
+			),
+			nonce,
+			0,
+			stakingHeight,
+		)
+
+		got, err := contract.GetMinDeposit(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Cmp(big.NewInt(1)) != 0 {
+			t.Fatalf("got %s, want 1", got)
+		}
+	})
+
+	t.Run("concurrent oracle resolution", func(t *testing.T) {
+		t.Parallel()
+
+		potential := new(big.Int).Set(staking.MinimumStakeAmount)
+		committed := new(big.Int).Div(potential, big.NewInt(1000))
+		price := uint32(1001)
+
+		contract := staking.New(
+			owner,
+			stakingAddress,
+			stakingContractABI,
+			bzzTokenAddress,
+			transactionMock.New(
+				transactionMock.WithCallFunc(newStakeCallFunc(t, stakingAddress, oracleAddr, bzzTokenAddress, committed, potential, potential, price)),
+			),
+			nonce,
+			0,
+			stakingHeight,
+		)
+
+		const n = 32
+		errCh := make(chan error, n)
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for range n {
+			go func() {
+				defer wg.Done()
+				got, err := contract.GetMinDeposit(ctx)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				if got.Cmp(committed) != 0 {
+					errCh <- fmt.Errorf("got %s, want %s", got, committed)
+				}
+			}()
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestGetWithdrawableStake(t *testing.T) {
 	t.Parallel()
 
@@ -1926,12 +2370,59 @@ func TestMigrateStake(t *testing.T) {
 	})
 }
 
-func getPotentialStakeResponse(t *testing.T, amount *big.Int) []byte {
+func newStakeCallFunc(
+	t *testing.T,
+	stakingAddr, oracleAddr, bzzAddr common.Address,
+	committed, potential, balance *big.Int,
+	price uint32,
+) func(ctx context.Context, request *transaction.TxRequest) ([]byte, error) {
 	t.Helper()
 
-	ret := make([]byte, 32+32+32+32+32+32)
+	oracleCallData, err := stakingContractABI.Pack("OracleContract")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return func(_ context.Context, request *transaction.TxRequest) ([]byte, error) {
+		switch *request.To {
+		case bzzAddr:
+			return balance.FillBytes(make([]byte, 32)), nil
+		case oracleAddr:
+			return big.NewInt(int64(price)).FillBytes(make([]byte, 32)), nil
+		case stakingAddr:
+			if len(request.Data) >= 4 && bytes.Equal(request.Data[:4], oracleCallData[:4]) {
+				return common.LeftPadBytes(oracleAddr.Bytes(), 32), nil
+			}
+			return getStakeResponse(t, committed, potential), nil
+		default:
+			return nil, errors.New("unexpected call")
+		}
+	}
+}
+
+func getStakeResponse(t *testing.T, committed, potential *big.Int) []byte {
+	t.Helper()
+
+	lastUpdated := big.NewInt(0)
+	if committed.Sign() > 0 || potential.Sign() > 0 {
+		lastUpdated = big.NewInt(1)
+	}
+	return getStakeResponseWithLastUpdated(t, committed, potential, lastUpdated)
+}
+
+func getStakeResponseWithLastUpdated(t *testing.T, committed, potential, lastUpdated *big.Int) []byte {
+	t.Helper()
+
+	ret := make([]byte, 32*5)
 	copy(ret, swarm.RandAddress(t).Bytes())
-	copy(ret[64:], amount.FillBytes(make([]byte, 32)))
+	copy(ret[32:], committed.FillBytes(make([]byte, 32)))
+	copy(ret[64:], potential.FillBytes(make([]byte, 32)))
+	copy(ret[96:], lastUpdated.FillBytes(make([]byte, 32)))
 
 	return ret
+}
+
+func getPotentialStakeResponse(t *testing.T, amount *big.Int) []byte {
+	t.Helper()
+	return getStakeResponse(t, big.NewInt(0), amount)
 }

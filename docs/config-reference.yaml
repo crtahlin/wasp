@@ -463,7 +463,7 @@
 # config: "is $HOME/.bee.yaml"
 
 ## gas limit fallback when estimation fails for contract transactions
-# gas-limit-fallback: 500000
+# gas-limit-fallback: 900000
 
 ## help for start
 # help: false
@@ -518,6 +518,13 @@
 
 ## postage stamp contract start block number
 # postage-stamp-start-block: 0
+
+## largest number of blocks one eth_getLogs request asks for while syncing
+## postage contract events; the page halves after a failed request and grows
+## back to this size; 0 uses the default of 5000. Raising it means fewer
+## requests during a catch-up but larger responses that an RPC provider may
+## refuse; lowering it means more requests and a slower catch-up
+# postage-sync-block-range: 5000
 
 ## enable pprof mutex profile
 # pprof-mutex: false

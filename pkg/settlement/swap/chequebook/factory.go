@@ -74,8 +74,10 @@ func (c *factory) Deploy(ctx context.Context, issuer common.Address, defaultHard
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		MinEstimatedGasLimit: DeployGasLimitFloor,
-		Value:                big.NewInt(0),
-		Description:          "chequebook deployment",
+		// When estimation fails, gas-limit-fallback, as in Bee v2.8.3.
+		FallbackOnEstimateError: true,
+		Value:                   big.NewInt(0),
+		Description:             "chequebook deployment",
 	}
 
 	txHash, err := c.transactionService.Send(ctx, request, transaction.DefaultTipBoostPercent)

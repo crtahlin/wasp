@@ -23,7 +23,7 @@ func BlocksBehindGauge(l postage.Listener) float64 {
 var (
 	TailSize          = DefaultConfirmationDepth
 	BatchFactor       = defaultBatchFactor
-	BlockPage         = uint64(blockPage)
+	BlockPage         = DefaultBlockPage
 	BlockPageSnapshot = uint64(blockPageSnapshot)
 )
 
