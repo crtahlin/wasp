@@ -234,9 +234,12 @@ chunks at a time, `pusher.ConcurrentPushes`), that runs the chunk's attempts:
   sentinel, `pusher.ErrBatchGone`, when the batch does not exist, instead of
   nil. It is deliberately not `postage.ErrNotFound`: the handlers map that
   error to 404 "batch with id not found" when the putter is created
-  (`bytes.go:90`, `bzz.go:124`), which means "you named a batch this node does
-  not know". `ErrBatchGone` means the batch existed when the upload started
-  and has gone since, and the handlers map it to 422. The `bee` path is left
+  (`bytes.go:90-91`, `bzz.go:122-125`), and it comes from `GetStampIssuer`
+  when this node has no stamp issuer for the batch at all. A batch this node
+  owns but that has already gone from the batch store when the upload starts
+  answers 422 today, through `errBatchUnusable` (`api.go:853-866`).
+  `ErrBatchGone` means the batch was there when the upload started and has
+  gone since, and the handlers map it to 422 as well. The `bee` path is left
   as it is.
 
 A chunk that uses up its budget is written to the failed-chunk store
@@ -267,7 +270,7 @@ Failed chunks are kept in the index store, in a new namespace,
 | key | tag ID, the chunk's identity address (`storage.IdentityAddress`), so that two single-owner chunks with the same address and different contents stay apart |
 | `Data` | the chunk's data with its span: at most 4,104 bytes for a content-addressed chunk, 4,201 for a single-owner chunk (`swarm.SocMaxChunkSize`) |
 | `Stamp` | the stamp the chunk was last pushed with (113 bytes marshalled) |
-| `Reason` | the last error class: `no-push`, `no-peers`, `shallow`, `in-flight`, `unconfirmed`, `other`; for record-only entries (below) `batch-gone` |
+| `Reason` | the last error class: `no-push`, `no-peers`, `shallow`, `in-flight`, `unconfirmed`, `other`; for records (below) also `batch-gone`, `expired` and `stamp-superseded` |
 | `Attempts` | attempts made so far, inline and in retries |
 | `LastAttempt` | Unix time of the last attempt |
 
@@ -314,31 +317,39 @@ nothing releases.
   store is stale, a batch that is merely not synced yet would look gone, and
   the sweep would delete chunks that can still be delivered. At start the
   sweep therefore waits until the listener has caught up once.
-- **A retry re-stamps the chunk, when that is safe.** The stored stamp cannot be trusted at
-  retry time: if the same chunk is stamped again with the same batch in the
-  meantime (a re-upload, or another upload with the same content), the
-  stamper keeps the chunk's index but writes a newer timestamp
-  (`stamper.go:47-56`), and every node that holds the newer stamp refuses the
-  older one with `ErrOverwriteNewerChunk` (`reserve.go:161-165`). A retry with
-  the stored stamp could then never succeed. So every retry, in the final pass
-  and through `POST /tags/{id}/retry`, stamps the chunk again through the
-  batch's stamp issuer (same index, so no new postage slot, and a current
-  timestamp) and stores the new stamp in the entry. A re-stamp of a chunk
-  whose stamp item exists changes no issuer counter, so no save is needed
-  after a round; if the stamp item is missing, a re-stamp would take a new
-  slot, so the retry refuses it and keeps the stored stamp. A retry needs the
-  batch to be usable; otherwise it answers 422.
-  **Mutable batches whose bucket has wrapped.** In a mutable batch, a full
-  bucket starts again at index 0 (`stampissuer.go:186-193`), so the index of
-  a failed chunk may since have been given to another chunk. Re-stamping the
-  failed chunk with a newer timestamp would then replace that other chunk at
-  every node that holds it. The retry therefore re-stamps on a mutable batch
-  only while the issuer's `MaxBucketCount` is below `BucketUpperBound()`,
-  which means no bucket has ever been full and so none has wrapped. Otherwise
-  it pushes with the stored stamp; if that is refused the entry keeps reason
-  `other`, and the client uploads the chunk again, which assigns a fresh
-  index. The rule is conservative: it also refuses when only another bucket
-  was ever full, because the issuer keeps no per-bucket history.
+- **Stamps at retry time.** The stored stamp can go stale: if the same chunk
+  is stamped again with the same batch in the meantime (a re-upload, or
+  another upload with the same content), the stamper keeps the chunk's index
+  but writes a newer timestamp (`stamper.go:47-56`), and every node that holds
+  the newer stamp refuses the older one with `ErrOverwriteNewerChunk`
+  (`reserve.go:161-165`). What a retry does depends on the batch:
+  - **Immutable batch: re-stamp.** The retry, in the final pass and through
+    `POST /tags/{id}/retry`, stamps the chunk again through the batch's stamp
+    issuer (same index, so no new postage slot, and a current timestamp) and
+    stores the new stamp in the entry. An immutable bucket never wraps (a full
+    one answers `ErrBucketFull`, `stampissuer.go:186-193`), and dilution only
+    raises the bound, so the index still belongs to this chunk. A re-stamp of
+    a chunk whose stamp item exists changes no issuer counter; if the stamp
+    item is missing, a re-stamp would take a new slot, so the retry refuses
+    it and keeps the stored stamp.
+  - **Mutable batch: no re-stamp in phase 1.** A full mutable bucket starts
+    again at index 0, so the failed chunk's index may since belong to another
+    chunk, and a newer stamp would replace that chunk at every node that
+    holds it. No rule from the issuer's existing data detects this safely:
+    `MaxBucketCount` never falls, but dilution (`HandleDepthIncrease`,
+    `postage/service.go:198-209`) doubles `BucketUpperBound()`
+    (`stampissuer.go:263-265`), so a bucket that wrapped before a dilution
+    looks as if it never had. A persistent "has wrapped" flag in the issuer
+    would work, but it changes the issuer's stored data for every batch, so it
+    is left for a later phase if the bench shows the need. The retry
+    therefore pushes with the stored stamp. Before each push it compares the
+    stored stamp with this node's own stamp item for the chunk: if the item
+    has a newer timestamp, the node itself stamped the chunk again since, the
+    stored stamp would be refused, and the retry does not push. The entry
+    becomes a record with reason `stamp-superseded`; the newer stamp came
+    from another upload of the same content, which pushed the chunk itself.
+    Any other refusal shows up as a failed attempt with its usual reason.
+  A retry needs the batch to be usable; otherwise it answers 422.
   For a chunk that arrived with its own stamp (`POST /chunks` or
   `POST /soc` with `Swarm-Postage-Stamp`) the node cannot sign a new stamp; the
   retry uses the stored one, and if a node refuses it the entry keeps reason
@@ -351,12 +362,18 @@ When the body is read and the reference is known, `Done(ref)`:
 1. waits for every chunk goroutine to finish (each is bounded by its budget);
 2. if the failed set is empty, finishes as today;
 3. otherwise **saves the stamp issuer first**. Today `putterSessionWrapper.Done`
-   saves it only after the session's `Done` returns (`api.go:845-847`), which
-   would be up to 30 minutes later; a crash in between would lose the
-   issuer's counters for every chunk of the upload, and the node would then
-   hand out the same indexes again. The new session takes the save function
-   and calls it before the final pass. The final pass changes no issuer
-   counter (section 3), so this one save is enough;
+   calls the save only after the session's `Done` returns (`api.go:845-847`),
+   which would be up to 30 minutes later. The save does not write anything
+   itself: it marks the issuer dirty (`postage/service.go:242-245`), and the
+   postage service writes dirty issuers every minute and when it closes.
+   After an unclean stop the service rebuilds the counts from the stamp items
+   at start (`service.go:95-127`), so a crash is already covered. The risk is
+   a **clean** shutdown during the final pass: the issuer was never marked
+   dirty, the service does not write it on close, and the next start sees no
+   reason to rebuild, so the counts of the upload's stamps are lost and the
+   node would hand out the same indexes again. The new session therefore
+   calls the save before the final pass. The final pass changes no issuer
+   counter (section 3), so this one call is enough;
 4. then runs the **final pass**: rounds over the failed set, one attempt
    per chunk per round, 128 at a time. A chunk is tried again only when its
    last attempt is at least 5 minutes old, the push-sync skip-list duration,
@@ -554,7 +571,10 @@ tag whose failed set holds only records. The hourly sweep therefore deletes a
 tag only when `AutoCreated` is set and either its failed set is empty and it
 has not changed for 24 hours, or its failed set holds no entry with data and
 it has not changed for 30 days. A tag the client created is never deleted by
-the node; its entries with data still age out after 7 days.
+the node, and neither are its records: they stay until the client deletes the
+tag. They are small (an address, a reason and two numbers, at most 10,000
+`batch-gone` records per tag), and deleting a client's evidence without being
+asked would be worse. Its entries with data still age out after 7 days.
 
 ### 7. The pusher and deferred uploads
 
@@ -664,8 +684,8 @@ beside `Report`, so the existing `ChunkState` values keep their meaning.
 |---|---|---|
 | `POST /bytes`, `POST /bzz` | 201 | As today, plus `Swarm-Failed-Chunks`, `Swarm-Shallow-Chunks` and, if a chunk ever failed, `Swarm-Tag`. |
 | | 400 | Unknown `Swarm-Upload-Failure-Policy` value. |
-| | 404 | As today: the named batch is unknown when the upload starts (`postage.ErrNotFound`). |
-| | 422 | As today: the batch is not usable when the upload starts. New case: the batch existed at the start and has gone since (`pusher.ErrBatchGone`). |
+| | 404 | As today: this node has no stamp issuer for the named batch (`postage.ErrNotFound`). |
+| | 422 | As today: the batch is owned but not usable, or already gone from the batch store, when the upload starts (`errBatchUnusable`). New case: the batch was there at the start and has gone since (`pusher.ErrBatchGone`). |
 | | 500 | `retry-at-end` ended with failed chunks: `UploadIncompleteResponse` with `reference`. |
 | | 502 | `fail-fast` stopped, or the breaker stopped a `retry-at-end` upload while the body was still being read: `UploadIncompleteResponse` without `reference`. |
 | | 507 | The failed-chunk store is full. |
@@ -755,13 +775,25 @@ message, not a hang (`experiment-lifecycle.md`, "Mutation checks").
 - **Tags:** the four fields, the derived `state`, and an older tag with no
   failure item reads as zeros. A `fail-fast` tag reads `failed`, not
   `uploading`. Mutation: drop the stored outcome.
-- **Stale stamp:** a fake holder that refuses a stamp older than the newest
-  one it has seen for the chunk's index (as `reserve.Put` does). The chunk
-  fails, is stamped again by a second upload with the same batch, and the
-  retry then succeeds and stores the new stamp in the entry; the issuer is
-  saved before the final pass starts. Mutations: retry with the stored stamp;
-  save the issuer only at the end (checked by stopping the session in the
-  final pass and reading the saved issuer).
+- **Stale stamp, immutable batch:** a fake holder that refuses a stamp older
+  than the newest one it has seen for the chunk's index (as `reserve.Put`
+  does). The chunk fails, is stamped again by a second upload with the same
+  batch, and the retry then succeeds and stores the new stamp in the entry.
+  Mutation: retry with the stored stamp.
+- **Stale stamp, mutable batch:** the same sequence on a mutable batch: the
+  retry does not re-stamp and does not push, and the entry becomes a record
+  with reason `stamp-superseded`. Mutation: re-stamp on mutable batches.
+- **Dilution after a wrap:** a mutable batch whose chunk's bucket has wrapped,
+  so its index now belongs to a second chunk B, then a depth increase through
+  `HandleDepthIncrease`. A retry of the first chunk issues no stamp at all
+  (the issuer's stamp count and B's stamp item are unchanged) and pushes only
+  with the stored stamp. Mutation: re-stamp when
+  `MaxBucketCount < BucketUpperBound()`, the rule this replaces; the test must
+  fail on it.
+- **Issuer save before the final pass:** stop the postage service cleanly
+  while a final pass runs, then open it again: the issuer's bucket counts
+  include the upload's stamps. Mutation: call the save only after the final
+  pass; the reopened issuer then lacks the counts and the test fails.
 - **Data age-out:** an entry with data whose last attempt is 7 days old
   (injected clock) loses its data and stamp and stays as a record with reason
   `expired`; the bound counts it no longer; a retry before that moves the last
@@ -791,11 +823,9 @@ message, not a hang (`experiment-lifecycle.md`, "Mutation checks").
   `POST /retry` for the same tag answers 409; a fifth tag reads `queued` with
   `retrying: 0`, and its duration counts from when its run starts. Mutations:
   no per-tag guard; no limit; count the duration from queue time.
-- **Re-stamp safety:** on a mutable batch whose issuer has
-  `MaxBucketCount == BucketUpperBound()`, the retry does not re-stamp and
-  pushes the stored stamp; on an immutable batch, and on a mutable one below
-  the bound, it re-stamps with the same index; a chunk with no stamp item is
-  not re-stamped. Mutations: re-stamp regardless of the bucket; re-stamp
+- **Re-stamp safety:** on an immutable batch the retry re-stamps with the
+  same index; on a mutable batch it never re-stamps; a chunk with no stamp
+  item is not re-stamped. Mutations: re-stamp on a mutable batch; re-stamp
   when the stamp item is missing (the issuer counter then grows).
 - **`ErrWantSelf` (problem 7):** a fake push syncer that answers
   `ErrWantSelf`: a chunk outside the committed depth is not stored and counts
@@ -834,14 +864,20 @@ can be repeated exactly:
 - `mode=shallow`: it returns `ErrShallowReceipt`;
 - `mode=notfound`: it returns `topology.ErrNotFound`;
 - `fraction=<f>` or `count=<n>`: which chunks;
+- `po-below=<p>` or `po-from=<p>`: only chunks whose proximity order to the
+  node's overlay address is below p, or p and above. Combined with `count`,
+  the first n such chunks of the file. A9 uses it to fault chunks on both
+  sides of the overridden depth;
 - `fail-attempts=<k>`: fail only the first k attempts of a chunk, then pass
   it through (a transient fault); without it, the fault is permanent;
 - `until=<duration>`: no faults after this time from start (a fault that
   ends, for the retry endpoint);
 - `mode=wantself`: it returns `topology.ErrWantSelf`, to exercise problem 7
   on the bench node, which runs as a full node;
-- `depth=<d>`: the pusher's `CommittedDepth()` returns d instead of the
-  node's own value. The throwaway node has a fresh reserve, so its radius and
+- `depth=<d>`: in a `faultinject` build, `pkg/node` wraps the storer it
+  passes to `pusher.New` in a `pusher.Storer` whose `CommittedDepth()` returns
+  d; every other method passes through to the real storer. Release builds
+  pass the storer unwrapped. The throwaway node has a fresh reserve, so its radius and
   committed depth are 0 and every chunk is inside them; A9 needs a depth above
   0 to have chunks outside it. The real depth is read from the node's status
   before the run and recorded with the override.
@@ -876,7 +912,7 @@ can be repeated exactly:
 | A6 shallow | `retry-at-end`, shallow policy `accept`, then `fail` | 50 chunks, `shallow`, permanent | `accept`: 201 and `shallow: 50`; `fail`: 500 and `failed: 50`. |
 | A7 no peers | `retry-at-end` | every chunk, `notfound`, for 2 minutes | The upload does not wait forever: it ends, with 201 if `until` falls before the final pass ends, otherwise with 500 and the failed set. |
 | A8 deferred give-up | deferred, `deferred-upload-give-up-after: 10m` | 50 chunks, `nopush`, permanent | Tag `state: failed`, `failed: 50` after 10 to 15 minutes; with the setting at 0 the same run still retries after 30 minutes (control). |
-| A9 want-self | `retry-at-end`, fault `depth=8` | `wantself` on 50 chunks with proximity to the node below 8, and on 50 with proximity 8 or more, permanent | Recorded: the node's real committed depth (expected 0) and the override 8. The 50 outside: 500 with `failed: 50` and `bee_pusher_want_self_refused_total` up by 50; the 50 inside: counted as `stored`, as in Bee. Control without the override (depth 0): all 100 counted as `stored`, today's behaviour. Under `bee` with the override: 201, today's false success, recorded as the baseline. |
+| A9 want-self | `retry-at-end`, fault `depth=8` | `wantself`, permanent, on `count=50,po-below=8` and on `count=50,po-from=8` | Recorded: the node's real committed depth (expected 0) and the override 8. The 50 outside: 500 with `failed: 50` and `bee_pusher_want_self_refused_total` up by 50; the 50 inside: counted as `stored`, as in Bee. Control without the override (depth 0): all 100 counted as `stored`, today's behaviour. Under `bee` with the override: 201, today's false success, recorded as the baseline. |
 | A10 breaker | `retry-at-end` | every chunk, `nopush`, permanent, from 10 percent of the body on | 502 between 5 and 7 minutes after the fault starts, before the body is fully read, with the tag and a failed set of records only; `bee_storer_direct_upload_breaker_total` grows by 1. A second run with 50 chunks faulted permanently and all others delivered, so that only the final pass has rounds with no success at all: 500 with the reference after the full final pass, the breaker counter unchanged. |
 | A11 restart | `retry-at-end` | 50 chunks, `nopush`, permanent | Restart the throwaway node during the final pass: after the restart the tag shows `failed: 50`, `retrying: 0`, `state: failed`; after `until`, `POST /tags/{id}/retry` completes the upload. |
 
@@ -962,7 +998,7 @@ In *Behaviour that differs with no configuration*:
 | Direct upload with no suitable peer | "No peers" is retried without limit, so the upload can wait forever. | Counts against the chunk's 6 attempts. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | Direct upload tags | A direct upload has no tag. | A direct upload has a tag while it runs; it is kept and returned when any chunk failed. Node-created tags with nothing failed are deleted after 24 hours without change, those with records only after 30 days. Kept chunk data ages out after 7 days without a retry. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | `DELETE /tags/{id}` | Deletes the tag. | Also deletes the tag's failed set, including any kept chunk data, and its failure item. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
-| Direct upload whose batch goes away during the upload | Reported as success without pushing (to be confirmed by the phase-1 test). | 422 "batch not usable"; a batch unknown at the start is still 404, as in Bee. | `main` | to be decided by the test | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Direct upload whose batch goes away during the upload | Reported as success without pushing (to be confirmed by the phase-1 test). | 422 "batch not usable", the same answer Bee gives for an owned batch that is already gone at the start; 404 still means no stamp issuer for the batch, as in Bee. | `main` | to be decided by the test | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | Direct upload of a chunk already in flight | Reported as delivered at once to a second upload. | The second upload waits for its own result, at most 60 s before the wait counts as attempts. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | Direct upload on a full node with every peer skipped | The chunk is stored in the node's own reserve and counted as stored, whatever its distance. | Stored only when within the node's committed depth; otherwise a failed attempt. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | Six shallow receipts | The chunk is counted as synced; nothing reports it. | Still counted as synced by default, and now counted in the tag's `shallow` field and a metric. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
@@ -982,7 +1018,7 @@ In *API endpoints wasp adds*:
 | Endpoint | What it does | In wasp | Record |
 |---|---|---|---|
 | `GET /tags/{id}/failed` | Lists the chunks of an upload that were not delivered, with the reason and the attempts. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
-| `POST /tags/{id}/retry` | Pushes only the undelivered chunks of an upload again, in the background, re-stamped with the same batch. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| `POST /tags/{id}/retry` | Pushes only the undelivered chunks of an upload again, in the background; on an immutable batch they are re-stamped with the same index, on a mutable batch the stored stamp is used. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | Header `Swarm-Upload-Failure-Policy` on `POST /bytes`, `POST /bzz`, `POST /chunks`, `POST /soc` | Selects the failure policy for one upload. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | Response headers `Swarm-Failed-Chunks`, `Swarm-Shallow-Chunks`; status codes 500 with `reference` and `tag`, 502, 507 | Report the outcome of a direct upload. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | Tag fields `failed`, `retrying`, `shallow`, `state` | Report undelivered, retried and shallow-only chunks and the upload's state. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
