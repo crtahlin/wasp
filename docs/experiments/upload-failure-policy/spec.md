@@ -677,7 +677,47 @@ message, not a hang (`experiment-lifecycle.md`, "Mutation checks").
 - **Deferred give-up:** at 0 nothing gives up; above 0 a failing chunk older
   than the setting moves to the failed set and the tag says `failed`.
 - **Tags:** the four fields, the derived `state`, and an older tag with no
-  failure item reads as zeros.
+  failure item reads as zeros. A `fail-fast` tag reads `failed`, not
+  `uploading`. Mutation: drop the stored outcome.
+- **Stale stamp:** a fake holder that refuses a stamp older than the newest
+  one it has seen for the chunk's index (as `reserve.Put` does). The chunk
+  fails, is stamped again by a second upload with the same batch, and the
+  retry then succeeds and stores the new stamp in the entry; the issuer is
+  saved before the final pass starts. Mutations: retry with the stored stamp;
+  save the issuer only at the end (checked by stopping the session in the
+  final pass and reading the saved issuer).
+- **Sweep:** with the listener caught up, entries with data whose batch is
+  gone are removed; while it is stale nothing is removed, and the start-up
+  sweep waits for the first catch-up; record-only `batch-gone` entries are
+  never removed by the sweep and do not count toward the bound; an
+  auto-created tag with an empty failed set is removed after 24 hours without
+  change, and a client's tag never. Mutations: run the sweep ungated; count
+  record-only entries toward the bound; delete client tags.
+- **Restart:** stop the storer during a final pass and open it again: the
+  failed set and the counters are there, `retrying` is 0, the outcome is
+  `failed`, and `POST /tags/{id}/retry` completes the upload. Mutation: skip
+  the reset of `retrying`.
+- **Shutdown:** closing the storer during a retry returns within one attempt
+  time, and no retry-service goroutine is left (checked with a goroutine
+  leak check). Mutation: run the retry under `context.Background()`.
+- **Retry service:** at most one retry per tag and 4 tags at a time; a second
+  `POST /retry` for the same tag answers 409. Mutations: no per-tag guard; no
+  limit.
+- **`ErrWantSelf` (problem 7):** a fake push syncer that answers
+  `ErrWantSelf`: a chunk outside the committed depth is not stored and counts
+  as a failed attempt; one inside it is stored and counted as `stored`.
+  Mutation: store whatever the depth.
+- **In-flight bound:** a chunk that stays in flight in another session
+  ends within its budget after 60 s plus its attempts, with reason
+  `in-flight`. Mutation: never count `ErrInFlight`.
+- **Breaker:** with every push failing, a `retry-at-end` upload stops after
+  5 minutes without a success (injected clock) with 502; one success resets
+  the timer. Mutations: no breaker; a success does not reset it.
+- **Per endpoint:** `POST /chunks` and `POST /soc` run no final pass and
+  answer within the inline budget; `GET /chunks/stream` uses `DirectUpload()`
+  under every policy. Mutation: route the stream to the new session.
+- **Final-pass metric:** the recovered and still-failed counts equal the
+  chunks that left and stayed in the failed set.
 - `-race` on `pkg/storer`, `pkg/pusher` and `pkg/api`.
 
 ### Bench (after merge, before the result is recorded)
@@ -700,41 +740,64 @@ can be repeated exactly:
 - `fail-attempts=<k>`: fail only the first k attempts of a chunk, then pass
   it through (a transient fault); without it, the fault is permanent;
 - `until=<duration>`: no faults after this time from start (a fault that
-  ends, for the retry endpoint).
+  ends, for the retry endpoint);
+- `mode=wantself`: it returns `topology.ErrWantSelf`, to exercise problem 7
+  on the bench node, which runs as a full node.
 
 **Arms.** File sizes: 256 MiB (65,536 data chunks) for the functional arms,
-2 GiB for the timing arms. Three runs per condition. Every upload is checked
-afterwards with `GET /stewardship/{ref}` and a download compared by checksum,
-because a 201 alone is not proof.
+2 GiB for the timing arms. Three runs per condition.
+
+- **A fresh file for every run.** Each run uploads a new file made from a
+  random seed that is recorded with the run. A file uploaded before is
+  already on the network, so "retrievable, checksum equal" would pass even if
+  the retry pushed nothing.
+- **The expected reference is computed without uploading.** A harness helper
+  built from the same commit runs the file through the same pipeline
+  (`builder.NewPipelineBuilder`, same redundancy level, no encryption) with a
+  putter that discards the chunks, and records the reference before the
+  upload starts. A3's reference check compares with that, not with a second
+  upload.
+- **The faulted chunks are named in advance.** The harness computes which
+  chunk addresses the fault selects from the same hash rule, so "exactly
+  those 50 addresses" is compared with a list made before the run.
+- Every upload is checked afterwards with `GET /stewardship/{ref}` and a
+  download compared by checksum, because a 201 alone is not proof.
+- The final-pass metric of section 9 is read before and after each run.
 
 | Arm | Policy | Fault | Pass rule (fixed now) |
 |---|---|---|---|
 | A1 control | `bee` | 50 chunks, `nopush`, permanent | 500 `done split failed` after the whole body, no reference, no tag: today's behaviour reproduced. |
-| A2 transient | `retry-at-end` | 0.1 percent, `nopush`, `fail-attempts=8` | 201 in every run; `failed: 0`; at least one chunk recovered in the final pass (log and tag show `retrying` above 0 during the run); content retrievable and checksum equal. |
-| A3 permanent, then resumed | `retry-at-end`, `upload-final-retry-duration: 10m` | 50 chunks, `nopush`, `until` after the final pass | 500 with the reference of a fault-free upload of the same file, the tag, and `failed: 50`; `GET /tags/{id}/failed` lists exactly those 50 addresses; after `until`, `POST /tags/{id}/retry` gives `state: done`; then retrievable and checksum equal. |
+| A2 transient | `retry-at-end` | 0.1 percent, `nopush`, `fail-attempts=8` | 201 in every run; `failed: 0`; the final-pass metric's `recovered` grows by exactly the number of faulted chunks; content retrievable and checksum equal. |
+| A3 permanent, then resumed | `retry-at-end`, `upload-final-retry-duration: 10m` | 50 chunks, `nopush`, `until` after the final pass | 500 with the reference computed offline, the tag, and `failed: 50`; `GET /tags/{id}/failed` lists exactly the 50 addresses named in advance; before the retry, `GET /stewardship/{ref}` answers `false`; after `until`, `POST /tags/{id}/retry` gives `state: done` and `recovered` grows by 50; then retrievable and checksum equal. |
 | A4 fail-fast | `fail-fast` | from 10 percent of the body on, every chunk, `nopush` | Answer (502) within 10 s of the node's first "budget used up" log line in every run; the request ends before 25 percent of the body is sent; tested with curl and with a Go `net/http` client, and the result for each client recorded. |
 | A5 overhead | `retry-at-end` against `bee`, alternating | none | Median upload time of `retry-at-end` within the run spread of `bee`, and at most 5 percent above it. |
 | A6 shallow | `retry-at-end`, shallow policy `accept`, then `fail` | 50 chunks, `shallow`, permanent | `accept`: 201 and `shallow: 50`; `fail`: 500 and `failed: 50`. |
 | A7 no peers | `retry-at-end` | every chunk, `notfound`, for 2 minutes | The upload does not wait forever: it ends, with 201 if `until` falls before the final pass ends, otherwise with 500 and the failed set. |
 | A8 deferred give-up | deferred, `deferred-upload-give-up-after: 10m` | 50 chunks, `nopush`, permanent | Tag `state: failed`, `failed: 50` after 10 to 15 minutes; with the setting at 0 the same run still retries after 30 minutes (control). |
+| A9 want-self | `retry-at-end` | 50 chunks outside the node's committed depth, `wantself`, permanent | 500 with `failed: 50`, `bee_pusher_want_self_refused_total` grows, and none of the 50 is counted as `stored`; under `bee` the same run answers 201 (today's false success, recorded as the baseline). |
+| A10 breaker | `retry-at-end` | every chunk, `nopush`, permanent, from 10 percent of the body on | 502 between 5 and 7 minutes after the fault starts, with the tag and the failed set; `bee_storer_direct_upload_breaker_total` grows by 1. |
+| A11 restart | `retry-at-end` | 50 chunks, `nopush`, permanent | Restart the throwaway node during the final pass: after the restart the tag shows `failed: 50`, `retrying: 0`, `state: failed`; after `until`, `POST /tags/{id}/retry` completes the upload. |
 
 **A negative result** is any of: an arm that misses its pass rule; overhead
 above 5 percent; a client in A4 that never learns the outcome even through
-the tag; a reference in A3 that differs from the fault-free one.
+the tag; a reference in A3 that differs from the one computed offline.
 
 **What the bench does not show.** Injected faults show that the mechanism
 works. They do not show that real failures are transient enough for the final
 pass to recover them, which is the hypothesis behind the 30-minute default.
-That needs counts from real uploads: final-pass recoveries against chunks
-still failed, per upload. Collecting them on a production node is the
-operator's decision and not part of this spec's pass rules.
+That needs the final-pass metric from real uploads: recovered against still
+failed, per upload. Whether to collect it on a production node is decided by
+the operator after the bench results (operator decision, 2026-10-18), and is
+not part of this spec's pass rules.
 
 ## Rollout and rollback
 
-- **On upgrade**, direct uploads use `retry-at-end`. An upload with no
+- **On upgrade**, direct uploads to `POST /bytes`, `POST /bzz`,
+  `POST /chunks` and `POST /soc` use `retry-at-end`. An upload with no
   failure behaves as before, apart from a tag that exists while it runs, the
-  two new response headers, and a 422 instead of a false 201 when the batch is
-  missing.
+  two new response headers, a 422 instead of a false 201 when the batch is
+  missing, and a failed attempt instead of a false "stored" for a chunk
+  outside the node's depth.
 - **Back to Bee's behaviour without a rollback:** set
   `upload-failure-policy: bee`, or send the header per request.
 - **Binary rollback:** the previous build ignores the new namespaces
@@ -742,13 +805,20 @@ operator's decision and not part of this spec's pass rules.
   so no migration either way. Failed sets left in the index store are not
   removed by the older build; delete the tags with failures
   (`DELETE /tags/{id}`) before a rollback to reclaim that space, at most about
-  1.1 GB.
+  1.2 GB.
 
 ## Upstream portability
 
-The files this changes are unchanged from Bee v2.8.2, so
-`scripts/export-patch.sh` should replay the series onto upstream with no
-conflict. Ethersphere would need to accept three things: a direct upload
+Most of the files this changes are unchanged from Bee v2.8.2
+(`pkg/storer/netstore.go`, `pkg/pusher`, `pkg/api/bytes.go`, `pkg/api/tag.go`,
+`pkg/storer/internal/upload`). Others carry wasp changes: `pkg/api/api.go`
+(101 changed lines against v2.8.2), `pkg/api/bzz.go` (43), `pkg/api/chunk.go`
+(17), `pkg/api/router.go` (45) and `pkg/pushsync/pushsync.go` (49, the
+committed-depth rule this spec relies on in section 2). So
+`scripts/export-patch.sh` will need conflicts resolved in those files, and
+the `ErrWantSelf` check would use upstream's own rule: its push-sync handler
+decides on the storage radius, not on wasp's committed depth. Ethersphere would
+need to accept three things: a direct upload
 that keeps going after a chunk fails (a change in what the API promises), a
 small local store for failed chunks, and new tag fields and endpoints. The
 fix for a missing batch in `pushDirect` (problem 5) is a separate one-line
@@ -764,14 +834,16 @@ two keep Bee's behaviour as their default.
 
 | Setting | Default | Raising or enabling it | Lowering or disabling it |
 |---|---|---|---|
-| `upload-failure-policy` | `retry-at-end` (operator decision, 2026-10-18) | `fail-fast`: the client learns about a failure within seconds; nothing completes after a failure, and the client re-sends the body (no new postage with the same batch). | `bee`: Bee's behaviour, with problems 1 to 6. |
+| `upload-failure-policy` | `retry-at-end` (operator decision, 2026-10-18) | `fail-fast`: the client learns about a failure within seconds; nothing completes after a failure, and the client re-sends the body (no new postage with the same batch). | `bee`: Bee's behaviour, with problems 1 to 7. |
 | `upload-final-retry-duration` | 30 minutes, 6 rounds at the 5-minute skip-list interval | More chunks recovered, if failures are transient; the request is held longer; up to one more push per failed chunk every 5 minutes, which peers serve and this node pays for. | Fewer recovered; the client gets the failed set sooner. 0 skips the final pass. Other nodes pay less. |
 | `upload-shallow-receipt-policy` | `accept`, as Bee | `fail`: shallow-only chunks are reported and kept for retry instead of counted as synced; an upload in an area with many shallow receipts may end with failures where Bee reports success. | Not applicable. |
 | `deferred-upload-give-up-after` | 0, never give up, as Bee | A deferred upload ends with a definite outcome; a chunk that would have succeeded after that time is moved to the failed set and needs a retry. Peers stop receiving endless pushes of chunks that do not land. | 0: Bee's endless retry. |
 
 Not settings in phase 1, because nothing is measured yet: 6 attempts per
-chunk, the 1 to 16 s backoff, the 5-minute spacing of the final pass, and the
-262,144-chunk failed store. Each becomes a setting only after a measurement
+chunk, the 1 to 16 s backoff, the 60 s in-flight allowance, the 5-minute
+spacing of the final pass, the 5-minute breaker, 4 concurrent retries, the
+262,144-entry failed store, 10,000 record-only entries per tag, and the
+24-hour tag sweep. Each becomes a setting only after a measurement
 shows it matters, in its own issue.
 
 ## `docs/DIFFERENCES.md` rows this adds
@@ -780,25 +852,37 @@ In *Behaviour that differs with no configuration*:
 
 | Area | Bee v2.8.2 | wasp | In wasp | Bee defect | Record |
 |---|---|---|---|---|---|
-| Direct upload with a failing chunk | The first chunk that fails ends the upload, but the client hears it only after sending the whole body: 500, no reference, nothing kept. "No peers" is retried without limit. | Each chunk gets 6 attempts; failed chunks are kept and retried for up to 30 minutes after the body is read; a failure answer names the reference, the tag and the count, and `POST /tags/{id}/retry` finishes the upload. `upload-failure-policy: bee` restores Bee's behaviour. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
-| Direct upload tags | A direct upload has no tag. | A direct upload has a tag while it runs; it is kept and returned when any chunk failed. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Direct upload with a failing chunk | The first chunk that fails ends the upload, but the client hears it only after sending the whole body: 500, no reference, nothing kept. | On `POST /bytes` and `POST /bzz`, each chunk gets 6 attempts; failed chunks are kept and retried for up to 30 minutes after the body is read; a failure answer names the reference, the tag and the count, and `POST /tags/{id}/retry` finishes the upload. An upload with no success for 5 minutes stops with 502. `upload-failure-policy: bee` restores Bee's behaviour. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Single-chunk uploads that fail | `POST /chunks` and `POST /soc` answer 500 after the push fails. | 6 attempts, then 500 (or 502 under `fail-fast`) with the tag; the chunk is kept and `POST /tags/{id}/retry` can push it later. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Direct upload with no suitable peer | "No peers" is retried without limit, so the upload can wait forever. | Counts against the chunk's 6 attempts. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Direct upload tags | A direct upload has no tag. | A direct upload has a tag while it runs; it is kept and returned when any chunk failed. Node-created tags with nothing failed are deleted after 24 hours without change. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
 | Direct upload with a missing batch | Reported as success without pushing (to be confirmed by the phase-1 test). | 422 "batch not usable". | `main` | to be decided by the test | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Direct upload of a chunk already in flight | Reported as delivered at once to a second upload. | The second upload waits for its own result, at most 60 s before the wait counts as attempts. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Direct upload on a full node with every peer skipped | The chunk is stored in the node's own reserve and counted as stored, whatever its distance. | Stored only when within the node's committed depth; otherwise a failed attempt. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Six shallow receipts | The chunk is counted as synced; nothing reports it. | Still counted as synced by default, and now counted in the tag's `shallow` field and a metric. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Deferred chunk whose batch has gone | Dropped with a level-1 warning, counted nowhere. | Still dropped; counted in the tag's `failed` field, listed in the failed set, and warned at the default level. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
 
-In *Settings wasp adds*: one row each for `upload-failure-policy`,
-`upload-final-retry-duration`, `upload-shallow-receipt-policy` and
-`deferred-upload-give-up-after`, with the defaults and costs of the
-Configuration table.
+In *Settings wasp adds*:
+
+| Setting | Default | What it controls | In wasp | Record |
+|---|---|---|---|---|
+| `upload-failure-policy` | `retry-at-end`, by operator decision; `bee` is Bee's behaviour. | What a direct upload does when a chunk uses up its attempts: retry the failed chunks after the body (`retry-at-end`), stop at once (`fail-fast`), or Bee's path (`bee`). The request header `Swarm-Upload-Failure-Policy` overrides it. Costs as in the spec's Configuration table. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| `upload-final-retry-duration` | 30 minutes. 0 skips the final pass. | How long `retry-at-end` and `POST /tags/{id}/retry` retry failed chunks. Raising it holds requests longer and sends more pushes, which peers serve and this node pays for. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| `upload-shallow-receipt-policy` | `accept`, as in Bee. | Whether a chunk that only ever gets shallow receipts counts as synced (`accept`) or failed (`fail`). | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| `deferred-upload-give-up-after` | 0, never, as in Bee. | After how long a deferred chunk that keeps failing moves to the failed set instead of being retried forever. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
 
 In *API endpoints wasp adds*:
 
 | Endpoint | What it does | In wasp | Record |
 |---|---|---|---|
 | `GET /tags/{id}/failed` | Lists the chunks of an upload that were not delivered, with the reason and the attempts. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
-| `POST /tags/{id}/retry` | Pushes only the undelivered chunks of an upload again, in the background. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| `POST /tags/{id}/retry` | Pushes only the undelivered chunks of an upload again, in the background, re-stamped with the same batch. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Header `Swarm-Upload-Failure-Policy` on `POST /bytes`, `POST /bzz`, `POST /chunks`, `POST /soc` | Selects the failure policy for one upload. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Response headers `Swarm-Failed-Chunks`, `Swarm-Shallow-Chunks`; status codes 500 with `reference` and `tag`, 502, 507 | Report the outcome of a direct upload. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
+| Tag fields `failed`, `retrying`, `shallow`, `state` | Report undelivered, retried and shallow-only chunks and the upload's state. | `main` | [#806](https://github.com/crtahlin/wasp/issues/806) |
 
-Plus, in the same table or beside it, the header
-`Swarm-Upload-Failure-Policy`, the response headers `Swarm-Failed-Chunks` and
-`Swarm-Shallow-Chunks`, and the tag fields `failed`, `retrying`, `shallow`
-and `state`.
+In *Metrics and log lines*:
 
-In *Metrics and log lines*: the four metrics and two warnings of section 8.
+| Change | In wasp | Bee defect | Record |
+|---|---|---|---|
+| Adds `bee_storer_direct_upload_attempts_total`, `bee_storer_direct_upload_final_pass_chunks_total`, `bee_storer_direct_upload_breaker_total`, `bee_storer_failed_chunks`, `bee_pusher_shallow_accepted_total`, `bee_pusher_want_self_refused_total` and `bee_pusher_deferred_given_up_total`; warnings when an upload ends with failed chunks, when the breaker stops one, and when the failed-chunk store is full; the warning for a deferred chunk whose batch has gone moves from level 1 to the default level. | `main` | | [#806](https://github.com/crtahlin/wasp/issues/806) |
