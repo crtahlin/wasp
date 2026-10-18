@@ -14,6 +14,7 @@ import (
 	btcecdsa "github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+
 	"github.com/ethersphere/bee/v2/pkg/crypto/eip712"
 )
 
@@ -43,26 +44,17 @@ func hashWithEthereumPrefix(data []byte) ([]byte, error) {
 }
 
 // Recover verifies signature with the data base provided.
-// It is using `btcec.RecoverCompact` function.
+// The recovery itself is recoverHash, which uses libsecp256k1 in cgo builds
+// and decred's `RecoverCompact` otherwise, with identical results.
 func Recover(signature, data []byte) (*ecdsa.PublicKey, error) {
 	if len(signature) != 65 {
 		return nil, ErrInvalidLength
 	}
-	// Convert to btcec input format with 'recovery id' v at the beginning.
-	btcsig := make([]byte, 65)
-	btcsig[0] = signature[64]
-	copy(btcsig[1:], signature)
-
 	hash, err := hashWithEthereumPrefix(data)
 	if err != nil {
 		return nil, err
 	}
-
-	pbk, _, err := btcecdsa.RecoverCompact(btcsig, hash)
-	if err != nil {
-		return nil, err
-	}
-	return pbk.ToECDSA(), err
+	return recoverHash(signature, hash)
 }
 
 type defaultSigner struct {
@@ -156,11 +148,6 @@ func RecoverEIP712(signature []byte, data *eip712.TypedData) (*ecdsa.PublicKey, 
 	if len(signature) != 65 {
 		return nil, errors.New("invalid length")
 	}
-	// Convert to btcec input format with 'recovery id' v at the beginning.
-	btcsig := make([]byte, 65)
-	btcsig[0] = signature[64]
-	copy(btcsig[1:], signature)
-
 	rawData, err := eip712.EncodeForSigning(data)
 	if err != nil {
 		return nil, err
@@ -170,10 +157,5 @@ func RecoverEIP712(signature []byte, data *eip712.TypedData) (*ecdsa.PublicKey, 
 	if err != nil {
 		return nil, err
 	}
-
-	pbk, _, err := btcecdsa.RecoverCompact(btcsig, sighash)
-	if err != nil {
-		return nil, err
-	}
-	return pbk.ToECDSA(), err
+	return recoverHash(signature, sighash)
 }
