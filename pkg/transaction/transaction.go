@@ -193,6 +193,12 @@ type Service interface {
 	// WaitForReceipt waits until either the transaction with the given hash has been mined or the context is cancelled.
 	// This is only valid for transaction sent by this service.
 	WaitForReceipt(ctx context.Context, txHash common.Hash) (receipt *types.Receipt, err error)
+	// WaitForSentReceipt waits for the receipt of a transaction for which
+	// Send or SendWithHook returned txHash and sendErr. After a send error
+	// once the transaction was stored, the receipt decides, with a wait of
+	// at most AmbiguousPendingTimeout (#802). See the package function
+	// WaitForSentReceipt.
+	WaitForSentReceipt(ctx context.Context, txHash common.Hash, sendErr error) (*types.Receipt, error)
 	// WatchSentTransaction start watching the given transaction.
 	// This wraps the monitors watch function by loading the correct nonce from the store.
 	// This is only valid for transaction sent by this service.

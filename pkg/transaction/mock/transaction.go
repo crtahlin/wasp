@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
 )
 
@@ -84,6 +85,12 @@ func (m *transactionServiceMock) WaitForReceipt(ctx context.Context, txHash comm
 		return m.waitForReceipt(ctx, txHash)
 	}
 	return nil, errors.New("not implemented")
+}
+
+// WaitForSentReceipt applies transaction.WaitForSentReceipt to the mock's
+// WaitForReceipt and StoredTransaction functions.
+func (m *transactionServiceMock) WaitForSentReceipt(ctx context.Context, txHash common.Hash, sendErr error) (*types.Receipt, error) {
+	return transaction.WaitForSentReceipt(ctx, m, log.Noop, txHash, sendErr)
 }
 
 func (m *transactionServiceMock) WatchSentTransaction(txHash common.Hash) (<-chan types.Receipt, <-chan error, error) {
