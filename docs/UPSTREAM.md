@@ -146,6 +146,7 @@ whether upstream has the problem. See
 | [#783](https://github.com/crtahlin/wasp/issues/783) | storage incentives: an RPC endpoint that never answers blocks the commit for the whole phase; failover is never tried | done | `fix/783-bounded-lottery-rpc` | [`a27454ab`](https://github.com/crtahlin/wasp/commit/a27454ab) |
 | [#819](https://github.com/crtahlin/wasp/issues/819) | transaction: a non-lottery send goes to one RPC endpoint only; if it is never propagated, the node's later transactions (lottery commits included) are blocked | open | - | - |
 | [#821](https://github.com/crtahlin/wasp/issues/821) | transaction: CancelTransaction sends before it stores, so a crash can leave an untracked transaction at a nonce | open | - | - |
+| [#822](https://github.com/crtahlin/wasp/issues/822) | storer: a node with reserve-capacity doubling lowers its radius below its neighbourhood's depth, then flaps back | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
