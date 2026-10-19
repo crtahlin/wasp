@@ -55,7 +55,15 @@ type service struct {
 
 	radiusSubsMtx sync.Mutex
 	radiusC       []chan uint8
+
+	// depthMtx guards depth, the committed depths of the last pass, which
+	// the reserve worker reads through storer.DepthReporter (wasp #822).
+	depthMtx sync.Mutex
+	depth    storer.DepthReading
+	hasDepth bool
 }
+
+var _ storer.DepthReporter = (*service)(nil)
 
 func New(
 	status peerStatus,
@@ -185,7 +193,8 @@ func (s *service) salud(mode string, durPercentile float64, connsPercentile floa
 		return
 	}
 
-	networkRadius, nHoodRadius := s.committedDepth(peers)
+	depths := s.committedDepth(peers)
+	networkRadius, nHoodRadius := depths.Network, depths.Neighbourhood
 	avgDur := totaldur / float64(len(peers))
 	pDur := percentileDur(peers, durPercentile)
 	pConns := percentileConns(peers, connsPercentile)
@@ -210,6 +219,8 @@ func (s *service) salud(mode string, durPercentile float64, connsPercentile floa
 	s.metrics.PConns.Set(float64(pConns))
 	s.metrics.NetworkRadius.Set(float64(networkRadius))
 	s.metrics.NeighborhoodRadius.Set(float64(nHoodRadius))
+	s.metrics.NeighborhoodDepthPeers.Set(float64(depths.Neighbours))
+	s.metrics.NeighborhoodDepthAgreeing.Set(float64(depths.NeighboursAgreeing))
 	s.metrics.Commitment.Set(float64(commitment))
 
 	s.logger.Debug("computed", "avg_dur", avgDur, "pDur", pDur, "pConns", pConns, "network_radius", networkRadius, "neighborhood_radius", nHoodRadius, "batch_commitment", commitment, "neighborhood_peers", neighborhoodPeers)
@@ -251,7 +262,21 @@ func (s *service) salud(mode string, durPercentile float64, connsPercentile floa
 
 	s.isSelfHealthy.Store(selfHealth)
 
+	depths.At = time.Now()
+	s.depthMtx.Lock()
+	s.depth, s.hasDepth = depths, true
+	s.depthMtx.Unlock()
+
 	s.publishRadius(networkRadius)
+}
+
+// CommittedDepths returns the committed depths of the neighbours and of the
+// network as the last pass computed them, with the counts behind them. ok is
+// false before the first pass that had peers to ask (wasp #822).
+func (s *service) CommittedDepths() (storer.DepthReading, bool) {
+	s.depthMtx.Lock()
+	defer s.depthMtx.Unlock()
+	return s.depth, s.hasDepth
 }
 
 func (s *service) IsHealthy() bool {
@@ -312,12 +337,19 @@ func percentileConns(peers []peer, p float64) uint64 {
 	return peers[index].status.ConnectedPeers
 }
 
-// radius finds the most common radius.
-func (s *service) committedDepth(peers []peer) (uint8, uint8) {
+// committedDepth finds the most common committed depth across all peers and
+// across the neighbours, and how many of each answered and agree with it
+// (wasp #822). At is left for the caller.
+func (s *service) committedDepth(peers []peer) storer.DepthReading {
 	var networkDepth [swarm.MaxBins]int
 	var nHoodDepth [swarm.MaxBins]int
+	var r storer.DepthReading
 
 	for _, peer := range peers {
+		r.Peers++
+		if peer.neighbor {
+			r.Neighbours++
+		}
 		if peer.status.CommittedDepth < uint32(swarm.MaxBins) {
 			if peer.neighbor {
 				nHoodDepth[peer.status.CommittedDepth]++
@@ -329,7 +361,9 @@ func (s *service) committedDepth(peers []peer) (uint8, uint8) {
 	networkD := maxIndex(networkDepth[:])
 	hoodD := maxIndex(nHoodDepth[:])
 
-	return uint8(networkD), uint8(hoodD)
+	r.Network, r.Neighbourhood = uint8(networkD), uint8(hoodD)
+	r.PeersAgreeing, r.NeighboursAgreeing = networkDepth[networkD], nHoodDepth[hoodD]
+	return r
 }
 
 // commitment finds the most common batch commitment.

@@ -28,6 +28,10 @@ type metrics struct {
 	ExpiredChunkCount               prometheus.Counter
 	OverCapTriggerCount             prometheus.Counter
 	RadiusDecreaseDeferred          *prometheus.CounterVec
+	RadiusFloor                     prometheus.Gauge
+	RadiusLift                      prometheus.Counter
+	ReserveSizeAtLowerRadius        prometheus.Gauge
+	RadiusFlap                      prometheus.Counter
 	ExpiredBatchCount               prometheus.Counter
 	LevelDBStats                    *prometheus.HistogramVec
 	ExpiryTriggersCount             prometheus.Counter
@@ -359,6 +363,38 @@ func newMetrics() metrics {
 			},
 		),
 		RadiusDecreaseDeferred: radiusDecreaseDeferred(subsystem),
+		RadiusFloor: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "radius_floor",
+				Help:      "The settled radius floor of a doubled node, from its neighbourhood's committed depth; 0 when there is none (wasp #822).",
+			},
+		),
+		RadiusLift: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "radius_lift_total",
+				Help:      "Radius increases of one step that lifted a doubled node to its radius floor, without eviction (wasp #822).",
+			},
+		),
+		ReserveSizeAtLowerRadius: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "reserve_size_at_lower_radius",
+				Help:      "Reserve chunks held at one radius below the storage radius, as the last radius decrease check counted them (wasp #822).",
+			},
+		),
+		RadiusFlap: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "radius_flap_total",
+				Help:      "Radius increases by eviction back to a radius the reserve worker decreased from within the last hour (wasp #822).",
+			},
+		),
 	}
 }
 
@@ -368,11 +404,11 @@ func radiusDecreaseDeferred(subsystem string) *prometheus.CounterVec {
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
 			Name:      "radius_decrease_deferred_total",
-			Help:      "Radius decreases the reserve worker deferred because the puller had not yet synced at the current radius, by reason (wasp #696).",
+			Help:      "Radius decreases the reserve worker deferred, and why, by reason (wasp #696, #822).",
 		},
 		[]string{"reason"},
 	)
-	for _, r := range []string{deferNotStarted, deferNotAtRadius, deferSettling} {
+	for _, r := range []string{deferNotStarted, deferNotAtRadius, deferSettling, deferBelowNeighbourhoodDepth, deferLowerRadiusFull} {
 		c.WithLabelValues(r)
 	}
 	return c
