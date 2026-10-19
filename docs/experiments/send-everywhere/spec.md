@@ -140,7 +140,7 @@ safe reason to give its nonce to another transaction.
 two different transactions at one nonce except as a deliberate replacement
 that it keeps tracking. A pending entry is removed only when the chain's
 account nonce (`NonceAt(latest)`) is greater than the entry's nonce. Every
-part below follows from this rule, and a test checks it (Measurement, test 17).
+part below follows from this rule, and a test checks it (Measurement, test 18).
 
 ### 1. Copies to every configured endpoint (`pkg/transaction/failover`)
 
@@ -390,6 +390,35 @@ own address at that nonce. Nothing frees it automatically. A cancellation
 needs native funds for its gas; a node blocked on `insufficient funds` with no
 native funds at all must be funded first.
 
+**The storage lottery while a nonce is blocked.** While any nonce of the node
+is blocked, the storage-incentives agent does not sign a new **commit** or
+**claim**; it skips them for that round. The transaction service exposes the
+state through a new method, `BlockedNonce() (nonce uint64, reason string, ok bool)`,
+which the agent checks in `handleCommit` and `handleClaim` right before it
+would sign. When it skips, it logs at error level, once per round,
+`skipping round R: nonce N blocked (reason)`, and increments
+`bee_storageincentives_skipped_blocked_nonce_total{phase}`. When the nonce is
+no longer blocked (the chain nonce passed it, through its own mining or the
+operator's cancellation), the agent plays normally again from the next round.
+
+The reason: a commit or claim signed behind a blocked nonce cannot be mined in
+its own round. It would be mined after the nonce is freed, revert, and still
+cost gas. The round is lost either way, and skipping makes the cause visible.
+A skipped commit or claim costs nothing beyond the round: the contract only
+penalises a node that committed.
+
+**The reveal is not covered by this rule; how it behaves while a nonce is
+blocked is an open decision.** A reveal is owed for a commit that was mined
+before the nonce was blocked, and a commit without a reveal is not only a lost
+round: the redistribution contract freezes the stake of a node that committed
+and did not reveal, for `penaltyMultiplierNonRevealed` (2) x 152 x 2^depth
+blocks, about 9 days at depth 9 (`setFreezingParams` in the contract ABI of
+`go-storage-incentives-abi` v0.9.4; chain data and the penalty in
+[reveal-before-stop](../reveal-before-stop/spec.md): 36 such freezes in 30
+days). Until that is decided, the reveal keeps today's behaviour: the revealer
+signs it, behind the blocked nonce, so that it is mined in its phase if the
+operator frees the nonce in time.
+
 **Logging.** When an entry first becomes overdue, the watchdog logs at error
 level: `pending transaction not mined; sending it to every endpoint again`,
 with the hash, nonce, description, age in blocks and the answers. While it
@@ -446,8 +475,9 @@ as the failover backend's are since #779):
   transaction; the difference is that the node now says so in its log, its
   metrics and `GET /transactions`. Commits and claims signed behind a blocked
   nonce are mined after it is freed, and those whose round has passed revert
-  and pay gas. The implementation may refuse new lottery sends while a nonce
-  is blocked; that is a separate decision, not part of this spec.
+  and pay gas. That is why the agent skips new commits and claims while a
+  nonce is blocked (part 6); a reveal is still signed, because missing it
+  freezes the stake.
 - **A transaction that nobody will ever mine is sent again forever** until the
   operator cancels it, unless an endpoint gives a definite answer. That costs
   one request per endpoint per check.
@@ -520,7 +550,14 @@ receive (`backendsimulation`). Each test has its own deadline. Tests:
 16. **`state` field.** `GET /transactions` shows `pending`, `overdue`,
     `blocked` with its reason, and `mined` for an entry whose receipt has
     arrived and that the next filter will remove.
-17. **The invariant.** A randomized test runs sends, black holes, refusals,
+17. **The lottery skips while a nonce is blocked.** With a blocked nonce, the
+    agent signs no commit and no claim through several rounds; it logs the
+    skip line once per round and phase, not once per block, and the counter
+    rises by one per skipped phase. A reveal owed for a commit mined before
+    the block is still signed. After the nonce is freed (mined, or cancelled
+    by the operator), the agent commits in the next round it is selected
+    for. Without a blocked nonce, nothing is skipped (guard).
+18. **The invariant.** A randomized test runs sends, black holes, refusals,
     replacements, cancellations, endpoint switches, restarts and long waits
     against the simulated chain. After each step, it checks that no two
     different transactions the node signed share a nonce unless one's
@@ -534,7 +571,8 @@ unconnected endpoints; the watchdog's broadcast removed; the ascending order
 reversed; the newest-per-nonce rule removed; `filterPendingTransactions`
 deleting an entry on `not found`; `AmbiguousPendingTimeout` releasing a nonce
 again; the receipt wait matching only its own hash; a fee raise without a fee
-reason; the raise limit removed; `ResendTransaction` re-signing with a
+reason; the raise limit removed; the agent's blocked-nonce check removed, or
+moved so that it also skips the reveal; `ResendTransaction` re-signing with a
 suggested fee.
 
 ## Protocol impact
@@ -550,7 +588,7 @@ are the answers of `POST /transactions/{hash}` and the `state` field on
 
 ## Measurement
 
-**Unit tests** 1 to 17 above, required for merge.
+**Unit tests** 1 to 18 above, required for merge.
 
 **On the bench.** On the `bench-1` Sepolia full node only, never on a fleet
 host. A local JSON-RPC proxy on the loopback interface, as in #802's results,
