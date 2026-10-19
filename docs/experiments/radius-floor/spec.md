@@ -6,7 +6,7 @@ Builds on #696 (`docs/experiments/radius-decrease-after-sync/spec.md`, the settl
 ## Terms
 
 - **Doubling d:** `reserve-capacity-doubling`. The reserve capacity is the base capacity times 2^d, and the **committed depth** is radius + d (`CommittedDepth`, `pkg/storer/reserve.go:708-714`). It is the depth the node samples and reveals at.
-- **Reserve worker check:** the `thresholdTicker` case of `reserveWorker` (`pkg/storer/reserve.go:326-366`), every `reserve-wakeup-duration`, 15 minutes by default.
+- **Reserve worker check:** the `thresholdTicker` case of `reserveWorker` (`pkg/storer/reserve.go:326-364`), every `reserve-wakeup-duration`, 15 minutes by default.
 - **Decrease condition:** `count < threshold(capacity) && SyncRate() == 0 && radius > minimumRadius` (`reserve.go:347`), with `threshold(capacity) = capacity * 5 / 10` (`reserve.go:81`) and `count` the reserve chunks at or above the radius.
 - **Unreserve loop:** `unreserve` (`reserve.go:568-671`). When the reserve is over capacity it evicts, batch by batch, chunks in bins below the radius, up to the eviction target (size minus capacity); if that does not reach the target it raises the radius by one and repeats.
 - **Neighbours:** connected full-node peers within the node's storage radius that answered the status request in the last salud pass (`peer.neighbor`, `pkg/salud/salud.go:170`).
@@ -93,9 +93,9 @@ type DepthReporter interface {
 
 type DepthReading struct {
 	Neighbourhood, Network     uint8     // most common committed depth
-	Neighbours, NeighboursAt   int       // neighbours that answered; of them, at Neighbourhood
-	Peers, PeersAt             int       // all peers that answered; of them, at Network
-	At                         time.Time // when the pass finished
+	Neighbours, NeighboursAgreeing int       // neighbours that answered; of them, at Neighbourhood
+	Peers, PeersAgreeing           int       // all peers that answered; of them, at Network
+	At                             time.Time // when the pass finished
 }
 ```
 
@@ -107,7 +107,7 @@ type DepthReading struct {
 - only N robust: `F = max(minimumRadius, N - d)`;
 - N not robust: no floor; the fit check (part 3) still applies.
 
-**A floor value is acted on only after two consecutive checks computed it.** Until then the previous settled floor stays, and before any settled floor there is none. A salud reading that alternates between two depths therefore does not move the radius every 15 minutes.
+**A floor value is acted on only after two consecutive checks computed it.** Until then the previous settled floor stays, and before any settled floor there is none. "No floor" (N not robust at a check) is itself a value and settles the same way: one check without a robust reading keeps the settled floor, two consecutive ones clear it. So a single missed salud pass does not release the floor, and a floor does not outlive a signal that has gone for good. A salud reading that alternates between two depths does not move the radius every 15 minutes.
 
 **The floor check.** When the decrease condition holds, d > 0, a settled floor exists and `radius - 1 < F`, the decrease is deferred, reason `below_neighbourhood_depth`.
 
@@ -137,6 +137,8 @@ held at r - 1 >= capacity - capacity/16
 So a decrease goes ahead only when at least one sixteenth of the capacity is still free at the lower radius before the puller adds anything. For the node in the Problem, held at radius 8 is about the capacity (point 2 above), so it is deferred. After a large batch expiry the held count falls in every bin, and the decrease goes ahead.
 
 This applies to d = 0 nodes as well, because the flap does not depend on doubling: a stock-configured node just under half capacity whose lower radius is already full flaps the same way. For such a node the check only stops decreases that could not have given it room.
+
+This is a difference from Bee for every node, not only doubled ones, so the implementation pull request adds it to `docs/DIFFERENCES.md` (rule 13), together with the floor and the lift.
 
 The margin of 1/16 is a compiled constant. By rule 8 it becomes a setting only if the measurement shows that its value matters.
 
@@ -186,7 +188,7 @@ None. No message, field or encoding changes; the status protocol already carries
 3. **Genuine decrease:** as test 2, then the stub lowers N and M by one; after two checks the radius drops one step, and not two.
 4. **M leads:** N stays, M drops by one: the floor follows `min(N, M)` and the decrease goes ahead.
 5. **Robustness:** 2 neighbours answering: no floor. 3 at r + 1 and 3 at r: no floor (no majority). A reading 16 minutes old: no floor. In each case the decrease goes ahead when the fit check allows.
-6. **Settling the floor:** a reading that alternates between two depths at each check never moves the settled floor; a value seen at two consecutive checks does.
+6. **Settling the floor:** a reading that alternates between two depths at each check never moves the settled floor; a value seen at two consecutive checks does. One check without a robust reading keeps the settled floor; two consecutive ones clear it.
 7. **Lift:** d = 1, radius r, settled floor r + 1, no sample running: at the next check the radius is r + 1, the reserve size is unchanged (nothing evicted), `radius_lift_total` is 1. With `IsSampling` true the lift waits for a later check. With floor r + 2 it takes two checks.
 8. **d = 0:** with a reporter and a high floor, no lift and no floor deferral; the fit check still applies.
 9. **Fit check boundary:** held at r - 1 equal to `C - C/16`: deferred; one less: decrease. The bin count comes from bin r - 1 only, and only on the decrease path (a counting stub shows no bin scan on a check where the decrease condition does not hold).
@@ -195,7 +197,7 @@ None. No message, field or encoding changes; the status protocol already carries
 12. **salud:** with a mock status service, `CommittedDepths` reports the neighbour and peer counts and the agreeing counts, the `At` time of the pass, and false before the first pass.
 
 **Mutation checks** (each must make a named test fail, and each is checked as applied before it is run, per the playbook):
-floor check removed (2); `<=` instead of `<` in `radius - 1 < F` (2, 3); `min(N, M)` replaced by N (4); peer minimum ignored (5); majority ignored (5); age ignored (5); floor applied without settling (6); lift removed (7); lift evicts (7, reserve size); lift ignores `IsSampling` (7); floor or lift applied when d = 0 (8); fit check removed (1, 9); margin `>` instead of `>=` (9); held count starting at r instead of r - 1 (9, 1); bin scan on every check (9); lift after the stall gate (10); deferral counted twice (10); flap window ignored (11).
+floor check removed (2); `<=` instead of `<` in `radius - 1 < F` (2, 3); `min(N, M)` replaced by N (4); peer minimum ignored (5); majority ignored (5); age ignored (5); floor applied without settling (6); settled floor cleared by a single unrobust check, or never cleared (6); lift removed (7); lift evicts (7, reserve size); lift ignores `IsSampling` (7); floor or lift applied when d = 0 (8); fit check removed (1, 9); margin `>` instead of `>=` (9); held count starting at r instead of r - 1 (9, 1); bin scan on every check (9); lift after the stall gate (10); deferral counted twice (10); flap window ignored (11).
 
 Race detector on `pkg/storer` and `pkg/salud`; check the exit status directly.
 
@@ -206,6 +208,8 @@ Race detector on `pkg/storer` and `pkg/salud`; check the exit status directly.
 On **bench-1 only**, never on production fleet hosts. bench-1 is at present the resource-harness host and not on mainnet; the operator decides when it runs mainnet nodes for this.
 
 **Set-up.** Six doubling-1 full nodes on bench-1, connected to mainnet, unstaked (the radius logic does not depend on the lottery). Each overlay is mined with `target-neighborhood` into a different depth-10 neighbourhood whose radius-9 content is known to be under half of the doubled capacity, chosen from the operator's private notes and recorded in `measurement.md` only by its fraction of the threshold, never by prefix. No two of the six share their first 8 bits, so none is within another's radius and none feeds another's neighbourhood depth. Three run the current `main` (control) and three the change, paired by that fraction. Resources are checked before starting (six reserves of 8.4 M chunks each).
+
+**Cost to other nodes.** Each fresh node fills about 8.4 M chunks, roughly 34 GB, by pull sync from its mainnet neighbours, and those neighbours pay for it in upload bandwidth and disk reads; six nodes in six neighbourhoods spread that load, one fill per neighbourhood. The starts are staggered by at least six hours so no two fills run in full at once, and if bench-1's resources or the time needed do not allow six nodes, the run uses two per build (four in total) and says so in the results, with the spread reported as for any run with fewer than three per condition.
 
 **Duration.** 48 hours after the initial fill (the first time each node's within-radius count stops rising for an hour).
 
@@ -227,7 +231,7 @@ On **bench-1 only**, never on production fleet hosts. bench-1 is at present the 
 
 ## Rollout and rollback
 
-A code change with no setting. It ships in the next build. Order: bench-1 (the measurement above), then a single production node on the operator's decision, then the rest. Rollback is the previous build; the persisted radius is valid for it, and it resumes today's behaviour (including the flap).
+A code change with no setting. The issue carries `stake-risk`, so by rule 4 the implementation pull request merges only on the operator's decision, after its review. It ships in the next build. Order: bench-1 (the measurement above), then a single production node on the operator's decision, then the rest. Rollback is the previous build; the persisted radius is valid for it, and it resumes today's behaviour (including the flap).
 
 ## Upstream portability
 
