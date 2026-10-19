@@ -348,7 +348,7 @@ func initStore(basePath string, opts *Options) (storage.BatchStore, error) {
 		}
 		return store, nil
 	case EnginePebble:
-		store, err := pebblestore.New(indexDir, pebbleIndexStoreOptions(opts))
+		store, err := openPebbleIndexStore(indexDir, pebbleIndexStoreOptions(opts))
 		if err != nil {
 			return nil, fmt.Errorf("failed creating pebble index store: %w", err)
 		}
@@ -455,9 +455,9 @@ func indexStoreOptions(opts *Options) *opt.Options {
 // than forced onto a field that means something different. A zero knob keeps the
 // engine's own default. See docs/experiments/storage-engine-eval/spec.md.
 //
-// The block cache is created here and handed to Pebble; its one retained
-// reference is released when the process exits, which for a store opened once
-// per node lifetime is not worth threading a closer through for.
+// The block cache is created here with one reference, owned by the caller.
+// openPebbleIndexStore releases that reference once pebble.Open has taken its
+// own, so the cache is freed when the store closes (#815).
 func pebbleIndexStoreOptions(opts *Options) *pebble.Options {
 	o := pebblestore.DefaultOptions()
 	if opts.LdbWriteBufferSize > 0 {
@@ -506,6 +506,22 @@ func pebbleBlockCacheCapacity(configured, memTableSize uint64, stopWritesThresho
 		usable = defaultPebbleUsableBlockCache
 	}
 	return usable + uint64(stopWritesThreshold+1)*memTableSize
+}
+
+// openPebbleIndexStore opens the pebble index store and then drops the
+// reference to o.Cache that pebbleIndexStoreOptions created, on the success and
+// the error path. pebble.Open takes its own reference to a cache it is given and
+// releases it on Close, or when Open fails after taking it, so ours is never
+// needed after Open returns. Keeping it would leave the cache alive after Close
+// for every open in the process; in cgo builds pebble allocates cache memory
+// with C calloc, so that memory would never be freed. See
+// docs/experiments/pebble-cache-unref/spec.md.
+func openPebbleIndexStore(indexDir string, o *pebble.Options) (*pebblestore.Store, error) {
+	store, err := pebblestore.New(indexDir, o)
+	if o.Cache != nil {
+		o.Cache.Unref()
+	}
+	return store, err
 }
 
 func initDiskRepository(
