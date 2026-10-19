@@ -140,7 +140,19 @@ safe reason to give its nonce to another transaction.
 two different transactions at one nonce except as a deliberate replacement
 that it keeps tracking. A pending entry is removed only when the chain's
 account nonce (`NonceAt(latest)`) is greater than the entry's nonce. Every
-part below follows from this rule, and a test checks it (Measurement, test 18).
+part below follows from this rule, and a test checks it (Measurement, test 20).
+
+**The one exception.** The node cancels a transaction on its own in a single
+case: a blocked, non-lottery transaction that stands in front of a reveal the
+node owes, close to the end of the reveal phase, when every condition in
+"Last-resort cancel" (part 6) holds. Even then, the nonce is not released: the
+cancellation is a tracked replacement at the same nonce, stored before it is
+sent, and the entry is removed only when the chain nonce passes it. The
+exception is safe because what it costs can be repeated and what it prevents
+cannot be undone: the cancelled operation (a withdrawal, a stake change, a
+postage purchase, a cheque) can be sent again by its caller, while a missed
+reveal freezes the stake for 2 x 152 x 2^depth blocks, about 9 days at
+depth 9.
 
 ### 1. Copies to every configured endpoint (`pkg/transaction/failover`)
 
@@ -407,17 +419,104 @@ cost gas. The round is lost either way, and skipping makes the cause visible.
 A skipped commit or claim costs nothing beyond the round: the contract only
 penalises a node that committed.
 
-**The reveal is not covered by this rule; how it behaves while a nonce is
-blocked is an open decision.** A reveal is owed for a commit that was mined
-before the nonce was blocked, and a commit without a reveal is not only a lost
-round: the redistribution contract freezes the stake of a node that committed
-and did not reveal, for `penaltyMultiplierNonRevealed` (2) x 152 x 2^depth
-blocks, about 9 days at depth 9 (`setFreezingParams` in the contract ABI of
-`go-storage-incentives-abi` v0.9.4; chain data and the penalty in
+**The reveal is not skipped.** A reveal is owed for a commit that was mined,
+and a commit without a reveal is not only a lost round: the redistribution
+contract freezes the stake of a node that committed and did not reveal, for
+`penaltyMultiplierNonRevealed` (2) x 152 x 2^depth blocks, about 9 days at
+depth 9 (`setFreezingParams` in the contract ABI of `go-storage-incentives-abi`
+v0.9.4; chain data and the penalty in
 [reveal-before-stop](../reveal-before-stop/spec.md): 36 such freezes in 30
-days). Until that is decided, the reveal keeps today's behaviour: the revealer
-signs it, behind the blocked nonce, so that it is mined in its phase if the
-operator frees the nonce in time.
+days). So a reveal owed behind a blocked nonce is escalated, and as a last
+resort the blocker is cancelled.
+
+#### A reveal owed behind a blocked nonce
+
+The rule applies when the revealer owes a reveal for round R (the round's
+commit is mined) and at least one blocked entry has a nonce below the reveal's
+nonce. The revealer checks this on every reveal step, which runs at least
+every `revealStepBlocks` (3) blocks in the reveal phase (`revealer.go`).
+
+**1. Escalate at once.** On the first step that sees it, the revealer logs at
+error level `reveal for round R owed behind blocked nonce N (reason)`, and sets
+the gauge `bee_storageincentives_reveal_owed_behind_blocked_nonce` to 1. It
+keeps signing the reveal as today, queued behind the blocked nonce, and keeps
+replacing it with raised fees under its own rules (#793). The gauge returns to
+0 when the reveal is mined, when no blocked entry is below the reveal's nonce
+any more, or when the claim phase starts.
+
+**2. Last-resort cancel.** The node replaces the blocking transaction with a
+cancellation, a zero-value transfer to its own address at the same nonce, only
+when **all** of these hold on a reveal step:
+
+- **(a) Not a lottery transaction.** The blocking transaction is not a commit,
+  reveal or claim of the storage incentives (told apart by the lottery's
+  `SelfReplacing` flag and its description). A lottery transaction is never
+  cancelled automatically.
+- **(b) Enough native funds.** The node's native balance
+  (`BalanceAt(latest)`) covers the cancellation's gas (21,000 x its fee cap),
+  plus the gas and value of every pending transaction with a nonce between the
+  blocker and the reveal, plus the reveal's gas (its gas limit x its fee cap).
+  Otherwise the reveal could still not be mined after the cancellation.
+- **(c) The margin.** The reveal phase has at most `cancelAtRemainingBlocks`
+  (20) and at least `minCancelMarginBlocks` (4) blocks left before the claim
+  phase starts, and the blocking transaction is still unmined at that step.
+  Before 20 blocks remain, the node waits: the blocker may still be mined, or
+  the operator may cancel it by hand. Below 4 blocks, it does not cancel.
+- **(d) The everywhere path.** The cancellation is stored with `Replaces` set
+  to the blocker, under `t.lock`, before it is sent (`storeAndBroadcast`, not
+  `CancelTransaction`, which sends before it stores; see #821), and it is sent
+  with copies to every configured endpoint and then watched by the watchdog
+  like any other entry.
+
+Its fee cap and tip are each the larger of the current suggestion and the
+blocker's value plus `ReplacementBumpPercent` (12 %), so that an endpoint that
+still holds the blocker accepts the cancellation as a replacement.
+`CancelTransaction`'s own rule raises only the tip by 10 % and can fall short
+of that on the fee cap; the automatic path does not use it. Several blocked
+entries below the reveal are each cancelled, in ascending nonce order, and
+only when every one of them meets (a); one lottery blocker means escalation
+only.
+
+**Order: the cancellation first, then the reveal.** The reveal is already
+signed at a nonce above the blocker's, so it needs no new signature: the
+cancellation takes the blocker's nonce, the transactions between them keep
+theirs, and once the cancellation is mined the reveal can be mined at the nonce
+it has. Nothing in the nonce handling re-signs it: `nextNonce` is not involved,
+because no new nonce is taken, and the revealer replaces a reveal only at its
+own nonce. After sending the cancellation, the revealer sends the stored bytes
+of the reveal's newest transaction again, so that it follows the cancellation
+at once.
+
+**Why 20 and 4 blocks.** A reveal phase is 38 blocks.
+
+- 20 blocks leave room for the cancellation's worst delivery that the design
+  still recovers from: its copies lost, so it is overdue after 12 blocks and
+  sent again at the next 6-block check (18 blocks), plus one block to mine
+  the cancellation and one for the reveal (they can share a block). Waiting
+  until then gives the blocker and the operator the first 18 blocks of the
+  phase, about 90 s on Gnosis.
+- Below 4 blocks, even a normal delivery (one block for the cancellation, one
+  for the reveal) has two blocks of spare left at most, less than one reveal
+  step (3 blocks) plus a missed block. A cancellation there would most likely
+  cost the operation and still not save the reveal.
+
+**3. Reporting.** The caller of the cancelled operation gets
+`ErrCancelledForReveal` (it wraps `ErrTransactionCancelled`), never success.
+The receipt wait (part 4) recognises the cancellation by a stored reason,
+`CancelReason: "reveal"`, on the cancellation's `StoredTransaction`. The node
+logs at error level `cancelled transaction T at nonce N to protect the reveal
+of round R` with the description and the original reason it was blocked, and
+increments `bee_transaction_cancelled_for_reveal_total`. In
+`GET /transactions`, the blocker's entry shows `state: cancelled_for_reveal`
+while the cancellation is pending, and the cancellation appears as its own
+entry, described as a cancellation to protect the reveal of round R.
+`GET /transactions/{hash}` of the blocker keeps that state after the nonce is
+settled. The code pull request records it in `docs/DIFFERENCES.md`.
+
+**4. If (a) or (b) fails, escalate only.** The error line then says why it does
+not cancel and states the risk: `reveal for round R owed behind blocked nonce N (reason); not cancelling: <lottery transaction | native balance too low>; the stake will be frozen if the reveal is not mined by block B`.
+If only (c) fails because fewer than 4 blocks remain, the line says so in the
+same way.
 
 **Logging.** When an entry first becomes overdue, the watchdog logs at error
 level: `pending transaction not mined; sending it to every endpoint again`,
@@ -477,7 +576,8 @@ as the failover backend's are since #779):
   nonce are mined after it is freed, and those whose round has passed revert
   and pay gas. That is why the agent skips new commits and claims while a
   nonce is blocked (part 6); a reveal is still signed, because missing it
-  freezes the stake.
+  freezes the stake, and as a last resort the blocker in front of it is
+  cancelled.
 - **A transaction that nobody will ever mine is sent again forever** until the
   operator cancels it, unless an endpoint gives a definite answer. That costs
   one request per endpoint per check.
@@ -557,8 +657,32 @@ receive (`backendsimulation`). Each test has its own deadline. Tests:
     the block is still signed. After the nonce is freed (mined, or cancelled
     by the operator), the agent commits in the next round it is selected
     for. Without a blocked nonce, nothing is skipped (guard).
-18. **The invariant.** A randomized test runs sends, black holes, refusals,
-    replacements, cancellations, endpoint switches, restarts and long waits
+18. **Reveal owed behind a blocked nonce: escalation.** A commit is mined, a
+    withdrawal at a later nonce is blocked, and the reveal is signed behind
+    it: one error line, the gauge at 1, the reveal still signed; the gauge
+    returns to 0 when the reveal is mined, and also when the claim phase
+    starts without it.
+19. **Last-resort cancel.**
+    - With (a) to (c) true, the cancellation fires at the first step with at
+      most 20 blocks left, not before. It is stored with `Replaces` before it
+      is sent, reaches every endpoint, and the reveal's stored bytes are sent
+      after it, unchanged (same hash, no new signature). The cancellation is
+      mined first, then the reveal.
+    - It does not fire when the blocker is a commit, reveal or claim; when the
+      native balance is one wei short of (b); when fewer than 4 blocks remain;
+      or when the blocker is mined before 20 blocks remain. In each case the
+      error line names the reason and the freeze risk.
+    - The withdrawal's caller gets `ErrCancelledForReveal`, not success;
+      `bee_transaction_cancelled_for_reveal_total` is 1;
+      `GET /transactions` shows `cancelled_for_reveal`.
+    - Two blocked non-lottery entries below the reveal are both cancelled, in
+      ascending nonce order; one lottery blocker among them means no
+      cancellation at all.
+    - An endpoint that still holds the blocker accepts the cancellation as a
+      replacement (both fee cap and tip at least 10 % above).
+20. **The invariant.** A randomized test runs sends, black holes, refusals,
+    replacements, cancellations, last-resort cancellations, endpoint
+    switches, restarts and long waits
     against the simulated chain. After each step, it checks that no two
     different transactions the node signed share a nonce unless one's
     `Replaces` chain leads to the other, and that no entry was removed while
@@ -572,8 +696,10 @@ reversed; the newest-per-nonce rule removed; `filterPendingTransactions`
 deleting an entry on `not found`; `AmbiguousPendingTimeout` releasing a nonce
 again; the receipt wait matching only its own hash; a fee raise without a fee
 reason; the raise limit removed; the agent's blocked-nonce check removed, or
-moved so that it also skips the reveal; `ResendTransaction` re-signing with a
-suggested fee.
+moved so that it also skips the reveal; the reveal escalation removed; each
+of the cancel conditions (a), (b) and (c) removed on its own; the cancellation
+sent before it is stored; the reveal sent before the cancellation, or signed
+again; `ResendTransaction` re-signing with a suggested fee.
 
 ## Protocol impact
 
@@ -588,7 +714,7 @@ are the answers of `POST /transactions/{hash}` and the `state` field on
 
 ## Measurement
 
-**Unit tests** 1 to 18 above, required for merge.
+**Unit tests** 1 to 20 above, required for merge.
 
 **On the bench.** On the `bench-1` Sepolia full node only, never on a fleet
 host. A local JSON-RPC proxy on the loopback interface, as in #802's results,
@@ -699,6 +825,8 @@ that they matter (rule 8 in `AGENTS.md`):
 | `checkBlocks` | 6 blocks (30 s on Gnosis) | slower detection, up to one interval more | more `NonceAt` reads and broadcasts; per overdue entry, one send per endpoint per check |
 | `ReplacementBumpPercent` | 12 % (existing) | each replacement pays more than needed | below 10 % nodes refuse the replacement |
 | `maxFeeRaise` | 4 times the original fee cap | a congested chain can take more of the node's funds for one transaction | a transaction is blocked, waiting for the operator, during a base-fee spike it could have outbid |
+| `cancelAtRemainingBlocks` | 20 blocks before the claim phase | less time for a cancellation whose first delivery is lost; above 20 the node cancels operations that might still have been mined by themselves | the cancellation and the reveal have less room; below 18 a lost first delivery can no longer be recovered by the watchdog in the phase |
+| `minCancelMarginBlocks` | 4 blocks | fewer last-moment cancellations, so more freezes when a cancellation would still have worked | cancellations that cost the operation and cannot save the reveal |
 | `copyDialTimeout` | 5 s | a dial to a dead endpoint holds a background goroutine longer | a slow but working endpoint misses its copy |
 | error log repeat | 10 minutes per overdue entry, 1 hour per blocked one | less visibility of a long stall in the log | log noise |
 
