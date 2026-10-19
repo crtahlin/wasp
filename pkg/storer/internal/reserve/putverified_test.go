@@ -69,15 +69,21 @@ func newVerifiedTestStore(t *testing.T, baseAddr swarm.Address) *verifiedTestSto
 // retrieval index entry the timestamp (wall clock) and the sharky location
 // (sharky picks a shard per write) differ between two stores whatever the
 // code does, so both are set to zero; the address and the reference count
-// are kept, and the stored data is compared separately.
+// are kept, and the stored data is compared separately. The epoch item holds
+// the wall-clock second reserve.New ran in, so two stores created across a
+// second boundary differ there too; its value is set to zero.
 func (s *verifiedTestStore) dump(t *testing.T) [][2][]byte {
 	t.Helper()
 	var out [][2][]byte
 	it := s.index.DB().NewIterator(nil, nil)
 	defer it.Release()
 	retrievalPrefix := []byte(chunkstore.RetrievalIndexItem{}.Namespace() + "/")
+	epochPrefix := []byte(new(reserve.EpochItem).Namespace() + "/")
 	for it.Next() {
 		value := bytes.Clone(it.Value())
+		if bytes.HasPrefix(it.Key(), epochPrefix) {
+			value = make([]byte, len(value))
+		}
 		if bytes.HasPrefix(it.Key(), retrievalPrefix) {
 			item := new(chunkstore.RetrievalIndexItem)
 			if err := item.Unmarshal(value); err != nil {
