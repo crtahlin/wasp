@@ -59,8 +59,10 @@ if o.Cache != nil {
 ```
 
 The release runs on both paths. On success pebble keeps its reference until `Close`.
-On error pebble has already dropped its own (`open.go:187-197`), so ours is the last
-one and the cache is freed at once.
+On error there are two cases, and ours is the last reference in both, so the cache
+is freed at once: an error before `Open` takes its reference (the early returns
+before `open.go:160-164`) means pebble never held one, and an error after it is
+followed by pebble dropping its own (`open.go:187-197`).
 
 The comment on `pebbleIndexStoreOptions` is rewritten to say that the caller releases
 the creator reference after `Open`. The cache size, the options and every default are
