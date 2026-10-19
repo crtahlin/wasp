@@ -166,12 +166,14 @@ helper `transaction.ClassifySendAnswers(answers) BroadcastResult`:
 - `Accepted`: at least one endpoint accepted the bytes or answered
   `already known`;
 - `NonceUsed`: no endpoint accepted, and one answered `nonce too low`;
-- `Refused`: no endpoint accepted, and every endpoint that answered gave
-  another JSON-RPC answer about the transaction (insufficient funds,
+- `Refused`: **every** connected endpoint answered, none accepted, and each
+  gave another JSON-RPC answer about the transaction (insufficient funds,
   underpriced, and so on). `replacement transaction underpriced` does **not**
   count as refused: it means that endpoint holds another transaction with this
   nonce, so the nonce is not free;
-- `Unreachable`: every attempt failed at the transport level.
+- `Unreachable`: none of the above, because at least one attempt failed at the
+  transport level. An endpoint that did not answer may hold the transaction,
+  so a result with any transport failure is never `Refused`.
 
 The string matching is the existing `classifySendAnswer`; it moves to
 `pkg/transaction` so that both packages use one copy.
@@ -223,7 +225,12 @@ A pending entry is one of two kinds, recorded in the existing
   has accepted it since. Unchanged: its nonce counts for
   `AmbiguousPendingTimeout`, and the #772 loop re-broadcasts it. When a
   re-broadcast is accepted (or `already known`), the loop now clears the flag,
-  so the entry becomes accepted. The flag is cleared only if the pending key
+  so the entry becomes accepted. It also clears the flag when it stops because
+  the backend knows the transaction (`TransactionStatus` is not `TxNotFound`).
+  Without that, the case this issue is about would escape: a send that returned
+  an error after the active endpoint took the transaction into its pool (the
+  #802 situation) would stop the loop at its first check, stay ambiguous, and
+  never be sent anywhere again. The flag is cleared only if the pending key
   still exists.
 - **Accepted** (`Ambiguous: false`, which is also how entries stored by earlier
   builds and by `CancelTransaction` decode): some endpoint took the bytes.
@@ -233,7 +240,9 @@ endpoint answers `not found`, the entry is kept, and its nonce still counts, as
 long as the nonce is not used on chain (`NonceAt(latest) <= nonce`). Once the
 nonce is used, the entry is deleted as today, and the monitor reports the
 receipt or the cancellation to whoever waits. The extra read is one `NonceAt`
-per call of `filterPendingTransactions`, not one per entry.
+per call of `filterPendingTransactions`, not one per entry. When that read
+fails, every accepted entry is kept, as an error from `TransactionByHash`
+already keeps an entry today.
 
 So the node signs a new transaction at an accepted transaction's nonce only by
 a deliberate replacement (`ReplaceTransaction`, `CancelTransaction`), or after
@@ -367,7 +376,7 @@ except a deliberate replacement or cancellation:
 - **`CancelTransaction`.** Unchanged, apart from copies of its transaction. It
   still sends before storing; that is outside this change.
 
-### Tests (written first; each must fail on `main`)
+### Tests (written first; each must fail on `main` unless marked as a guard)
 
 A test double, `blackholeBackend`, plays one endpoint that accepts a
 transaction, answers `TransactionByHash` with it, never mines it and never
@@ -383,9 +392,9 @@ receive (`backendsimulation`). Tests:
 3. **Copies after `already known`.** The active endpoint answers
    `already known`: `SendTransaction` returns nil and every other connected
    endpoint receives the same bytes.
-4. **Unmarked sends do not go round again.** Every endpoint fails at the
-   transport level: an unmarked send makes one pass and returns, and
-   `bee_failover_wraparounds_total` does not move.
+4. **Unmarked sends do not go round again** (guard; passes on `main` too).
+   Every endpoint fails at the transport level: an unmarked send makes one
+   pass and returns, and `bee_failover_wraparounds_total` does not move.
 5. **Resend sends identical bytes.** `ResendTransaction` sends exactly the
    stored `Raw` bytes (compared byte for byte) to every endpoint; it never
    calls `SuggestedFeeAndTip`; it returns the endpoints' answers when all
@@ -407,12 +416,19 @@ receive (`backendsimulation`). Tests:
    after `AmbiguousPendingTimeout`, and sends nothing for it afterwards. It
    ends when the service closes.
 9. **Promotion.** An ambiguous entry whose re-broadcast is accepted becomes
-   accepted, and is then kept past `AmbiguousPendingTimeout`.
+   accepted, and is then kept past `AmbiguousPendingTimeout`. So does an
+   ambiguous entry that the black hole holds (the loop stops at once because
+   the backend knows it): past the bound, the watchdog sends it to the other
+   endpoints and it is mined.
+10. **Release needs every endpoint.** Two endpoints refuse and one fails at
+   the transport level, at every check: the result is `Unreachable`, and the
+   nonce is never released.
 
 **Mutation checks.** Each of these must make at least one test fail with a
 message, not a hang (each test has its own deadline): copies only for marked
 contexts again; `already known` from the active endpoint returned as an error
-again; the watchdog's broadcast removed; the ascending order reversed; the
+again; the promotion when the backend knows the transaction removed; the
+watchdog's broadcast removed; the ascending order reversed; the
 newest-per-nonce rule removed; `filterPendingTransactions` deleting accepted
 entries on `not found` again; `ResendTransaction` re-signing with a suggested
 fee again; the release rule's count or age check removed.
