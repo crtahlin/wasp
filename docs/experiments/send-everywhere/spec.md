@@ -449,8 +449,14 @@ cancellation, a zero-value transfer to its own address at the same nonce, only
 when **all** of these hold on a reveal step:
 
 - **(a) Not a lottery transaction.** The blocking transaction is not a commit,
-  reveal or claim of the storage incentives (told apart by the lottery's
-  `SelfReplacing` flag and its description). A lottery transaction is never
+  reveal or claim of the storage incentives. A blocker counts as a lottery
+  transaction when its recipient (`StoredTransaction.To`) is the
+  redistribution contract's address, **whatever** its `SelfReplacing` flag or
+  description say, and also when either of those marks it as one. The
+  address check comes first because transactions stored by builds before this
+  change carry neither mark. The address is the one the node already uses for
+  the redistribution contract (from its chain configuration), passed to the
+  transaction service when the node is built. A lottery transaction is never
   cancelled automatically.
 - **(b) Enough native funds.** The node's native balance
   (`BalanceAt(latest)`) covers the cancellation's gas (21,000 x its fee cap),
@@ -668,6 +674,10 @@ receive (`backendsimulation`). Each test has its own deadline. Tests:
       is sent, reaches every endpoint, and the reveal's stored bytes are sent
       after it, unchanged (same hash, no new signature). The cancellation is
       mined first, then the reveal.
+    - A blocker addressed to the redistribution contract with no
+      `SelfReplacing` flag and a description that does not name the lottery
+      (as an older build stores it) counts as a lottery transaction: it is
+      not cancelled, and the error line says so.
     - It does not fire when the blocker is a commit, reveal or claim; when the
       native balance is one wei short of (b); when fewer than 4 blocks remain;
       or when the blocker is mined before 20 blocks remain. In each case the
@@ -697,7 +707,8 @@ deleting an entry on `not found`; `AmbiguousPendingTimeout` releasing a nonce
 again; the receipt wait matching only its own hash; a fee raise without a fee
 reason; the raise limit removed; the agent's blocked-nonce check removed, or
 moved so that it also skips the reveal; the reveal escalation removed; each
-of the cancel conditions (a), (b) and (c) removed on its own; the cancellation
+of the cancel conditions (a), (b) and (c) removed on its own; condition (a)
+reduced to the stored marks without the recipient check; the cancellation
 sent before it is stored; the reveal sent before the cancellation, or signed
 again; `ResendTransaction` re-signing with a suggested fee.
 
