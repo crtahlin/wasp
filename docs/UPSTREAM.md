@@ -144,6 +144,7 @@ whether upstream has the problem. See
 | [#725](https://github.com/crtahlin/wasp/issues/725) | storage incentives: a stop between commit and reveal freezes the node for twice as long; wait for the reveal before stopping | done | `feat/725-reveal-before-stop` | [`63c43149`](https://github.com/crtahlin/wasp/commit/63c43149) |
 | [#773](https://github.com/crtahlin/wasp/issues/773) | storage incentives: the play check at the start of the claim phase reverts on a backend one block behind, and the round is skipped | done | `fix/773-play-check-retry` | [`607a8e3e`](https://github.com/crtahlin/wasp/commit/607a8e3e) |
 | [#783](https://github.com/crtahlin/wasp/issues/783) | storage incentives: an RPC endpoint that never answers blocks the commit for the whole phase; failover is never tried | done | `fix/783-bounded-lottery-rpc` | [`a27454ab`](https://github.com/crtahlin/wasp/commit/a27454ab) |
+| [#822](https://github.com/crtahlin/wasp/issues/822) | storer: a node with reserve-capacity doubling lowers its radius below its neighbourhood's depth, then flaps back | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
