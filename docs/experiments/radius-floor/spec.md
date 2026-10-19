@@ -205,33 +205,54 @@ Race detector on `pkg/storer` and `pkg/salud`; check the exit status directly.
 
 ## Measurement
 
-On **bench-1 only**, never on production fleet hosts. bench-1 is at present the resource-harness host and not on mainnet; the operator decides when it runs mainnet nodes for this.
+Only on bench-1 and bench-2, never on production fleet hosts. Capacity measured by the operator on 2026-10-19: both have 8 cores and 15 GB of RAM; bench-1 has 60 GB of free disk, enough for one doubling-1 mainnet node (about 35 GB), and bench-2 has 8.5 GB, enough for no node data.
 
-**Set-up.** Six doubling-1 full nodes on bench-1, connected to mainnet, unstaked (the radius logic does not depend on the lottery). Each overlay is mined with `target-neighborhood` into a different depth-10 neighbourhood whose radius-9 content is known to be under half of the doubled capacity, chosen from the operator's private notes and recorded in `measurement.md` only by its fraction of the threshold, never by prefix. No two of the six share their first 8 bits, so none is within another's radius and none feeds another's neighbourhood depth. Three run the current `main` (control) and three the change, paired by that fraction. Resources are checked before starting (six reserves of 8.4 M chunks each).
+### (a) Tests, on bench-2 or locally
 
-**Cost to other nodes.** Each fresh node fills about 8.4 M chunks, roughly 34 GB, by pull sync from its mainnet neighbours, and those neighbours pay for it in upload bandwidth and disk reads; six nodes in six neighbourhoods spread that load, one fill per neighbourhood. The starts are staggered by at least six hours so no two fills run in full at once, and if bench-1's resources or the time needed do not allow six nodes, the run uses two per build (four in total) and says so in the results, with the spread reported as for any run with fewer than three per condition.
+The unit and integration tests above, including the flap-loop reproduction (test 1) and its run on an unmodified `upstream/v2.8.3` worktree. They need no reserve on disk beyond what the tests create. The no-flap check for a node without doubling stays a unit test only (tests 1 and 8); it is not measured on mainnet.
 
-**Duration.** 48 hours after the initial fill (the first time each node's within-radius count stops rising for an hour).
+### (b) One doubling-1 mainnet node on bench-1, before and after
 
-**Recorded per node:** the radius and committed depth timeline from `/status`; `radius_flap_total`, `radius_lift_total`, `radius_decrease_deferred_total` by reason, `radius_floor`, `reserve_size_at_lower_radius`; salud's neighbourhood depth, its peer counts and the self-health warning count; reserve size and within-radius count.
+**Set-up.** One full node with `reserve-capacity-doubling` 1, a fresh data directory and fresh keys, unstaked (the radius logic does not depend on the lottery). Its overlay is mined with `target-neighborhood` into a neighbourhood known to hold fewer chunks within radius than half of the doubled capacity. The operator supplies the target bits privately; they are not written in this spec, in `measurement.md` or in the results, which give only the neighbourhood's within-radius count as a fraction of the threshold.
 
-**Pass, all three treatment nodes:**
+**Order, on the same data directory:**
 
+1. **Initial fill on `main`.** The arms are timed from the end of the fill: the first time the within-radius count stops rising for an hour.
+2. **Arm 1, 24 hours on `main`.** This arm must reproduce the problem: at least 2 decrease and increase cycles, with the `reserve radius decrease` and `reserve radius increase` log lines and their times recorded, and the committed depth one below the network depth for part of the time. The flap counter does not exist on `main`; the cycles are counted from those log lines. **If this arm does not reproduce the flap, the result is "not reproduced" and arm 2 does not run.**
+3. **Arm 2, 24 hours on the change.** The binary is swapped and the data directory kept, so the change starts from the state arm 1 left, which also exercises the lift if the node is below the floor at the swap.
+
+**Pass, for arm 2:**
+
+- no decrease below the floor;
+- if the node was below the floor at the swap, it lifts to the floor (`radius_lift_total` at least 1, and the lift log line);
 - `radius_flap_total` stays 0;
-- committed depth equals the neighbourhood depth in at least 99 % of salud passes after the initial fill;
-- no `storage radius discrepancy` warning after the initial fill;
-- the radius is never above the floor while the reserve is under capacity (not held too high);
-- a robust floor exists in at least 90 % of checks (the signal is usable on mainnet).
+- the committed depth equals the network depth throughout, apart from the first 45 minutes after the swap (salud's first passes after the restart plus the two checks a floor needs to settle);
+- no other regression compared with arm 1: reserve size and within-radius count, pull sync rate and puller errors, and the count of warning and error log lines.
 
-**The control must show the problem:** at least two flaps per control node in 48 hours. If it does not, the run is inconclusive and the neighbourhoods are chosen again; it is not reported as a pass.
+**Recorded in both arms:** the radius and committed depth timeline from `/status`; salud's neighbourhood and network depth with their peer counts; the self-health warning count; reserve size, within-radius count and the threshold; the decrease and increase log lines. In arm 2 also `radius_flap_total`, `radius_lift_total`, `radius_decrease_deferred_total` by reason, `radius_floor` and `reserve_size_at_lower_radius`.
 
-**Genuine decreases** are covered by tests 3 and 4. If the network depth falls during a run, the results report whether each treatment node followed within two checks; if it does not fall, the results say this was not observed on the bench.
+**Cost to other nodes.** One fill only, about 34 GB of pull sync from the node's mainnet neighbours, who pay for it in upload bandwidth and disk reads. Arm 2 reuses the data directory, so it adds no second fill.
 
-**Negative result:** a treatment node flaps (a path the floor and the fit check miss); a treatment node stays at a higher radius than its neighbours' depth minus d after they have decreased; or the floor is missing in more than 10 % of checks, which would mean the status-protocol signal is not robust enough and the on-chain reveal depth should be considered instead.
+**Disk on bench-1.** This run shares bench-1's disk with the separate cgo soak (#810, #817), which needs at least 45 GB free. Both do not fit at once, so they run one after the other, and this node's data directory is removed when the run ends.
+
+### Limits of this design
+
+It is one neighbourhood, measured before and after rather than as two nodes side by side, with no repetition. Rule 7 asks for three runs per condition; the operator chose this design for the disk available, and the results must say so. It cannot rule out:
+
+- **a change in the neighbourhood between the arms.** New data could arrive during arm 2 and lift the within-radius count above the threshold. The decrease condition would then not hold, and "no flap" would show nothing about the change;
+- **a change in the network depth** during either arm, which moves the floor and the conditions together;
+- **effects of the restart at the swap**, for example peers that do not reconnect, which arm 1 does not have;
+- **variation between neighbourhoods:** a neighbourhood further below, or closer to, the threshold could behave differently.
+
+**How the analysis guards against the first two.** The within-radius count is plotted against the threshold over time in both arms, with the network and neighbourhood depth beside it. Arm 2 counts as a pass only if the decrease condition held for a substantial part of it: the count below the threshold, and `radius_decrease_deferred_total` with reason `below_neighbourhood_depth` or `lower_radius_full` rising in at least a quarter of the checks after the first 45 minutes (the #696 reasons do not count, since they also occur on `main`). A deferral is counted only when the decrease condition held, so this shows that the change, not the data, prevented the decrease. If the count stays above the threshold for most of arm 2, or the network depth changes, the result is "inconclusive", not a pass. The deferral reasons also show which part blocked each decrease. With the floor checked first, the fit check is expected to show no deferrals on this node; tests 1 and 9 cover it.
+
+**Genuine decreases** are covered by tests 3 and 4. If the network depth falls during arm 2, the results report whether the node followed within two checks; if it does not fall, the results say this was not observed.
+
+**Negative result:** in arm 2 the node flaps, decreases below the floor, stays below the floor, or commits at a depth other than the network depth after the first 45 minutes while the decrease condition holds; or the floor is missing for more than 10 % of the checks, which would mean the status-protocol signal is not robust enough on mainnet.
 
 ## Rollout and rollback
 
-A code change with no setting. The issue carries `stake-risk`, so by rule 4 the implementation pull request merges only on the operator's decision, after its review. It ships in the next build. Order: bench-1 (the measurement above), then a single production node on the operator's decision, then the rest. Rollback is the previous build; the persisted radius is valid for it, and it resumes today's behaviour (including the flap).
+A code change with no setting. The issue carries `stake-risk`, so by rule 4 the implementation pull request merges only on the operator's decision, after its review. It ships in the next build. Order: bench-1 (the measurement above, after the cgo soak or before it, not at the same time), then a single production node on the operator's decision, then the rest. Rollback is the previous build; the persisted radius is valid for it, and it resumes today's behaviour (including the flap).
 
 ## Upstream portability
 
@@ -247,10 +268,11 @@ A row for #822 is added to `docs/UPSTREAM.md` with this spec.
 
 None. The constants (fit margin 1/16, at least 3 peers and a strict majority for a robust reading, at most 15 minutes old, two checks to settle a floor, one hour for the flap window) are compiled in. Each becomes a setting only if the measurement shows its value matters (rule 8).
 
-## Open questions for the operator
+## Operator decisions (2026-10-19)
 
-1. Whether the floor should also apply to d = 0 nodes. A stock-configured wasp node whose neighbourhood is under half its capacity also commits below its neighbours after a decrease that fits. This spec leaves d = 0 to the fit check only, because for a d = 0 node the decrease is how a neighbourhood's depth falls.
-2. Whether to add the on-chain reveal depth (`Revealed` events or `winner().depth`) as a cross-check against peers that misreport, at the cost of a chain call per round.
-3. When bench-1 can run mainnet nodes for the measurement.
+1. The floor and the lift apply to doubled nodes only. Nodes without doubling get the fit check only.
+2. No on-chain cross-check for now. It may be added later if peers are seen misreporting their depth.
+3. Measurement only on bench-1 and bench-2, as in the Measurement section.
+4. The implementation pull request merges only on the operator's decision, as written in Rollout.
 
 Generated with help of AI.
