@@ -205,9 +205,9 @@ Race detector on `pkg/storer` and `pkg/salud`; check the exit status directly.
 
 ## Measurement
 
-Only on bench-1 and bench-2, never on production fleet hosts. Capacity measured by the operator on 2026-10-19: both have 8 cores and 15 GB of RAM; bench-1 has 60 GB of free disk, enough for one doubling-1 mainnet node (about 35 GB), and bench-2 has 8.5 GB, enough for no node data.
+Only on bench-1 and bench-2, never on production fleet hosts. Capacity measured by the operator on 2026-10-19: both have 8 cores and 15 GB of RAM; bench-1 has 60 GB of free disk, enough for one doubling-1 mainnet node (about 35 GB), and bench-2 has 8.5 GB, enough for no node data. bench-2's disk will not be grown, so bench-2 runs code-level tests only, and every mainnet measurement is on bench-1.
 
-### (a) Tests, on bench-2 or locally
+### (a) Code-level tests, on bench-2 or locally
 
 The unit and integration tests above, including the flap-loop reproduction (test 1) and its run on an unmodified `upstream/v2.8.3` worktree. They need no reserve on disk beyond what the tests create. The no-flap check for a node without doubling stays a unit test only (tests 1 and 8); it is not measured on mainnet.
 
@@ -218,7 +218,11 @@ The unit and integration tests above, including the flap-loop reproduction (test
 **Order, on the same data directory:**
 
 1. **Initial fill on `main`.** The arms are timed from the end of the fill: the first time the within-radius count stops rising for an hour.
-2. **Arm 1, 24 hours on `main`.** This arm must reproduce the problem: at least 2 decrease and increase cycles, with the `reserve radius decrease` and `reserve radius increase` log lines and their times recorded, and the committed depth one below the network depth for part of the time. The flap counter does not exist on `main`; the cycles are counted from those log lines. **If this arm does not reproduce the flap, the result is "not reproduced" and arm 2 does not run.**
+2. **Arm 1, 24 hours on `main`, extended to at most 48 hours.** Arm 1 must reproduce the problem. "Reproduced" holds if **either** condition is met:
+   - **(a)** at least 2 decrease and increase cycles, counted from the `reserve radius decrease` and `reserve radius increase` log lines (the flap counter does not exist on `main`), with their times recorded; or
+   - **(b)** the node's committed depth is below the network depth for at least half of the arm, not counting the first 45 minutes after the start. Sitting at the wrong depth is the harm, whether or not the radius flaps. A fresh node that fills at the lower radius and just fits under capacity stays there without flapping, as one production node did.
+
+   If neither holds after 24 hours, arm 1 is extended to at most 48 hours. **If neither holds then either, the result is "not reproduced" and arm 2 does not run.** The results say which condition held, and when.
 3. **Arm 2, 24 hours on the change.** The binary is swapped and the data directory kept, so the change starts from the state arm 1 left, which also exercises the lift if the node is below the floor at the swap.
 
 **Pass, for arm 2:**
@@ -233,7 +237,7 @@ The unit and integration tests above, including the flap-loop reproduction (test
 
 **Cost to other nodes.** One fill only, about 34 GB of pull sync from the node's mainnet neighbours, who pay for it in upload bandwidth and disk reads. Arm 2 reuses the data directory, so it adds no second fill.
 
-**Disk on bench-1.** This run shares bench-1's disk with the separate cgo soak (#810, #817), which needs at least 45 GB free. Both do not fit at once, so they run one after the other, and this node's data directory is removed when the run ends.
+**Order on bench-1.** bench-1's disk is shared with the separate cgo soak (#810, #817), which needs at least 45 GB free. The soak runs first, for 24 hours, starting 2026-10-19. This run starts only after the soak has ended and its data directories have been removed. This node's data directory is removed when this run ends.
 
 ### Limits of this design
 
@@ -252,7 +256,7 @@ It is one neighbourhood, measured before and after rather than as two nodes side
 
 ## Rollout and rollback
 
-A code change with no setting. The issue carries `stake-risk`, so by rule 4 the implementation pull request merges only on the operator's decision, after its review. It ships in the next build. Order: bench-1 (the measurement above, after the cgo soak or before it, not at the same time), then a single production node on the operator's decision, then the rest. Rollback is the previous build; the persisted radius is valid for it, and it resumes today's behaviour (including the flap).
+A code change with no setting. The issue carries `stake-risk`, so by rule 4 the implementation pull request merges only on the operator's decision, after its review. It ships in the next build. Order: bench-1 (the measurement above, after the cgo soak has ended), then a single production node on the operator's decision, then the rest. Rollback is the previous build; the persisted radius is valid for it, and it resumes today's behaviour (including the flap).
 
 ## Upstream portability
 
@@ -272,7 +276,8 @@ None. The constants (fit margin 1/16, at least 3 peers and a strict majority for
 
 1. The floor and the lift apply to doubled nodes only. Nodes without doubling get the fit check only.
 2. No on-chain cross-check for now. It may be added later if peers are seen misreporting their depth.
-3. Measurement only on bench-1 and bench-2, as in the Measurement section.
+3. Measurement only on bench-1 and bench-2, as in the Measurement section. bench-2 does code-level tests only; its disk will not be grown. On bench-1 the cgo soak runs first, and this run starts after it has ended and its data directories are removed.
+5. Arm 1 counts as reproduced if the node flaps at least twice or commits below the network depth for at least half of the arm; it runs 24 hours, extended to at most 48.
 4. The implementation pull request merges only on the operator's decision, as written in Rollout.
 
 Generated with help of AI.
