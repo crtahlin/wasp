@@ -848,6 +848,9 @@ func TestBlockedNonceOnInsufficientFunds(t *testing.T) {
 	}
 	h.clock.advanceBlocks(transaction.OverdueBlocks + 1)
 	h.check()
+	if got := metricValue(t, blocked); got != 1 {
+		t.Fatalf("blocked nonces %v after the check that blocked it, want 1", got)
+	}
 	h.check()
 
 	state, err := h.svc.PendingState(withdrawal)

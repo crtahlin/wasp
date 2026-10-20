@@ -204,9 +204,26 @@ func (t *transactionService) checkPending(ctx context.Context) {
 		}
 		t.resendOverdue(ctx, e, age, baseFee)
 		if ctx.Err() != nil {
-			return
+			break
 		}
 	}
+	// entries marked in this check count at once
+	t.metrics.BlockedNonces.Set(float64(t.blockedCount()))
+}
+
+// blockedCount is the number of pending entries marked blocked.
+func (t *transactionService) blockedCount() int {
+	entries, err := t.pendingEntries()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if e.pending.Blocked {
+			n++
+		}
+	}
+	return n
 }
 
 // resendOverdue broadcasts an overdue entry's stored bytes and acts on the

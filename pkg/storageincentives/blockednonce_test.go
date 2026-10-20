@@ -215,6 +215,7 @@ type guardTxs struct {
 	blocked   []transaction.BlockedTransaction
 	lottery   map[common.Hash]bool
 	cancelled map[common.Hash]bool
+	cancelErr error    // CancelForReveal's error, with the hash: a send error
 	calls     []string // "cancel <hash>" and "resend <hash>", in order
 }
 
@@ -266,7 +267,7 @@ func (g *guardTxs) service() transaction.Service {
 			defer g.mu.Unlock()
 			g.cancelled[h] = true
 			g.calls = append(g.calls, "cancel "+h.Hex())
-			return common.Hash{0xcc, h[0]}, nil
+			return common.Hash{0xcc, h[0]}, g.cancelErr
 		}),
 		transactionmock.WithResendTransactionFunc(func(_ context.Context, h common.Hash) (*transaction.ResendResult, error) {
 			g.mu.Lock()
@@ -442,6 +443,17 @@ func TestLastResortCancel(t *testing.T) {
 					t.Fatalf("no line %q\n%s", tc.line, f.logs)
 				}
 			})
+		}
+	})
+
+	t.Run("a cancellation sent with an error is still followed by the reveal", func(t *testing.T) {
+		t.Parallel()
+		f := newGuardFixture(t)
+		f.txs.cancelErr = errors.New("connection reset")
+		f.at(20)
+		want := []string{"cancel " + blockerHash.Hex(), "resend " + revealHash.Hex()}
+		if calls := f.txs.callList(); fmt.Sprint(calls) != fmt.Sprint(want) {
+			t.Fatalf("calls %v, want %v", calls, want)
 		}
 	})
 

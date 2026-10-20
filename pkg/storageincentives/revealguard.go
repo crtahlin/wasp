@@ -122,9 +122,15 @@ func (r *Revealer) guardOwedReveal(ctx context.Context, round uint64) {
 		return
 	}
 	for _, b := range toCancel {
-		if _, err := r.txService.CancelForReveal(ctx, b.Hash, round); err != nil {
+		cancellation, err := r.txService.CancelForReveal(ctx, b.Hash, round)
+		if cancellation == (common.Hash{}) {
 			r.logger.Error(err, "cancelling a blocked transaction to protect the reveal failed", "round", round, "tx", b.Hash, "nonce", b.Nonce)
 			return
+		}
+		if err != nil {
+			// stored and possibly sent: the watchdog sends it again, and it
+			// is not signed a second time, so the reveal must follow now
+			r.logger.Warning("the cancellation that protects the reveal was sent with an error", "round", round, "tx", b.Hash, "cancellation", cancellation, "error", err)
 		}
 	}
 	if _, err := r.txService.ResendTransaction(ctx, revealHash); err != nil {
