@@ -129,7 +129,15 @@ func (db *DB) updateFloor(now time.Time) floorValue {
 // becomes out of radius and goes first at the next unreserve. It reports
 // whether it lifted.
 func (db *DB) liftToFloor(radius uint8, f floorValue) bool {
-	if db.reserveOptions.capacityDoubling == 0 || !f.ok || radius >= f.floor || db.IsSampling() {
+	if db.reserveOptions.capacityDoubling == 0 || !f.ok || radius >= f.floor {
+		return false
+	}
+	// The lift is a radius step, so it holds evictionMu as the unreserve
+	// loop's step does and checks for a sample under it: a sample that
+	// registers meanwhile reads the radius only after the step (#649).
+	db.evictionMu.Lock()
+	defer db.evictionMu.Unlock()
+	if db.IsSampling() {
 		return false
 	}
 	radius++

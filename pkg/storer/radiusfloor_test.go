@@ -362,6 +362,31 @@ func TestRadiusLiftToFloor(t *testing.T) {
 		}
 	})
 
+	// The lift is a radius step, so it takes the eviction barrier as the
+	// unreserve loop's step does (#649). A sample that registers while the
+	// lift holds it reads the radius only after the step, and a lift never
+	// lands inside a sample that has started.
+	t.Run("under the eviction barrier", func(t *testing.T) {
+		t.Parallel()
+		var release func()
+		st, stub, _ := startFloorCase(t, floorCase{
+			doubling: 1, fill: fill, fn: constant(robust(5, 5), true),
+			configure: func(st *storer.DB, _ *followSyncer) { release = st.HoldEvictionBarrierForTest() },
+		})
+		release = sync.OnceFunc(release)
+		defer release()
+		// Check 2 settles the floor and tries to lift.
+		stub.waitCalls(t, 2)
+		time.Sleep(5 * floorWakeup)
+		if r := st.StorageRadius(); r != floorStart {
+			t.Fatalf("radius %d while the eviction barrier is held, want %d", r, floorStart)
+		}
+		release()
+		if err := spinlock.Wait(10*time.Second, func() bool { return st.StorageRadius() == floorStart+1 }); err != nil {
+			t.Fatalf("radius %d after the barrier was released, want %d", st.StorageRadius(), floorStart+1)
+		}
+	})
+
 	t.Run("two steps", func(t *testing.T) {
 		t.Parallel()
 		// N = 6: floor 5, two above the radius.
