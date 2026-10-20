@@ -495,7 +495,10 @@ func (t *transactionService) storeAndBroadcast(ctx context.Context, signedTx *ty
 		return txHash, sendErr
 	}
 
-	if err := t.updatePending(txHash, func(p *pendingTransaction) { p.Ambiguous = false }); err != nil {
+	// The entry can be gone already: the transaction was mined and a
+	// watchdog check removed it before the send returned, as
+	// waitForPendingTx allows for too.
+	if err := t.updatePending(txHash, func(p *pendingTransaction) { p.Ambiguous = false }); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return txHash, err
 	}
 

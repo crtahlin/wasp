@@ -958,3 +958,45 @@ func (f *feeCounter) SuggestedFeeAndTip(ctx context.Context, gasPrice *big.Int, 
 	f.n.Add(1)
 	return f.Backend.SuggestedFeeAndTip(ctx, gasPrice, boost)
 }
+
+// minedBeforeReturn mines a sent transaction and runs a watchdog check
+// before its SendTransaction returns, as a send that takes longer than a
+// block does when an endpoint times out and the next one takes it.
+type minedBeforeReturn struct {
+	transaction.Backend
+	chain *backendsimulation.Chain
+	check func()
+}
+
+func (m *minedBeforeReturn) SendTransaction(ctx context.Context, tx *types.Transaction) error {
+	if err := m.Backend.SendTransaction(ctx, tx); err != nil {
+		return err
+	}
+	m.chain.Mine()
+	m.check()
+	return nil
+}
+
+// A transaction mined, and its entry removed by the watchdog, before its
+// send returns is reported as sent, not as an error (#825 review).
+func TestSendMinedBeforeItReturns(t *testing.T) {
+	t.Parallel()
+
+	var m *minedBeforeReturn
+	h := newHarness(t, harnessConfig{backend: func(c *backendsimulation.Chain) transaction.Backend {
+		m = &minedBeforeReturn{Backend: c.Endpoint("only"), chain: c}
+		return m
+	}})
+	m.check = h.check
+
+	txHash, err := h.send(context.Background(), "withdraw", 1)
+	if err != nil {
+		t.Fatalf("send of a mined transaction returned %v", err)
+	}
+	if h.chain.Nonce(h.sender) != 1 || h.isPending(txHash) {
+		t.Fatal("the test needs the transaction mined and its entry removed before the send returned")
+	}
+	if r, err := h.waitReceipt(txHash); err != nil || r.TxHash != txHash {
+		t.Fatalf("receipt %v, %v", r, err)
+	}
+}
