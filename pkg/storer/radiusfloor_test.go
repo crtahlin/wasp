@@ -387,6 +387,36 @@ func TestRadiusLiftToFloor(t *testing.T) {
 		}
 	})
 
+	// The lift reads IsSampling only after it holds the barrier, so a
+	// sample that registers while the lift waits for the barrier still
+	// stops it (#833).
+	t.Run("a sample that registers during the wait", func(t *testing.T) {
+		t.Parallel()
+		var release func()
+		st, stub, _ := startFloorCase(t, floorCase{
+			doubling: 1, fill: fill, fn: constant(robust(5, 5), true),
+			configure: func(st *storer.DB, _ *followSyncer) { release = st.HoldEvictionBarrierForTest() },
+		})
+		release = sync.OnceFunc(release)
+		defer release()
+		// Check 2 settles the floor; the worker then waits in the lift.
+		stub.waitCalls(t, 2)
+		time.Sleep(5 * floorWakeup)
+		go st.SampleStartedForTest()
+		if err := spinlock.Wait(5*time.Second, st.IsSampling); err != nil {
+			t.Fatal("the sample did not register")
+		}
+		release()
+		time.Sleep(10 * floorWakeup)
+		if r := st.StorageRadius(); r != floorStart {
+			t.Fatalf("radius %d: the lift landed inside a sample that registered while it waited", r)
+		}
+		st.SampleDoneForTest()
+		if err := spinlock.Wait(10*time.Second, func() bool { return st.StorageRadius() == floorStart+1 }); err != nil {
+			t.Fatalf("radius %d after the sample ended, want %d", st.StorageRadius(), floorStart+1)
+		}
+	})
+
 	t.Run("two steps", func(t *testing.T) {
 		t.Parallel()
 		// N = 6: floor 5, two above the radius.
