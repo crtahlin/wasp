@@ -148,6 +148,15 @@ whether upstream has the problem. See
 | [#821](https://github.com/crtahlin/wasp/issues/821) | transaction: CancelTransaction sends before it stores, so a crash can leave an untracked transaction at a nonce | open | - | - |
 | [#822](https://github.com/crtahlin/wasp/issues/822) | storer: a node with reserve-capacity doubling lowers its radius below its neighbourhood's depth, then flaps back | open | - | - |
 
+#822 keeps its label on a reproduction, not only on reading the code.
+`TestRadiusDoesNotFlapIntoAFullLowerRadius` (`pkg/storer/radiusflap_repro_test.go`),
+run in a worktree of unmodified `upstream/v2.8.3` with its one assertion on a
+wasp-only metric removed, fails with the radius going 3, 2, 3, 2 and so on,
+19 decreases in about 20 checks. The same test passes with the fit check. Upstream
+would need the fit check, self-contained in `pkg/storer/reserve.go`; the floor and
+the lift need salud's counts as well (`docs/experiments/radius-floor/spec.md`,
+Upstream portability).
+
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at
 which one peer can serve another was measured in #290. Its node-wide half, the

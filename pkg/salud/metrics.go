@@ -21,6 +21,10 @@ type metrics struct {
 	Unhealthy             prometheus.Counter
 	NeighborhoodAvgDur    prometheus.Gauge
 	NeighborCount         prometheus.Gauge
+	// NeighborhoodDepthPeers and NeighborhoodDepthAgreeing are the counts
+	// behind the neighbourhood depth (wasp #822).
+	NeighborhoodDepthPeers    prometheus.Gauge
+	NeighborhoodDepthAgreeing prometheus.Gauge
 }
 
 func newMetrics() metrics {
@@ -93,6 +97,18 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "neighbors",
 			Help:      "Number of neighborhood peers.",
+		}),
+		NeighborhoodDepthPeers: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "neighborhood_depth_peers",
+			Help:      "Neighbours that answered the status request in the last pass, behind the neighbourhood depth (wasp #822).",
+		}),
+		NeighborhoodDepthAgreeing: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "neighborhood_depth_agreeing",
+			Help:      "Of the neighbours that answered, those at the most common committed depth (wasp #822).",
 		}),
 	}
 }

@@ -776,6 +776,15 @@ type DB struct {
 	// radiusHold is radiusDecreaseHold, copied when the store opens so a
 	// test that changes it does not race a running reserve worker.
 	radiusHold time.Duration
+	// depthReporter is salud's committed-depth reading, from which a doubled
+	// node takes its radius floor (#822).
+	depthReporter atomic.Pointer[DepthReporter]
+	// floor is the reserve worker's radius floor state (#822).
+	floor floorState
+	// flaps records recent radius decreases for the flap counter (#822).
+	flaps flapTracker
+	// lowerBinScans counts the fit check's bin scans, for tests (#822).
+	lowerBinScans atomic.Int64
 	// held accounts for chunks held while the batch store is stale (#583).
 	held *heldState
 

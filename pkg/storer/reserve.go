@@ -335,6 +335,15 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 				continue
 			}
 
+			// A doubled node below its neighbourhood's depth floor is
+			// lifted one step, before the stall gate: it is an increase
+			// (#822). The rest of the check used the old radius, so it
+			// waits for the next check.
+			floor := db.updateFloor(time.Now())
+			if db.liftToFloor(radius, floor) {
+				continue
+			}
+
 			// While the batch store is stale, and for one sync-rate window
 			// after, the radius does not drop: the reserve size is not
 			// reliable while chunks are held, and neither is the sync rate
@@ -345,6 +354,23 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 			}
 
 			if count < threshold(db.reserve.Capacity()) && db.syncer.SyncRate() == 0 && radius > db.reserveOptions.minimumRadius {
+				// A doubled node does not go below its neighbourhood's
+				// depth, and no node decreases into a lower radius that
+				// is already full (#822).
+				if db.floorDeferral(radius, floor) {
+					continue
+				}
+				deferred, err := db.fitDeferral(radius, count)
+				if err != nil {
+					if errors.Is(err, ErrDBQuit) {
+						return
+					}
+					db.logger.Warning("reserve worker count at lower radius", "error", err)
+					continue
+				}
+				if deferred {
+					continue
+				}
 				// A sync rate of 0 also holds while the puller has not synced at
 				// this radius at all; lower it again only once it has (#696).
 				if reason, acted, age := db.radiusDecreaseDeferral(radius, time.Now()); reason != "" {
@@ -352,6 +378,7 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 					db.logger.Debug("reserve radius decrease deferred until the puller has synced at the current radius", "radius", radius, "puller_radius", acted, "since", age, "reason", reason)
 					continue
 				}
+				db.noteRadiusDecrease(radius, time.Now())
 				radius--
 				if err := db.reserve.SetRadius(radius); err != nil {
 					db.logger.Error(err, "reserve set radius")
@@ -664,6 +691,7 @@ func (db *DB) unreserve(ctx context.Context) (err error) {
 		db.logger.Info("reserve radius increase", "radius", radius)
 		_ = db.reserve.SetRadius(radius)
 		db.metrics.StorageRadius.Set(float64(radius))
+		db.noteRadiusIncrease(radius, time.Now())
 		release()
 	}
 

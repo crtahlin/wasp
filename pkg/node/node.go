@@ -1708,6 +1708,9 @@ func NewBee(
 		if h, ok := eventListener.(postage.SyncHealth); ok {
 			localStore.SetPostageSyncHealth(h)
 		}
+		// A doubled node does not lower its radius below its
+		// neighbourhood's committed depth (#822).
+		localStore.SetDepthReporter(saludService)
 		// we pass an empty channel since startup synchronization is not needed for production code, only tests.
 		localStore.StartReserveWorker(ctx, pullerService, waitNetworkRFunc, nil)
 		nodeStatus.SetSync(pullerService)
