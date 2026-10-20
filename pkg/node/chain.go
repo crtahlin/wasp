@@ -145,6 +145,8 @@ func InitChain(
 			return nil, common.Address{}, 0, nil, nil, err
 		}
 
+		warnSingleEndpoint(logger, len(rpcCfg.Endpoints))
+
 		// One configured endpoint keeps the plain backend: the failover wrapper
 		// would add indirection and nothing else, since Recover has nowhere
 		// better to move to. The nil check matters because verifySameChain can
@@ -185,6 +187,20 @@ func InitChain(
 	}
 
 	return backend, overlayEthAddress, backendChainID.Int64(), transactionMonitor, transactionService, nil
+}
+
+// warnSingleEndpoint warns when fewer than two blockchain endpoints are
+// configured: the node then sends its transactions to one endpoint only, and
+// one that keeps a transaction to itself decides alone whether it is mined
+// (#819).
+func warnSingleEndpoint(logger log.Logger, configured int) {
+	if configured >= 2 {
+		return
+	}
+	logger.Warning("only one blockchain rpc endpoint is configured; "+
+		"transactions are sent to it alone, and a transaction it keeps to itself is not mined. "+
+		"configure a second endpoint with --blockchain-rpc-endpoint",
+		"endpoints", configured)
 }
 
 // verifySameChain rejects a configuration whose endpoints disagree about which

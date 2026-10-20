@@ -72,7 +72,10 @@ func TestSendTransactionReachesAnUnconnectedEndpoint(t *testing.T) {
 
 // TestSendTransactionTriesConnectedEndpointsFirst asserts an endpoint with
 // no connection is dialled only after every connected one has failed, so a
-// healthy connected endpoint later in the list is not delayed by a dial.
+// healthy connected endpoint later in the list is not delayed by a dial. The
+// unconnected endpoint is dialled afterwards, in the background, for its
+// copy (#819). Its dial is held until the send has returned: a send that
+// dialled it first would not return.
 func TestSendTransactionTriesConnectedEndpointsFirst(t *testing.T) {
 	t.Parallel()
 
@@ -80,20 +83,36 @@ func TestSendTransactionTriesConnectedEndpointsFirst(t *testing.T) {
 		r     recorder
 		dials atomic.Int32
 	)
+	gate := make(chan struct{})
 	b := newBackend(t,
 		r.endpoint("primary", http429),
-		dialled("secondary", r.endpoint("secondary", nil).Backend, &dials),
+		deadEndpoint("secondary", func(ctx context.Context) (transaction.Backend, error) {
+			dials.Add(1)
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			return r.endpoint("secondary", nil).Backend, nil
+		}),
 		r.endpoint("third", nil),
 	)
+	t.Cleanup(b.Close)
+	tx := testTx()
 
-	if err := b.SendTransaction(context.Background(), testTx()); err != nil {
+	_, err := within(t, 2*time.Second, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, b.SendTransaction(ctx, tx)
+	})
+	if err != nil {
 		t.Fatalf("send: %v, want nil because the third endpoint took it", err)
 	}
 	if len(r.got("third")) != 1 {
 		t.Fatalf("third endpoint got %v, want the transaction", r.got("third"))
 	}
-	if n := dials.Load(); n != 0 {
-		t.Fatalf("unconnected secondary dialled %d times, want 0 because a connected endpoint took the transaction", n)
+	close(gate)
+	waitFor(t, 5*time.Second, func() bool { return len(r.got("secondary")) == 1 })
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("unconnected secondary dialled %d times, want 1 for its copy", n)
 	}
 }
 

@@ -50,3 +50,11 @@ func metricValue(m prometheus.Metric) float64 {
 	}
 	return d.GetCounter().GetValue()
 }
+
+// SetCopyDialTimeout replaces the bound of a copy's or a broadcast's dial
+// and returns a function that restores it.
+func SetCopyDialTimeout(d time.Duration) func() {
+	old := copyDialTimeout
+	copyDialTimeout = d
+	return func() { copyDialTimeout = old }
+}
