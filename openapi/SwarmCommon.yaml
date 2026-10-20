@@ -1070,7 +1070,10 @@ components:
       properties:
         endpoint:
           type: string
-          description: Name of the configured endpoint.
+          description: >-
+            The endpoint's 1-based position in `blockchain-rpc-endpoint` and its scheme and host,
+            for example `#2 https://rpc.example.org`. The path, query and user information of the
+            configured URL, which can hold a provider key, are never shown, here or in `error`.
         result:
           type: string
           enum: [accepted, already known, refused]

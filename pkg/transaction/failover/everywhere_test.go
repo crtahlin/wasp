@@ -7,11 +7,16 @@ package failover_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
+	"github.com/ethersphere/bee/v2/pkg/transaction/backendmock"
 	"github.com/ethersphere/bee/v2/pkg/transaction/failover"
 )
 
@@ -225,8 +230,9 @@ func TestBroadcastReturnsEveryAnswer(t *testing.T) {
 		t.Fatalf("got %d answers, want %d", len(answers), len(want))
 	}
 	for i, w := range want {
-		if answers[i].Endpoint != w.name || answers[i].Kind() != w.kind {
-			t.Fatalf("answer %d: %s %v (%v), want %s %v", i, answers[i].Endpoint, answers[i].Kind(), answers[i].Err, w.name, w.kind)
+		// a name that is not a URL is named by its position only
+		if name := fmt.Sprintf("#%d", i+1); answers[i].Endpoint != name || answers[i].Kind() != w.kind {
+			t.Fatalf("answer %d (%s): %s %v (%v), want %s %v", i, w.name, answers[i].Endpoint, answers[i].Kind(), answers[i].Err, name, w.kind)
 		}
 	}
 	if !errors.Is(answers[3].Err, transaction.ErrEndpointUnreachable) || !errors.Is(answers[5].Err, transaction.ErrEndpointUnreachable) {
@@ -237,5 +243,60 @@ func TestBroadcastReturnsEveryAnswer(t *testing.T) {
 	}
 	if b.Active() != "accepts" {
 		t.Fatalf("active endpoint is %q, want accepts", b.Active())
+	}
+}
+
+// TestBroadcastAnswersCarryNoEndpointSecrets: the answers, which the API
+// returns, name each endpoint by its position, scheme and host only. No
+// user information, path or query of the configured URL appears in a name
+// or in an error text, also when the endpoint's error quotes the URL.
+func TestBroadcastAnswersCarryNoEndpointSecrets(t *testing.T) {
+	t.Parallel()
+
+	const (
+		withKeyInPath  = "https://rpc.example.org/v2/key-in-path-0123"
+		withKeyInQuery = "https://gnosis.example.net:8545/rpc?apikey=key-in-query-4567"
+		withUserInfo   = "wss://user:password-89ab@ws.example.com/ws"
+	)
+	secrets := []string{"key-in-path-0123", "/v2/", "apikey", "key-in-query-4567", "user:", "password-89ab", ".com/ws", "8545/rpc"}
+
+	b := newBackend(t,
+		endpoint(withKeyInPath, backendmock.WithSendTransactionFunc(func(context.Context, *types.Transaction) error {
+			return &url.Error{Op: "Post", URL: withKeyInPath, Err: errors.New("connection reset by peer")}
+		})),
+		endpoint(withKeyInQuery, backendmock.WithSendTransactionFunc(func(context.Context, *types.Transaction) error {
+			return answer{"insufficient funds for gas * price + value (request " + withKeyInQuery + ")"}
+		})),
+		endpoint(withUserInfo, backendmock.WithSendTransactionFunc(func(context.Context, *types.Transaction) error {
+			return nil
+		})),
+	)
+	t.Cleanup(b.Close)
+
+	answers, _ := within(t, 5*time.Second, func(ctx context.Context) ([]transaction.SendAnswer, error) {
+		return b.Broadcast(ctx, testTx()), nil
+	})
+	wantNames := []string{"#1 https://rpc.example.org", "#2 https://gnosis.example.net:8545", "#3 wss://ws.example.com"}
+	wantKinds := []transaction.AnswerKind{transaction.AnswerUnreachable, transaction.AnswerDefinite, transaction.AnswerAccepted}
+	for i, a := range answers {
+		if a.Endpoint != wantNames[i] {
+			t.Fatalf("answer %d named %q, want %q", i, a.Endpoint, wantNames[i])
+		}
+		if a.Kind() != wantKinds[i] {
+			t.Fatalf("answer %d: kind %v, want %v: redacting must keep the classification", i, a.Kind(), wantKinds[i])
+		}
+		text := a.Endpoint
+		if a.Err != nil {
+			text += " " + a.Err.Error()
+		}
+		for _, s := range secrets {
+			if strings.Contains(text, s) {
+				t.Fatalf("answer %d carries %q: %s", i, s, text)
+			}
+		}
+	}
+	var urlErr *url.Error
+	if !errors.As(answers[0].Err, &urlErr) {
+		t.Fatal("the redacted error no longer unwraps to the endpoint's error")
 	}
 }

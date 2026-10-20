@@ -271,11 +271,13 @@ func copyResult(err error) string {
 // endpoint's answer, in the configured order. A transport failure or a failed
 // dial is returned wrapped with transaction.ErrEndpointUnreachable. It never
 // changes the active endpoint. The watchdog and the resend use it (#819).
+// Each answer names its endpoint by publicName, and the URL's secret parts
+// are removed from the error text, because the API returns the answers.
 func (b *Backend) Broadcast(ctx context.Context, tx *types.Transaction) []transaction.SendAnswer {
 	answers := make([]transaction.SendAnswer, len(b.endpoints))
 	var wg sync.WaitGroup
 	for k, ep := range b.endpoints {
-		answers[k].Endpoint = ep.name
+		answers[k].Endpoint = publicName(k, ep.name)
 		wg.Go(func() {
 			c := b.dialForSend(ctx, ep)
 			if c == nil {
@@ -288,7 +290,7 @@ func (b *Backend) Broadcast(ctx context.Context, tx *types.Transaction) []transa
 			if err != nil && isTransportFailure(err) {
 				err = fmt.Errorf("%w: %w", transaction.ErrEndpointUnreachable, err)
 			}
-			answers[k].Err = err
+			answers[k].Err = redact(err, k, ep.name)
 		})
 	}
 	wg.Wait()
