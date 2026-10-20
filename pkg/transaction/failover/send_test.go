@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -64,12 +65,14 @@ func testTx() *types.Transaction { return types.NewTx(&types.LegacyTx{Nonce: 7, 
 
 // TestSendTransactionSendsTheSameBytesToTheNextEndpoint is the case that lost
 // a won claim on mainnet: the active endpoint answers HTTP 500, another
-// endpoint is healthy.
+// endpoint is healthy. Once the second endpoint has taken the transaction,
+// the others get copies of the same bytes in the background (#819).
 func TestSendTransactionSendsTheSameBytesToTheNextEndpoint(t *testing.T) {
 	t.Parallel()
 
 	var r recorder
 	b := newBackend(t, r.endpoint("primary", http500), r.endpoint("secondary", nil), r.endpoint("third", nil))
+	t.Cleanup(b.Close)
 	tx := testTx()
 
 	if err := b.SendTransaction(context.Background(), tx); err != nil {
@@ -78,14 +81,23 @@ func TestSendTransactionSendsTheSameBytesToTheNextEndpoint(t *testing.T) {
 	if got := r.got("secondary"); len(got) != 1 || got[0] != tx.Hash() {
 		t.Fatalf("secondary got %v, want exactly the same transaction %s", got, tx.Hash())
 	}
-	if got := r.got("third"); len(got) != 0 {
-		t.Fatalf("third got %v; once one endpoint accepts, no further endpoint is asked", got)
+	waitFor(t, 5*time.Second, func() bool { return len(r.got("third")) == 1 && len(r.got("primary")) == 2 })
+	for _, name := range []string{"primary", "third"} {
+		for _, h := range r.got(name) {
+			if h != tx.Hash() {
+				t.Fatalf("%s got %s, want only the same transaction %s", name, h, tx.Hash())
+			}
+		}
 	}
 	if b.Active() != "primary" {
 		t.Fatalf("active endpoint is %s; a failed write must not move reads", b.Active())
 	}
 }
 
+// TestSendTransactionAnswers checks what an answer from the second endpoint,
+// after the first failed at the transport level, means. A taken
+// transaction is copied to the other endpoints, so the third gets it; an
+// answer that is returned sends no copy.
 func TestSendTransactionAnswers(t *testing.T) {
 	t.Parallel()
 
@@ -93,10 +105,10 @@ func TestSendTransactionAnswers(t *testing.T) {
 		name      string
 		secondary error
 		wantErr   error // nil means success
-		wantThird bool  // whether the third endpoint is asked
+		wantThird bool  // whether the third endpoint gets the transaction
 	}{
-		{name: "already known counts as sent", secondary: answer{"already known"}},
-		{name: "Nethermind AlreadyKnown counts as sent", secondary: answer{"AlreadyKnown"}},
+		{name: "already known counts as sent", secondary: answer{"already known"}, wantThird: true},
+		{name: "Nethermind AlreadyKnown counts as sent", secondary: answer{"AlreadyKnown"}, wantThird: true},
 		{name: "nonce too low keeps the first error", secondary: answer{"nonce too low: next nonce 8, tx nonce 7"}, wantErr: http500},
 		{name: "Nethermind OldNonce keeps the first error", secondary: answer{"OldNonce"}, wantErr: http500},
 		{name: "replacement underpriced is returned", secondary: answer{"replacement transaction underpriced"}, wantErr: answer{"replacement transaction underpriced"}},
@@ -108,16 +120,22 @@ func TestSendTransactionAnswers(t *testing.T) {
 
 			var r recorder
 			b := newBackend(t, r.endpoint("primary", http500), r.endpoint("secondary", tc.secondary), r.endpoint("third", nil))
+			t.Cleanup(b.Close)
 			err := b.SendTransaction(context.Background(), testTx())
 
 			switch {
-			case tc.wantErr == nil && !tc.wantThird && err != nil:
+			case tc.wantErr == nil && err != nil:
 				t.Fatalf("send: %v, want nil", err)
 			case tc.wantErr != nil && (err == nil || err.Error() != tc.wantErr.Error()):
 				t.Fatalf("send: %v, want %v", err, tc.wantErr)
 			}
-			if asked := len(r.got("third")) == 1; asked != tc.wantThird {
-				t.Fatalf("third endpoint asked: %v, want %v", asked, tc.wantThird)
+			if tc.wantThird {
+				waitFor(t, 5*time.Second, func() bool { return len(r.got("third")) == 1 })
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+			if n := len(r.got("third")); n != 0 {
+				t.Fatalf("third endpoint asked %d times, want 0", n)
 			}
 		})
 	}

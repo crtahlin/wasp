@@ -7,7 +7,8 @@ package failover
 import (
 	"context"
 	"errors"
-	"strings"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
@@ -15,36 +16,13 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/transaction"
 )
 
-// sendAnswer is what an endpoint's answer to a re-sent transaction means.
-type sendAnswer int
-
-const (
-	answerOther      sendAnswer = iota + 1 // an answer about the transaction; return it
-	answerKnown                            // the transaction is already in that endpoint's pool
-	answerNonceTaken                       // a transaction with this nonce is already mined
-)
-
-// classifySendAnswer reads a JSON-RPC error answer to eth_sendRawTransaction.
-// The go-ethereum and Erigon messages are matched as text, the Nethermind
-// result names as written, both without regard to case. See
-// docs/experiments/send-failover-identical-bytes/spec.md.
-func classifySendAnswer(err error) sendAnswer {
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "already known"),
-		strings.Contains(msg, "known transaction"),
-		strings.Contains(msg, "alreadyknown"):
-		return answerKnown
-	case strings.Contains(msg, "nonce too low"),
-		strings.Contains(msg, "oldnonce"):
-		return answerNonceTaken
-	}
-	return answerOther
-}
+// copyDialTimeout bounds the dial of an endpoint without a connection before
+// a copy or a broadcast is sent through it.
+var copyDialTimeout = 5 * time.Second
 
 // SendTransaction sends tx through the active endpoint. When that send fails at
 // the transport level, the same signed transaction is sent through each other
-// connected endpoint in order until one takes it (#772).
+// endpoint in order until one takes it (#772).
 //
 // Sending the same bytes again cannot create a second transaction: they have
 // the same hash and the same nonce, and a chain includes at most one
@@ -53,25 +31,36 @@ func classifySendAnswer(err error) sendAnswer {
 // endpoint does not change; a write failure alone is not a reason to move
 // reads.
 //
+// Once an endpoint has taken the transaction, copies of the same bytes go to
+// every other configured endpoint in the background, for every send, so one
+// endpoint that keeps a transaction to itself does not decide whether it is
+// mined (#819). An "already known" answer from the active endpoint counts as
+// taken: the endpoint holds the bytes. Any other answer from it is returned
+// as it is, with no copies.
+//
 // A persistent send (#783) also goes round every endpoint again, after a
-// pause, until one takes the transaction or the caller's context ends; and
-// once one has taken it, copies of the same bytes go to every other connected
-// endpoint in the background, so one endpoint that keeps a transaction to
-// itself does not decide whether it is mined.
+// pause, until one takes the transaction or the caller's context ends. An
+// ordinary send makes one pass: SendWithHook holds the service lock across
+// the send, and a send that kept going round would hold up every other
+// transaction of the node.
 func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
-	attempt, persist := transaction.PersistentCalls(ctx)
+	_, persist := transaction.PersistentCalls(ctx)
+	attempt := copyAttempt(ctx)
 
 	i, ep, live := b.current()
 	actx, cancel := b.attemptContext(ctx, i)
 	first := live.SendTransaction(actx, tx)
 	cancel()
 	if first == nil {
-		if persist {
-			b.sendCopies(tx, i, attempt)
-		}
+		b.sendCopies(tx, i, attempt)
 		return nil
 	}
 	if !isTransportFailure(first) {
+		if transaction.ClassifySendAnswer(first) == transaction.AnswerAccepted {
+			b.logger.Debug("transaction already known to the active endpoint; sending copies", "endpoint", ep.name, "tx", tx.Hash())
+			b.sendCopies(tx, i, attempt)
+			return nil
+		}
 		return first
 	}
 	b.logger.Warning("send transaction failed at the transport level; sending the same transaction through the next endpoint",
@@ -84,7 +73,7 @@ func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) er
 	for dial := true; ; dial = false {
 		k, done, err := b.resend(ctx, tx, order, first, dial)
 		if done {
-			if err == nil && persist {
+			if err == nil {
 				b.sendCopies(tx, k, attempt)
 			}
 			return err
@@ -103,6 +92,15 @@ func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) er
 			order = append(order, j)
 		}
 	}
+}
+
+// copyAttempt is the bound of one copy: the persistent bound when ctx
+// carries one, and minAttemptTimeout otherwise.
+func copyAttempt(ctx context.Context) time.Duration {
+	if attempt, ok := transaction.PersistentCalls(ctx); ok {
+		return attempt
+	}
+	return minAttemptTimeout
 }
 
 // resend sends tx through the endpoints in order. It reports done with the
@@ -181,12 +179,12 @@ func (b *Backend) resendTo(ctx context.Context, tx *types.Transaction, k int, fi
 		b.logger.Warning("another endpoint refused the transaction", "endpoint", name, "tx", tx.Hash(), "error", err)
 		return k, true, err
 	}
-	switch classifySendAnswer(err) {
-	case answerKnown:
+	switch transaction.ClassifySendAnswer(err) {
+	case transaction.AnswerAccepted:
 		b.metrics.SendResent.WithLabelValues("known").Inc()
 		b.logger.Info("transaction already known to another endpoint", "endpoint", name, "tx", tx.Hash())
 		return k, true, nil
-	case answerNonceTaken:
+	case transaction.AnswerNonceUsed:
 		// This transaction or another with its nonce is mined; whether it
 		// was this one is for the transaction service to find out, so the
 		// send stays ambiguous, as the first error made it.
@@ -200,10 +198,12 @@ func (b *Backend) resendTo(ctx context.Context, tx *types.Transaction, k int, fi
 }
 
 // sendCopies sends tx, which the endpoint at index except took, to every other
-// connected endpoint in the background, each attempt bounded by attempt. The
-// caller does not wait for them and their results change nothing for it; they
-// are counted and logged. Close ends the copies still under way, and once
-// Close has begun no copy is started.
+// configured endpoint in the background, each attempt bounded by attempt. An
+// endpoint without a connection is dialled first, bounded by
+// copyDialTimeout; a connection made this way is kept and never changes the
+// active endpoint. The caller does not wait for the copies and their results
+// change nothing for it; they are counted and logged. Close ends the copies
+// still under way, and once Close has begun no copy is started.
 func (b *Backend) sendCopies(tx *types.Transaction, except int, attempt time.Duration) {
 	b.copiesMu.Lock()
 	defer b.copiesMu.Unlock()
@@ -214,12 +214,14 @@ func (b *Backend) sendCopies(tx *types.Transaction, except int, attempt time.Dur
 		if k == except {
 			continue
 		}
-		c := ep.live.Load()
-		if c == nil {
-			continue
-		}
-		name := ep.name
 		b.copies.Go(func() {
+			c := b.dialForSend(b.closed, ep)
+			if c == nil {
+				b.metrics.SendCopies.WithLabelValues("failed").Inc()
+				b.logger.Debug("could not connect to an endpoint to send it a copy of the transaction",
+					"endpoint", ep.name, "tx", tx.Hash())
+				return
+			}
 			ctx, cancel := context.WithTimeout(b.closed, attempt)
 			defer cancel()
 			err := c.SendTransaction(ctx, tx)
@@ -227,13 +229,25 @@ func (b *Backend) sendCopies(tx *types.Transaction, except int, attempt time.Dur
 			b.metrics.SendCopies.WithLabelValues(result).Inc()
 			if result == "answered" {
 				b.logger.Warning("another endpoint refused a copy of a sent transaction",
-					"endpoint", name, "tx", tx.Hash(), "error", err)
+					"endpoint", ep.name, "tx", tx.Hash(), "error", err)
 				return
 			}
 			b.logger.Debug("sent a copy of the transaction to another endpoint",
-				"endpoint", name, "tx", tx.Hash(), "result", result, "error", err)
+				"endpoint", ep.name, "tx", tx.Hash(), "result", result, "error", err)
 		})
 	}
+}
+
+// dialForSend returns the endpoint's connection, dialling it first, bounded
+// by copyDialTimeout, when it has none. It returns nil when the endpoint
+// cannot be reached.
+func (b *Backend) dialForSend(ctx context.Context, ep *endpoint) transaction.Backend {
+	if c := ep.live.Load(); c != nil {
+		return c.Backend
+	}
+	dctx, cancel := context.WithTimeout(ctx, copyDialTimeout)
+	defer cancel()
+	return b.connect(dctx, ep)
 }
 
 // copyResult names the outcome of a copy for the counter.
@@ -243,10 +257,44 @@ func copyResult(err error) string {
 	}
 	var rpcErr rpc.Error
 	if errors.As(err, &rpcErr) {
-		if classifySendAnswer(err) == answerKnown {
+		if transaction.ClassifySendAnswer(err) == transaction.AnswerAccepted {
 			return "known"
 		}
 		return "answered"
 	}
 	return "failed"
 }
+
+// Broadcast sends tx to every configured endpoint concurrently, dialling one
+// without a connection first (bounded by copyDialTimeout), each send bounded
+// by minAttemptTimeout and by ctx, and waits for all of them. It returns each
+// endpoint's answer, in the configured order. A transport failure or a failed
+// dial is returned wrapped with transaction.ErrEndpointUnreachable. It never
+// changes the active endpoint. The watchdog and the resend use it (#819).
+// Each answer names its endpoint by publicName, and the URL's secret parts
+// are removed from the error text, because the API returns the answers.
+func (b *Backend) Broadcast(ctx context.Context, tx *types.Transaction) []transaction.SendAnswer {
+	answers := make([]transaction.SendAnswer, len(b.endpoints))
+	var wg sync.WaitGroup
+	for k, ep := range b.endpoints {
+		answers[k].Endpoint = publicName(k, ep.name)
+		wg.Go(func() {
+			c := b.dialForSend(ctx, ep)
+			if c == nil {
+				answers[k].Err = fmt.Errorf("%w: could not connect", transaction.ErrEndpointUnreachable)
+				return
+			}
+			sctx, cancel := context.WithTimeout(ctx, minAttemptTimeout)
+			defer cancel()
+			err := c.SendTransaction(sctx, tx)
+			if err != nil && isTransportFailure(err) {
+				err = fmt.Errorf("%w: %w", transaction.ErrEndpointUnreachable, err)
+			}
+			answers[k].Err = redact(err, k, ep.name)
+		})
+	}
+	wg.Wait()
+	return answers
+}
+
+var _ transaction.Broadcaster = (*Backend)(nil)

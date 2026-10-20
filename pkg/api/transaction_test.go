@@ -251,36 +251,93 @@ func TestTransactionResend(t *testing.T) {
 	t.Parallel()
 
 	txHash := common.HexToHash("abcd")
-	t.Run("ok", func(t *testing.T) {
-		t.Parallel()
-
+	_ = txHash
+	resend := func(t *testing.T, res *transaction.ResendResult, err error) *http.Client {
+		t.Helper()
 		testServer, _, _, _, _ := newTestServer(t, testServerOptions{
 			TransactionOpts: []mock.Option{
-				mock.WithResendTransactionFunc(func(ctx context.Context, txHash common.Hash) error {
-					return nil
+				mock.WithResendTransactionFunc(func(ctx context.Context, txHash common.Hash) (*transaction.ResendResult, error) {
+					return res, err
 				}),
 			},
 		})
+		return testServer
+	}
 
-		jsonhttptest.Request(t, testServer, http.MethodPost, "/transactions/"+txHash.String(), http.StatusOK,
-			jsonhttptest.WithExpectedJSONResponse(api.TransactionHashResponse{
+	t.Run("mined", func(t *testing.T) {
+		t.Parallel()
+		jsonhttptest.Request(t, resend(t, &transaction.ResendResult{Mined: true, BlockNumber: 42}, nil), http.MethodPost, "/transactions/"+txHash.String(), http.StatusOK,
+			jsonhttptest.WithExpectedJSONResponse(api.TransactionResendResponse{
 				TransactionHash: txHash,
+				State:           transaction.StateMined,
+				BlockNumber:     42,
+			}),
+		)
+	})
+
+	t.Run("nonce used by a stored transaction", func(t *testing.T) {
+		t.Parallel()
+		usedBy := common.HexToHash("ef01")
+		jsonhttptest.Request(t, resend(t, &transaction.ResendResult{NonceUsed: true, NonceUsedBy: usedBy}, nil), http.MethodPost, "/transactions/"+txHash.String(), http.StatusConflict,
+			jsonhttptest.WithExpectedJSONResponse(api.TransactionNonceUsedResponse{
+				Code:            http.StatusConflict,
+				Message:         api.ErrNonceUsedByOther,
+				TransactionHash: txHash,
+				UsedBy:          &usedBy,
+			}),
+		)
+	})
+
+	t.Run("nonce used by a transaction the node did not store", func(t *testing.T) {
+		t.Parallel()
+		jsonhttptest.Request(t, resend(t, &transaction.ResendResult{NonceUsed: true}, nil), http.MethodPost, "/transactions/"+txHash.String(), http.StatusConflict,
+			jsonhttptest.WithExpectedJSONResponse(api.TransactionNonceUsedResponse{
+				Code:            http.StatusConflict,
+				Message:         api.ErrNonceUsedByUnknown,
+				TransactionHash: txHash,
+			}),
+		)
+	})
+
+	t.Run("pending, with every answer", func(t *testing.T) {
+		t.Parallel()
+		res := &transaction.ResendResult{State: transaction.StateOverdue, Answers: []transaction.SendAnswer{
+			{Endpoint: "first"},
+			{Endpoint: "second", Err: rpcError{"already known"}},
+			{Endpoint: "third", Err: rpcError{"insufficient funds for gas * price + value"}},
+		}}
+		jsonhttptest.Request(t, resend(t, res, nil), http.MethodPost, "/transactions/"+txHash.String(), http.StatusOK,
+			jsonhttptest.WithExpectedJSONResponse(api.TransactionResendResponse{
+				TransactionHash: txHash,
+				State:           transaction.StateOverdue,
+				Answers: []api.EndpointAnswer{
+					{Endpoint: "first", Result: "accepted"},
+					{Endpoint: "second", Result: "already known"},
+					{Endpoint: "third", Result: "refused", Error: "insufficient funds for gas * price + value"},
+				},
+			}),
+		)
+	})
+
+	t.Run("every endpoint refused is still 200", func(t *testing.T) {
+		t.Parallel()
+		res := &transaction.ResendResult{State: transaction.StateBlocked, Answers: []transaction.SendAnswer{
+			{Endpoint: "first", Err: rpcError{"insufficient funds for gas * price + value"}},
+		}}
+		jsonhttptest.Request(t, resend(t, res, nil), http.MethodPost, "/transactions/"+txHash.String(), http.StatusOK,
+			jsonhttptest.WithExpectedJSONResponse(api.TransactionResendResponse{
+				TransactionHash: txHash,
+				State:           transaction.StateBlocked,
+				Answers: []api.EndpointAnswer{
+					{Endpoint: "first", Result: "refused", Error: "insufficient funds for gas * price + value"},
+				},
 			}),
 		)
 	})
 
 	t.Run("unknown transaction", func(t *testing.T) {
 		t.Parallel()
-
-		testServer, _, _, _, _ := newTestServer(t, testServerOptions{
-			TransactionOpts: []mock.Option{
-				mock.WithResendTransactionFunc(func(ctx context.Context, txHash common.Hash) error {
-					return transaction.ErrUnknownTransaction
-				}),
-			},
-		})
-
-		jsonhttptest.Request(t, testServer, http.MethodPost, "/transactions/"+txHash.String(), http.StatusNotFound,
+		jsonhttptest.Request(t, resend(t, nil, transaction.ErrUnknownTransaction), http.MethodPost, "/transactions/"+txHash.String(), http.StatusNotFound,
 			jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
 				Code:    http.StatusNotFound,
 				Message: api.ErrUnknownTransaction,
@@ -288,41 +345,72 @@ func TestTransactionResend(t *testing.T) {
 		)
 	})
 
-	t.Run("already imported", func(t *testing.T) {
+	t.Run("rebuilt hash differs", func(t *testing.T) {
 		t.Parallel()
-
-		testServer, _, _, _, _ := newTestServer(t, testServerOptions{
-			TransactionOpts: []mock.Option{
-				mock.WithResendTransactionFunc(func(ctx context.Context, txHash common.Hash) error {
-					return transaction.ErrAlreadyImported
-				}),
-			},
-		})
-
-		jsonhttptest.Request(t, testServer, http.MethodPost, "/transactions/"+txHash.String(), http.StatusBadRequest,
-			jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
-				Code:    http.StatusBadRequest,
-				Message: api.ErrAlreadyImported,
-			}),
-		)
-	})
-
-	t.Run("other error", func(t *testing.T) {
-		t.Parallel()
-
-		testServer, _, _, _, _ := newTestServer(t, testServerOptions{
-			TransactionOpts: []mock.Option{
-				mock.WithResendTransactionFunc(func(ctx context.Context, txHash common.Hash) error {
-					return errors.New("err")
-				}),
-			},
-		})
-
-		jsonhttptest.Request(t, testServer, http.MethodPost, "/transactions/"+txHash.String(), http.StatusInternalServerError,
+		jsonhttptest.Request(t, resend(t, nil, transaction.ErrRebuiltHashDiffers), http.MethodPost, "/transactions/"+txHash.String(), http.StatusInternalServerError,
 			jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
 				Code:    http.StatusInternalServerError,
 				Message: api.ErrCantResendTransaction,
 			}),
 		)
 	})
+
+	t.Run("invalid hash", func(t *testing.T) {
+		t.Parallel()
+		jsonhttptest.Request(t, resend(t, nil, nil), http.MethodPost, "/transactions/not-a-hash", http.StatusBadRequest)
+	})
+}
+
+// rpcError is a JSON-RPC error answer.
+type rpcError struct{ msg string }
+
+func (e rpcError) Error() string  { return e.msg }
+func (e rpcError) ErrorCode() int { return -32000 }
+
+// TestTransactionState (spec test 16, #819): GET /transactions and GET
+// /transactions/{hash} carry each entry's state, and a blocked entry its
+// reason.
+func TestTransactionState(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("dfff")
+	states := map[common.Hash]transaction.PendingState{
+		common.HexToHash("01"): {State: transaction.StatePending},
+		common.HexToHash("02"): {State: transaction.StateOverdue},
+		common.HexToHash("03"): {State: transaction.StateBlocked, BlockedReason: "insufficient funds for gas * price + value"},
+		common.HexToHash("04"): {State: transaction.StateMined},
+		common.HexToHash("05"): {State: transaction.StateCancelledForReveal},
+	}
+	hashes := []common.Hash{common.HexToHash("01"), common.HexToHash("02"), common.HexToHash("03"), common.HexToHash("04"), common.HexToHash("05")}
+	stored := &transaction.StoredTransaction{To: &recipient, GasPrice: big.NewInt(1), GasFeeCap: big.NewInt(1), GasTipCap: big.NewInt(1), Value: big.NewInt(0), Created: 1616451040}
+
+	testServer, _, _, _, _ := newTestServer(t, testServerOptions{
+		TransactionOpts: []mock.Option{
+			mock.WithPendingTransactionsFunc(func() ([]common.Hash, error) { return hashes, nil }),
+			mock.WithStoredTransactionFunc(func(common.Hash) (*transaction.StoredTransaction, error) { return stored, nil }),
+			mock.WithPendingStateFunc(func(h common.Hash) (transaction.PendingState, error) { return states[h], nil }),
+		},
+	})
+
+	want := make([]api.TransactionInfo, 0, len(hashes))
+	for _, h := range hashes {
+		want = append(want, api.TransactionInfo{
+			TransactionHash: h,
+			To:              &recipient,
+			GasPrice:        bigint.Wrap(stored.GasPrice),
+			GasFeeCap:       bigint.Wrap(stored.GasFeeCap),
+			GasTipCap:       bigint.Wrap(stored.GasTipCap),
+			Value:           bigint.Wrap(stored.Value),
+			Data:            "0x",
+			Created:         time.Unix(stored.Created, 0),
+			State:           states[h].State,
+			BlockedReason:   states[h].BlockedReason,
+		})
+	}
+	jsonhttptest.Request(t, testServer, http.MethodGet, "/transactions", http.StatusOK,
+		jsonhttptest.WithExpectedJSONResponse(api.TransactionPendingList{PendingTransactions: want}),
+	)
+	jsonhttptest.Request(t, testServer, http.MethodGet, "/transactions/"+hashes[2].String(), http.StatusOK,
+		jsonhttptest.WithExpectedJSONResponse(want[2]),
+	)
 }

@@ -24,7 +24,12 @@ type transactionServiceMock struct {
 	watchSentTransaction func(txHash common.Hash) (chan types.Receipt, chan error, error)
 	call                 func(ctx context.Context, request *transaction.TxRequest) (result []byte, err error)
 	pendingTransactions  func() ([]common.Hash, error)
-	resendTransaction    func(ctx context.Context, txHash common.Hash) error
+	resendTransaction    func(ctx context.Context, txHash common.Hash) (*transaction.ResendResult, error)
+	pendingState         func(txHash common.Hash) (transaction.PendingState, error)
+	blockedNonce         func() (uint64, string, bool)
+	blockedBefore        func(nonce uint64) []transaction.BlockedTransaction
+	isLottery            func(txHash common.Hash) bool
+	cancelForReveal      func(ctx context.Context, txHash common.Hash, round uint64) (common.Hash, error)
 	storedTransaction    func(txHash common.Hash) (*transaction.StoredTransaction, error)
 	cancelTransaction    func(ctx context.Context, originalTxHash common.Hash) (common.Hash, error)
 	transactionFee       func(ctx context.Context, txHash common.Hash) (*big.Int, error)
@@ -114,11 +119,49 @@ func (m *transactionServiceMock) PendingTransactions() ([]common.Hash, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (m *transactionServiceMock) ResendTransaction(ctx context.Context, txHash common.Hash) error {
+func (m *transactionServiceMock) ResendTransaction(ctx context.Context, txHash common.Hash) (*transaction.ResendResult, error) {
 	if m.resendTransaction != nil {
 		return m.resendTransaction(ctx, txHash)
 	}
-	return errors.New("not implemented")
+	return nil, errors.New("not implemented")
+}
+
+func (m *transactionServiceMock) PendingState(txHash common.Hash) (transaction.PendingState, error) {
+	if m.pendingState != nil {
+		return m.pendingState(txHash)
+	}
+	return transaction.PendingState{}, nil
+}
+
+// BlockedNonce reports no blocked nonce unless WithBlockedNonceFunc sets one.
+func (m *transactionServiceMock) BlockedNonce() (uint64, string, bool) {
+	if m.blockedNonce != nil {
+		return m.blockedNonce()
+	}
+	return 0, "", false
+}
+
+func (m *transactionServiceMock) BlockedBefore(nonce uint64) []transaction.BlockedTransaction {
+	if m.blockedBefore != nil {
+		return m.blockedBefore(nonce)
+	}
+	return nil
+}
+
+func (m *transactionServiceMock) SetLotteryContract(common.Address) {}
+
+func (m *transactionServiceMock) IsLotteryTransaction(txHash common.Hash) bool {
+	if m.isLottery != nil {
+		return m.isLottery(txHash)
+	}
+	return true
+}
+
+func (m *transactionServiceMock) CancelForReveal(ctx context.Context, txHash common.Hash, round uint64) (common.Hash, error) {
+	if m.cancelForReveal != nil {
+		return m.cancelForReveal(ctx, txHash, round)
+	}
+	return common.Hash{}, errors.New("not implemented")
 }
 
 func (m *transactionServiceMock) StoredTransaction(txHash common.Hash) (*transaction.StoredTransaction, error) {
@@ -190,9 +233,39 @@ func WithPendingTransactionsFunc(f func() ([]common.Hash, error)) Option {
 	})
 }
 
-func WithResendTransactionFunc(f func(ctx context.Context, txHash common.Hash) error) Option {
+func WithResendTransactionFunc(f func(ctx context.Context, txHash common.Hash) (*transaction.ResendResult, error)) Option {
 	return optionFunc(func(s *transactionServiceMock) {
 		s.resendTransaction = f
+	})
+}
+
+func WithPendingStateFunc(f func(txHash common.Hash) (transaction.PendingState, error)) Option {
+	return optionFunc(func(s *transactionServiceMock) {
+		s.pendingState = f
+	})
+}
+
+func WithBlockedNonceFunc(f func() (uint64, string, bool)) Option {
+	return optionFunc(func(s *transactionServiceMock) {
+		s.blockedNonce = f
+	})
+}
+
+func WithBlockedBeforeFunc(f func(nonce uint64) []transaction.BlockedTransaction) Option {
+	return optionFunc(func(s *transactionServiceMock) {
+		s.blockedBefore = f
+	})
+}
+
+func WithIsLotteryTransactionFunc(f func(txHash common.Hash) bool) Option {
+	return optionFunc(func(s *transactionServiceMock) {
+		s.isLottery = f
+	})
+}
+
+func WithCancelForRevealFunc(f func(ctx context.Context, txHash common.Hash, round uint64) (common.Hash, error)) Option {
+	return optionFunc(func(s *transactionServiceMock) {
+		s.cancelForReveal = f
 	})
 }
 

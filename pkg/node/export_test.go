@@ -18,6 +18,7 @@ var (
 	ValidatePostageConfirmationDepth = validatePostageConfirmationDepth
 	ValidatePostageStallShutdown     = validatePostageStallShutdown
 	PostageReadyForLottery           = postageReadyForLottery
+	WarnSingleEndpoint               = warnSingleEndpoint
 )
 
 // NewTestBeeWithClosers builds a Bee with only the push-sync and retrieval

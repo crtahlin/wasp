@@ -29,7 +29,10 @@ var (
 // At the same time if the nonce was already used and this was a few blocks ago we can reasonably assume that it will never confirm.
 type Monitor interface {
 	io.Closer
-	// WatchTransaction watches the transaction until either there is 1 confirmation or a competing transaction with cancellationDepth confirmations.
+	// WatchTransaction watches the transaction's nonce until a watched
+	// transaction at it has 1 confirmation, whose receipt every watch on the
+	// nonce gets, or the nonce is used cancellationDepth blocks deep with no
+	// watched transaction's receipt, which is ErrTransactionCancelled.
 	WatchTransaction(txHash common.Hash, nonce uint64) (<-chan types.Receipt, <-chan error, error)
 }
 type transactionMonitor struct {
@@ -241,21 +244,16 @@ func (tm *transactionMonitor) checkPending(block uint64) error {
 	tm.lock.Lock()
 	defer tm.lock.Unlock()
 
+	// The receipt that confirms a nonce goes to every watch on it, not only
+	// to the watch of the mined hash: the transaction service decides
+	// whether it is the outcome of the watched operation (a replacement of
+	// it) or a cancellation (#819).
 	for nonce, receipt := range confirmedNonces {
-		for txHash, watches := range tm.watchesByNonce[nonce] {
-			if receipt.TxHash == txHash {
-				for _, watch := range watches {
-					select {
-					case watch.receiptC <- *receipt:
-					default:
-					}
-				}
-			} else {
-				for _, watch := range watches {
-					select {
-					case watch.errC <- ErrTransactionCancelled:
-					default:
-					}
+		for _, watches := range tm.watchesByNonce[nonce] {
+			for _, watch := range watches {
+				select {
+				case watch.receiptC <- *receipt:
+				default:
 				}
 			}
 		}

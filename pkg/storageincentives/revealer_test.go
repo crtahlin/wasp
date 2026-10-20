@@ -126,6 +126,7 @@ type fakeTxs struct {
 	replaced    []common.Hash
 	next        byte
 	onReplace   func(newHash common.Hash) // called between hook and "send"
+	extra       []transactionmock.Option  // more mock behaviour, set before restart
 }
 
 func newFakeTxs() *fakeTxs {
@@ -146,7 +147,8 @@ func (f *fakeTxs) set(h common.Hash, st transaction.TxState) {
 }
 
 func (f *fakeTxs) service() transaction.Service {
-	return transactionmock.New(
+	opts := make([]transactionmock.Option, 0, 4+len(f.extra))
+	opts = append(opts,
 		transactionmock.WithTransactionStatusFunc(func(ctx context.Context, h common.Hash) (transaction.TxState, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -192,6 +194,7 @@ func (f *fakeTxs) service() transaction.Service {
 			return &transaction.StoredTransaction{GasFeeCap: fc, Nonce: f.nonces[h]}, nil
 		}),
 	)
+	return transactionmock.New(append(opts, f.extra...)...)
 }
 
 // fakeContract sends commits and reveals: it calls the hook with a fresh

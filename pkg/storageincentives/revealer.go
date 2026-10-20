@@ -128,6 +128,13 @@ type Revealer struct {
 
 	lateMu     sync.Mutex
 	lateWarned map[uint64]struct{} // rounds already warned about a late reveal
+
+	// owedLogged: the lines already logged about a reveal owed behind a
+	// blocked nonce (#819)
+	owedMu     sync.Mutex
+	owedLogged map[owedKey]struct{}
+
+	metrics revealerMetrics
 }
 
 var _ RevealGuard = (*Revealer)(nil)
@@ -155,6 +162,8 @@ func NewRevealer(
 		startupRounds:  make(map[uint64]struct{}),
 		commitGoneAt:   make(map[uint64]uint64),
 		lateWarned:     make(map[uint64]struct{}),
+		owedLogged:     make(map[owedKey]struct{}),
+		metrics:        newRevealerMetrics(),
 		earlyCancel:    func() {},
 	}
 
@@ -326,6 +335,9 @@ func (r *Revealer) Close() error {
 // retries every block until it is mined, the claim phase starts or ctx is
 // done. It reports whether the round is revealed.
 func (r *Revealer) revealUntil(ctx context.Context, round uint64) bool {
+	// the reveal is mined, the claim phase started or the wait ended:
+	// nothing is owed behind a blocked nonce any more (#819)
+	defer r.clearOwed()
 	for {
 		if r.state.HasRevealed(round) {
 			return true
@@ -361,6 +373,7 @@ func (r *Revealer) revealUntil(ctx context.Context, round uint64) bool {
 			if done {
 				return r.state.HasRevealed(round)
 			}
+			r.guardOwedReveal(ctx, round)
 			r.warnIfLate(ctx, round)
 			if bounded {
 				// the step used its blocks waiting; look again at once
