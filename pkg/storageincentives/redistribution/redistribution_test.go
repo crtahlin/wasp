@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+
 	chaincfg "github.com/ethersphere/bee/v2/pkg/config"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/sctx"
@@ -338,7 +339,7 @@ func TestRedistribution(t *testing.T) {
 			0,
 		)
 
-		_, err = contract.Commit(ctx, testobfus, 0)
+		_, err = contract.Commit(ctx, testobfus, 0, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -365,6 +366,11 @@ func TestRedistribution(t *testing.T) {
 						if !bytes.Equal(expectedCallData[:32], request.Data[:32]) {
 							return common.Hash{}, fmt.Errorf("got wrong call data. wanted %x, got %x", expectedCallData, request.Data)
 						}
+						// the reveal starts with a fee cap of four times the
+						// base fee, the value the spec gives (#793)
+						if request.MinBaseFeeMultiple != 4 {
+							return common.Hash{}, fmt.Errorf("reveal fee cap multiple %d, want 4", request.MinBaseFeeMultiple)
+						}
 						return txHashDeposited, nil
 					}
 					return common.Hash{}, errors.New("sent to wrong contract")
@@ -383,7 +389,7 @@ func TestRedistribution(t *testing.T) {
 			0,
 		)
 
-		_, err = contract.Reveal(ctx, depth, common.Hex2Bytes("hash"), common.Hex2Bytes("nonce"))
+		_, err = contract.Reveal(ctx, depth, common.Hex2Bytes("hash"), common.Hex2Bytes("nonce"), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -472,7 +478,7 @@ func TestRedistribution(t *testing.T) {
 			0,
 		)
 
-		_, err = contract.Commit(ctx, common.Hex2Bytes("hash"), 0)
+		_, err = contract.Commit(ctx, common.Hex2Bytes("hash"), 0, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}

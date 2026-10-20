@@ -4,8 +4,16 @@
 
 package storageincentives
 
+import "context"
+
+// IsPlaying runs the agent's play check with its retries (#773).
+func (a *Agent) IsPlaying(ctx context.Context, depth uint8) (bool, error) {
+	return a.isPlaying(ctx, depth)
+}
+
 var (
 	NewEvents           = newEvents
 	SampleChunk         = sampleChunk
 	MakeInclusionProofs = makeInclusionProofs
+	SampleFlightKey     = sampleFlightKey
 )

@@ -12,10 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethersphere/bee/v2/pkg/bmt"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/events"
 	"github.com/ethersphere/bee/v2/pkg/storer/internal/reserve"
+	"github.com/ethersphere/bee/v2/pkg/storer/internal/transaction"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func (db *DB) Reserve() *reserve.Reserve {
@@ -29,6 +33,9 @@ func (db *DB) Events() *events.Subscriber {
 func ReplaceSharkyShardLimit(val int) {
 	sharkyNoOfShards = val
 }
+
+// SharkyShardLimit returns the number of sharky shards stores are opened with.
+func SharkyShardLimit() int { return sharkyNoOfShards }
 
 func (db *DB) WaitForBgCacheWorkers() (unblock func()) {
 	for range defaultBgCacheWorkers {
@@ -195,4 +202,100 @@ func CacheLimiterCancelled(db *DB) bool {
 	default:
 		return false
 	}
+}
+
+// SetRadiusDecreaseHold replaces how long after the stale state the radius
+// decrease stays blocked, for a test, and returns a function that restores it.
+func SetRadiusDecreaseHold(d time.Duration) func() {
+	old := radiusDecreaseHold
+	radiusDecreaseHold = d
+	return func() { radiusDecreaseHold = old }
+}
+
+// SetHeldLimits replaces the held-area bound and the validation pacing for
+// a test, and returns a function that restores them.
+func SetHeldLimits(maxAddrs uint64, check time.Duration, round int, pause time.Duration) func() {
+	oldM, oldC, oldR, oldP := heldChunksMax, heldCheckInterval, heldRound, heldRoundPause
+	heldChunksMax, heldCheckInterval, heldRound, heldRoundPause = maxAddrs, check, round, pause
+	return func() { heldChunksMax, heldCheckInterval, heldRound, heldRoundPause = oldM, oldC, oldR, oldP }
+}
+
+// ValidateHeldPass runs one validation pass over the held index, as one tick
+// of the validation worker does.
+func (db *DB) ValidateHeldPass(ctx context.Context) error { return db.validateHeld(ctx) }
+
+// HeldCount returns the number of distinct held addresses.
+func (db *DB) HeldCount() uint64 { return db.held.count() }
+
+// DeleteChunkForTest removes one chunk-store reference, as a crash or a
+// recovery prune might leave a held entry without its chunk.
+func (db *DB) DeleteChunkForTest(ctx context.Context, addr swarm.Address) error {
+	return db.storage.Run(ctx, func(s transaction.Store) error { return s.ChunkStore().Delete(ctx, addr) })
+}
+
+// RadiusDecreaseDeferred returns the deferred radius decreases counted for
+// reason (#696).
+func (db *DB) RadiusDecreaseDeferred(reason string) float64 {
+	var m dto.Metric
+	if err := db.metrics.RadiusDecreaseDeferred.WithLabelValues(reason).Write(&m); err != nil {
+		return -1
+	}
+	return m.GetCounter().GetValue()
+}
+
+const (
+	DeferNotStarted  = deferNotStarted
+	DeferNotAtRadius = deferNotAtRadius
+	DeferSettling    = deferSettling
+)
+
+// SetDrainWindow shortens the shutdown drain of a real DB for a test.
+func SetDrainWindow(db *DB, d time.Duration) { db.drainWindow = d }
+
+// TransformedAddress exposes the sampler's per-chunk hashing so it can be
+// benchmarked on its own.
+//
+// The exported signature takes a swarm.Chunk and is deliberately held stable
+// even where transformedAddress itself does not, so that the same benchmark
+// source can be run against branches that shape the internal function
+// differently. Only this shim changes between them.
+func TransformedAddress(hasher bmt.Hasher, ch swarm.Chunk, chType swarm.ChunkType) (swarm.Address, error) {
+	return transformedAddress(hasher, ch.Address(), ch.Data(), chType)
+}
+
+// PutLegacyRogueBinItem writes a reserve bin entry of unspecified chunk type
+// straight into the index, with no chunk data behind it. Since Bee v2.8.3
+// reserve.Put refuses such a chunk, so this is the only way a test can build
+// the legacy entries the sampler's rogue check and the rogue-chunk migration
+// exist for, or an entry in a bin no valid random chunk reaches in practice.
+func (db *DB) PutLegacyRogueBinItem(ctx context.Context, bin uint8, binID uint64, addr swarm.Address, batchID []byte) error {
+	return db.storage.Run(ctx, func(s transaction.Store) error {
+		return s.IndexStore().Put(&reserve.ChunkBinItem{
+			Bin:       bin,
+			BinID:     binID,
+			Address:   addr,
+			BatchID:   batchID,
+			StampHash: make([]byte, swarm.HashSize),
+			ChunkType: swarm.ChunkTypeUnspecified,
+		})
+	})
+}
+
+// PutLegacyBinItemWithData writes a reserve bin entry of the given type and
+// its data straight into the store, bypassing the reserve's validation, as a
+// malformed entry left by an older version or a damaged store would look.
+func (db *DB) PutLegacyBinItemWithData(ctx context.Context, bin uint8, binID uint64, addr swarm.Address, batchID []byte, chType swarm.ChunkType, data []byte) error {
+	return db.storage.Run(ctx, func(s transaction.Store) error {
+		if err := s.ChunkStore().Put(ctx, swarm.NewChunk(addr, data)); err != nil {
+			return err
+		}
+		return s.IndexStore().Put(&reserve.ChunkBinItem{
+			Bin:       bin,
+			BinID:     binID,
+			Address:   addr,
+			BatchID:   batchID,
+			StampHash: make([]byte, swarm.HashSize),
+			ChunkType: chType,
+		})
+	})
 }

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cockroachdb/pebble"
+
 	"github.com/ethersphere/bee/v2/pkg/storage/pebblestore"
 )
 
@@ -80,13 +82,26 @@ func TestResolveEngine(t *testing.T) {
 	})
 }
 
+// testPebbleOptions builds the pebble options for opts and releases the block
+// cache they create when the test ends. These tests only read the options and
+// never open a store, so nothing else drops the creator reference; pebble's
+// invariants build reports such a cache as a leak (#815).
+func testPebbleOptions(t *testing.T, opts *Options) *pebble.Options {
+	t.Helper()
+	o := pebbleIndexStoreOptions(opts)
+	if o.Cache != nil {
+		t.Cleanup(o.Cache.Unref)
+	}
+	return o
+}
+
 // TestPebbleIndexStoreOptions checks the db-* tuning knobs reach the equivalent
 // pebble.Options fields, and that a zero knob leaves Pebble's own default.
 func TestPebbleIndexStoreOptions(t *testing.T) {
 	t.Parallel()
 
 	opts := defaultOptions()
-	o := pebbleIndexStoreOptions(opts)
+	o := testPebbleOptions(t, opts)
 
 	if o.Cache == nil {
 		t.Error("block cache capacity did not produce a Cache")
@@ -108,13 +123,13 @@ func TestPebbleIndexStoreOptions(t *testing.T) {
 
 	// An explicit, non-default compaction trigger overrides the pebble default.
 	opts.LdbCompactionL0Trigger = 6
-	if got := pebbleIndexStoreOptions(opts).L0CompactionThreshold; got != 6 {
+	if got := testPebbleOptions(t, opts).L0CompactionThreshold; got != 6 {
 		t.Errorf("explicit L0 trigger not honoured: L0CompactionThreshold = %d, want 6", got)
 	}
 
 	// A zero compaction knob must not override Pebble's default with 0.
 	opts.LdbCompactionL0Trigger = 0
-	if got := pebbleIndexStoreOptions(opts).L0CompactionThreshold; got == 0 {
+	if got := testPebbleOptions(t, opts).L0CompactionThreshold; got == 0 {
 		t.Error("a zero knob overrode L0CompactionThreshold with 0 instead of keeping the pebble default")
 	}
 }
@@ -127,13 +142,13 @@ func TestPebbleBlockCacheDefault(t *testing.T) {
 	t.Parallel()
 
 	reserve := func(o *Options) int64 {
-		p := pebbleIndexStoreOptions(o)
+		p := testPebbleOptions(t, o)
 		return int64(p.MemTableStopWritesThreshold+1) * int64(p.MemTableSize)
 	}
 
 	opts := defaultOptions()
 	want := int64(defaultPebbleUsableBlockCache) + reserve(opts)
-	if got := pebbleIndexStoreOptions(opts).Cache.MaxSize(); got != want {
+	if got := testPebbleOptions(t, opts).Cache.MaxSize(); got != want {
 		t.Errorf("pebble block cache at the shared default = %d, want %d (64 MiB usable plus the memtable reservation)", got, want)
 	}
 	if want != 160<<20 {
@@ -145,14 +160,14 @@ func TestPebbleBlockCacheDefault(t *testing.T) {
 
 	// A larger write buffer raises the reservation, and the cache with it.
 	opts.LdbWriteBufferSize = 64 << 20
-	if got, want := pebbleIndexStoreOptions(opts).Cache.MaxSize(), int64(defaultPebbleUsableBlockCache)+3*(64<<20); got != want {
+	if got, want := testPebbleOptions(t, opts).Cache.MaxSize(), int64(defaultPebbleUsableBlockCache)+3*(64<<20); got != want {
 		t.Errorf("pebble block cache with a 64 MiB write buffer = %d, want %d", got, want)
 	}
 
 	// A value other than the shared default, larger or smaller, is the usable size.
 	for _, v := range []uint64{8 << 20, 1 << 30, defaultBlockCacheCapacity - 1} {
 		opts.LdbBlockCacheCapacity = v
-		if got, want := pebbleIndexStoreOptions(opts).Cache.MaxSize(), int64(v)+reserve(opts); got != want {
+		if got, want := testPebbleOptions(t, opts).Cache.MaxSize(), int64(v)+reserve(opts); got != want {
 			t.Errorf("explicit block cache %d: got %d, want %d", v, got, want)
 		}
 	}

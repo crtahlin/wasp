@@ -145,6 +145,14 @@ type Reserve interface {
 	ReserveSample(context.Context, []byte, uint8, uint64, *big.Int) (Sample, error)
 	WindowedSample(context.Context, []byte, uint8, uint64, *big.Int) (Sample, error)
 	ReserveSize() int
+	// EvictingFor returns how long the current eviction episode has been
+	// actively evicting, or 0. The storage incentives agent sits out a
+	// round when it is at least EvictingMinAge (#649).
+	EvictingFor() time.Duration
+	// RadiusState returns the storage radius and how many times it has
+	// increased, from one read. The agent compares the count before and
+	// after a sample (#658).
+	RadiusState() (radius uint8, increases uint64)
 }
 
 // ReserveIterator is a helper interface which can be used to iterate over all
@@ -159,6 +167,10 @@ type ReserveStore interface {
 	ReserveGet(ctx context.Context, addr swarm.Address, batchID []byte, stampHash []byte) (swarm.Chunk, error)
 	ReserveHas(addr swarm.Address, batchID []byte, stampHash []byte) (bool, error)
 	ReservePutter() storage.Putter
+	// ReservePutVerified is ReservePutter().Put for a chunk whose type the
+	// caller has already established with cac.Valid and
+	// soc.FromChunkValidate on this same chunk (wasp #810).
+	ReservePutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error
 	SubscribeBin(ctx context.Context, bin uint8, start uint64) (<-chan *BinC, func(), <-chan error)
 	ReserveLastBinIDs() ([]uint64, uint64, error)
 	RadiusChecker
@@ -209,7 +221,9 @@ func (d *dirFS) Open(path string) (fs.File, error) {
 
 var (
 	sharkyNoOfShards = 32
-	ErrDBQuit        = errors.New("db quit")
+	// ErrDBQuit is returned by work stopped by a shutdown, including store
+	// calls refused once the store stopped admitting work (wasp #634).
+	ErrDBQuit = transaction.ErrClosed
 )
 
 type closerFn func() error
@@ -334,7 +348,7 @@ func initStore(basePath string, opts *Options) (storage.BatchStore, error) {
 		}
 		return store, nil
 	case EnginePebble:
-		store, err := pebblestore.New(indexDir, pebbleIndexStoreOptions(opts))
+		store, err := openPebbleIndexStore(indexDir, pebbleIndexStoreOptions(opts))
 		if err != nil {
 			return nil, fmt.Errorf("failed creating pebble index store: %w", err)
 		}
@@ -441,9 +455,9 @@ func indexStoreOptions(opts *Options) *opt.Options {
 // than forced onto a field that means something different. A zero knob keeps the
 // engine's own default. See docs/experiments/storage-engine-eval/spec.md.
 //
-// The block cache is created here and handed to Pebble; its one retained
-// reference is released when the process exits, which for a store opened once
-// per node lifetime is not worth threading a closer through for.
+// The block cache is created here with one reference, owned by the caller.
+// openPebbleIndexStore releases that reference once pebble.Open has taken its
+// own, so the cache is freed when the store closes (#815).
 func pebbleIndexStoreOptions(opts *Options) *pebble.Options {
 	o := pebblestore.DefaultOptions()
 	if opts.LdbWriteBufferSize > 0 {
@@ -492,6 +506,22 @@ func pebbleBlockCacheCapacity(configured, memTableSize uint64, stopWritesThresho
 		usable = defaultPebbleUsableBlockCache
 	}
 	return usable + uint64(stopWritesThreshold+1)*memTableSize
+}
+
+// openPebbleIndexStore opens the pebble index store and then drops the
+// reference to o.Cache that pebbleIndexStoreOptions created, on the success and
+// the error path. pebble.Open takes its own reference to a cache it is given and
+// releases it on Close, or when Open fails after taking it, so ours is never
+// needed after Open returns. Keeping it would leave the cache alive after Close
+// for every open in the process; in cgo builds pebble allocates cache memory
+// with C calloc, so that memory would never be freed. See
+// docs/experiments/pebble-cache-unref/spec.md.
+func openPebbleIndexStore(indexDir string, o *pebble.Options) (*pebblestore.Store, error) {
+	store, err := pebblestore.New(indexDir, o)
+	if o.Cache != nil {
+		o.Cache.Unref()
+	}
+	return store, err
 }
 
 func initDiskRepository(
@@ -600,7 +630,8 @@ func initDiskRepository(
 
 	recoveryCloser, pruned, err := sharkyRecovery(ctx, sharkyBasePath, store, opts)
 	if err != nil {
-		return nil, nil, nil, 0, fmt.Errorf("failed to recover sharky: %w", err)
+		// Close the index store opened above, or it stays open (wasp #634).
+		return nil, nil, nil, 0, errors.Join(fmt.Errorf("failed to recover sharky: %w", err), store.Close())
 	}
 
 	sharky, err := sharky.New(
@@ -609,7 +640,7 @@ func initDiskRepository(
 		swarm.SocMaxChunkSize,
 	)
 	if err != nil {
-		return nil, nil, nil, 0, fmt.Errorf("failed creating sharky instance: %w", err)
+		return nil, nil, nil, 0, errors.Join(fmt.Errorf("failed creating sharky instance: %w", err), store.Close())
 	}
 
 	pinIntegrity := &PinIntegrity{
@@ -674,7 +705,12 @@ type Options struct {
 	SamplerSortWindow int
 	// ReserveHasConcurrency bounds how many ReserveHas lookups may run at
 	// once. Zero leaves them unbounded, which is the previous behaviour.
-	ReserveHasConcurrency   int
+	ReserveHasConcurrency int
+	// ReserveEvictionRate is the most chunks per second reserve eviction
+	// deletes, raised to the rate at which chunks arrive when that is
+	// higher. Zero means no limit and runtime.NumCPU() goroutines, the
+	// previous behaviour apart from eviction working in rounds (#623).
+	ReserveEvictionRate     int
 	ReserveMinEvictCount    uint64
 	ReserveCapacityDoubling int
 
@@ -682,6 +718,13 @@ type Options struct {
 	CacheMinEvictCount uint64
 
 	MinimumStorageRadius uint
+
+	// RadiusDecreaseSettle is how long the puller must have synced at the
+	// current radius before the reserve worker lowers it again; one sync-rate
+	// window. Zero disables only this wait; the checks that the puller has
+	// acted on the current radius still apply when the syncer reports it.
+	// See #696.
+	RadiusDecreaseSettle time.Duration
 
 	// ShutdownTimeout bounds how long Close waits for background cache and
 	// reserve workers to finish before giving up and reporting an error.
@@ -727,6 +770,15 @@ type DB struct {
 	logger log.Logger
 	tracer *tracing.Tracer
 
+	// postageSyncHealth holds the postage listener's sync health, which
+	// blocks the radius decrease while the batch store is stale (#583).
+	postageSyncHealth atomic.Pointer[postage.SyncHealth]
+	// radiusHold is radiusDecreaseHold, copied when the store opens so a
+	// test that changes it does not race a running reserve worker.
+	radiusHold time.Duration
+	// held accounts for chunks held while the batch store is stale (#583).
+	held *heldState
+
 	metrics             metrics
 	storage             transaction.Storage
 	multex              *multex.Multex
@@ -754,8 +806,11 @@ type DB struct {
 	validStamp       postage.ValidStampFn
 	setSyncerOnce    sync.Once
 	syncer           Syncer
-	reserveOptions   reserveOpts
-	shutdownTimeout  time.Duration
+	// radiusReporter is the syncer when it reports the radius it acted on
+	// (#696); nil otherwise.
+	radiusReporter  RadiusSyncReporter
+	reserveOptions  reserveOpts
+	shutdownTimeout time.Duration
 	// drainWindow is how long each shutdown drain waits. Zero means
 	// drainTimeout. A field rather than a bare constant so a test can
 	// shorten it per store, instead of mutating package state that
@@ -764,10 +819,32 @@ type DB struct {
 	// reserveHasLimiter bounds concurrent ReserveHas lookups. Nil when
 	// unbounded, which is the default.
 	reserveHasLimiter chan struct{}
+	// evictionPacer paces reserve eviction. Nil when reserve-eviction-rate
+	// is 0, which is the default (#623).
+	evictionPacer *evictionPacer
 
-	// samplingInProgress is set while ReserveSample runs, so the puller can
-	// pause pulling and leave the store quiet for the sample. See issue #23.
-	samplingInProgress atomic.Bool
+	// samplingActive counts the reserve samples running, so the puller can
+	// pause pulling and leave the store quiet for the sample (issue #23). A
+	// counter, not a flag: two samples can overlap (#649).
+	samplingActive atomic.Int32
+	// samplingMu guards the stretch of sampling eviction waits for (#649).
+	samplingMu        sync.Mutex
+	samplingCount     int
+	samplingSince     time.Time // when samplingCount last went from 0 to 1
+	samplingCapWarned bool      // the cap Warning was logged this stretch
+	// otherSamplingCount and pauseBudget are the samples other than the
+	// lottery's and the waited time they used (#659); samplingCount
+	// and samplingSince above count lottery samples only.
+	otherSamplingCount int
+	pauseBudget        pauseBudget
+	// progress is the eviction run in progress, for the progress line and
+	// gauges (#626).
+	progress evictionRunProgress
+	// evictionMu is held across one eviction round and one radius step, so
+	// a sample can wait for the one in progress (#649).
+	evictionMu sync.Mutex
+	// episode measures how long the node has been evicting (#649).
+	episode evictionEpisode
 
 	pinIntegrity *PinIntegrity
 }
@@ -780,6 +857,8 @@ type reserveOpts struct {
 	cacheMinEvictCount uint64
 	minimumRadius      uint8
 	capacityDoubling   int
+	// decreaseSettle is Options.RadiusDecreaseSettle (#696).
+	decreaseSettle time.Duration
 	// samplerReadConcurrency is how many chunk loads the sampler has in flight.
 	// Separate from the hasher count because loading is disk-bound and hashing
 	// is CPU-bound; see issue #9.
@@ -863,6 +942,12 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 		opts.Logger = log.Noop
 	}
 
+	// Checked before anything is opened, so a refusal leaks nothing, and
+	// whether or not the node has a reserve (#623).
+	if opts.ReserveEvictionRate < 0 {
+		return nil, fmt.Errorf("reserve eviction rate %d: must be 0 or more", opts.ReserveEvictionRate)
+	}
+
 	lock := multex.New()
 	metrics := newMetrics()
 	opts.LdbStats.CompareAndSwap(nil, metrics.LevelDBStats)
@@ -910,11 +995,13 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 
 	clCtx, clCancel := context.WithCancel(ctx)
 	db := &DB{
-		metrics:  metrics,
-		storage:  st,
-		logger:   logger,
-		tracer:   opts.Tracer,
-		baseAddr: opts.Address,
+		held:       newHeldState(),
+		radiusHold: radiusDecreaseHold,
+		metrics:    metrics,
+		storage:    st,
+		logger:     logger,
+		tracer:     opts.Tracer,
+		baseAddr:   opts.Address,
 		shutdownTimeout: func() time.Duration {
 			if opts.ShutdownTimeout > 0 {
 				return opts.ShutdownTimeout
@@ -943,6 +1030,7 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 			minEvictCount:          opts.ReserveMinEvictCount,
 			cacheMinEvictCount:     opts.CacheMinEvictCount,
 			minimumRadius:          uint8(opts.MinimumStorageRadius),
+			decreaseSettle:         opts.RadiusDecreaseSettle,
 			capacityDoubling:       opts.ReserveCapacityDoubling,
 			samplerReadConcurrency: opts.SamplerReadConcurrency,
 			samplerSortWindow:      opts.SamplerSortWindow,
@@ -957,7 +1045,11 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 	}
 
 	if opts.ReserveCapacity > 0 {
-		rs, err := reserve.New(
+		// Assigned to the function's err, not a shadow, so the deferred
+		// close of the store runs on a failure (wasp #635).
+		var rs *reserve.Reserve
+		rs, err = reserve.NewContext(
+			ctx,
 			opts.Address,
 			st,
 			opts.ReserveCapacity,
@@ -968,6 +1060,13 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 			return nil, err
 		}
 		db.reserve = rs
+
+		if p := newEvictionPacer(opts.ReserveEvictionRate, rs.Arrivals); p != nil {
+			p.setWorkers = func(n int) { db.metrics.ReserveEvictionWorkers.Set(float64(n)) }
+			p.setArrivalRate = db.metrics.ReserveArrivalRate.Set
+			db.metrics.ReserveEvictionWorkers.Set(float64(p.Workers()))
+			db.evictionPacer = p
+		}
 
 		db.metrics.StorageRadius.Set(float64(rs.Radius()))
 		db.metrics.ReserveSize.Set(float64(rs.Size()))
@@ -995,6 +1094,19 @@ func New(ctx context.Context, dirPath string, opts *Options) (*DB, error) {
 	db.localIngest.gauge = db.metrics.LocalIngestChunks
 	db.rebuildLocalIngestTotal(ctx)
 
+	// Held chunks survive a restart; their count is rebuilt here, after
+	// recovery, and they are validated once the listener is caught up
+	// (#583).
+	db.rebuildHeldCount(ctx)
+
+	// A stop during startup cancels ctx. The counts above return early on
+	// it; returning the context's error here closes the store in the
+	// deferred close instead of leaving it open with its dirty marker
+	// (wasp #635).
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	db.inFlight.Add(1)
 	go db.cacheWorker(ctx)
 
@@ -1009,6 +1121,38 @@ func (db *DB) ResetReserve(ctx context.Context) error {
 // Metrics returns set of prometheus collectors.
 func (db *DB) Metrics() []prometheus.Collector {
 	collectors := m.PrometheusCollectorsFromFields(db.metrics)
+	collectors = append(collectors, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: "localstore",
+			Name:      "eviction_running_seconds",
+			Help:      "Active time of the current reserve eviction episode, not counting time paused for a sample; 0 when none (wasp #649).",
+		},
+		func() float64 { return db.EvictingFor().Seconds() },
+	))
+	collectors = append(collectors, prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: "localstore",
+			Name:      "eviction_expiry_running_seconds",
+			Help:      "Active time of the expired-batch eviction run in progress, not counting time paused for a sample; 0 when none (wasp #663).",
+		},
+		func() float64 { return db.episode.expiryActiveFor(time.Now()).Seconds() },
+	))
+	collectors = append(collectors, prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: "localstore",
+			Name:      "reserve_chunk_type_shadow_mismatch_total",
+			Help:      "Sampled reserve puts whose caller-verified chunk type differed from the recomputed type; the recomputed type was stored (wasp #810).",
+		},
+		func() float64 {
+			if db.reserve == nil {
+				return 0
+			}
+			return float64(db.reserve.ChunkTypeShadowMismatches())
+		},
+	))
 	if v, ok := db.storage.(m.Collector); ok {
 		collectors = append(collectors, v.Metrics()...)
 	}
@@ -1091,6 +1235,20 @@ func (db *DB) Close() error {
 	// racing it. A pathological store close blocks shutdown, which is visible,
 	// and cmd/bee still exits on a second interrupt. That is a better failure
 	// than reporting either success or failure while the store is open.
+	//
+	// wasp #634: a worker the drain gave up on may still be inside the
+	// store, for example an eviction round slowed by a busy disk. Closing
+	// the store under it panicked with "pebble: closed" and left the store
+	// dirty, costing a full recovery at the next start. So the store first
+	// stops admitting work (after the drains, so workers still had their
+	// chance to stop at a safe point): new calls get ErrDBQuit, iterations
+	// end at their next item, and Close waits only for the units already
+	// inside, each a transaction until done or a single read.
+	if g, ok := db.storage.(interface{ StopAdmitting(func(int64)) }); ok {
+		g.StopAdmitting(func(inside int64) {
+			db.logger.Warning("db shutdown waiting for store work in progress", "units", inside)
+		})
+	}
 	err := db.dbCloser.Close()
 
 	if !reserveOK || !cacheOK {
@@ -1112,6 +1270,9 @@ func (db *DB) SetRetrievalService(r retrieval.Interface) {
 func (db *DB) StartReserveWorker(ctx context.Context, s Syncer, radius func() (uint8, error), ready chan<- struct{}) {
 	db.setSyncerOnce.Do(func() {
 		db.syncer = s
+		if r, ok := s.(RadiusSyncReporter); ok {
+			db.radiusReporter = r
+		}
 		go db.startReserveWorkers(ctx, radius, ready)
 	})
 }

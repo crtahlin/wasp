@@ -142,10 +142,22 @@ func New(
 	snapshotLoaded := false
 	if snapshot != nil {
 		if err := bs.loadSnapshot(ctx, snapshot); err != nil {
-			logger.Error(err, "failed to start batch service from snapshot, continuing outside snapshot block...")
+			// A stop during the replay is not a failed snapshot (#759).
+			stopped := ctx.Err() != nil
+			if stopped {
+				logger.Info("postage snapshot replay stopped; it is replayed again at the next start")
+			} else {
+				logger.Error(err, "failed to start batch service from snapshot, continuing outside snapshot block...")
+			}
 			// A partial replay may have written to (and dirtied) the store, so
-			// reset it again to rebuild cleanly from the chain during live sync.
+			// reset it again. After a failure live sync rebuilds it from the
+			// chain. After a stop the empty store makes the next start replay
+			// the snapshot again, which it skips when any batch is stored.
 			if err := bs.reset(); err != nil {
+				return nil, false, err
+			}
+			if stopped {
+				// The build takes its error path, which closes the store.
 				return nil, false, err
 			}
 		} else {
@@ -185,7 +197,7 @@ func (svc *batchService) loadSnapshot(ctx context.Context, snapshot *Snapshot) e
 		startBlock = cs.Block
 	}
 
-	return <-snapshot.Listener.Listen(ctx, startBlock+1, svc)
+	return awaitSynced(ctx, snapshot.Listener.Listen(ctx, startBlock+1, svc))
 }
 
 // Create will create a new batch with the given ID, owner value and depth and
@@ -340,9 +352,20 @@ func (svc *batchService) Start(ctx context.Context, startBlock uint64) (err erro
 		startBlock = cs.Block
 	}
 
-	syncedChan := svc.listener.Listen(ctx, startBlock+1, svc)
+	return awaitSynced(ctx, svc.listener.Listen(ctx, startBlock+1, svc))
+}
 
-	return <-syncedChan
+// awaitSynced waits for the listener's synced signal or for ctx to end. A
+// stop during the startup sync cancels ctx; without this the build waited
+// on a signal that never came and the stop hung until the process was
+// killed (wasp #757). The error wraps both ErrInterruped and ctx.Err().
+func awaitSynced(ctx context.Context, synced <-chan error) error {
+	select {
+	case err := <-synced:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", ErrInterruped, ctx.Err())
+	}
 }
 
 // updateChecksum updates the batchservice checksum once an event gets

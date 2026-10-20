@@ -19,7 +19,11 @@ type metrics struct {
 	NeighborhoodSelected    prometheus.Counter
 	SampleDuration          prometheus.Gauge
 	Round                   prometheus.Gauge
+	Enabled                 prometheus.Gauge
 	InsufficientFundsToPlay prometheus.Counter
+	SkippedWhileEvicting    prometheus.Counter
+	SkippedRadiusIncrease   prometheus.Counter
+	PlayedAfterDecrease     prometheus.Counter
 
 	// total calls to chain backend
 	BackendCalls  prometheus.Counter
@@ -31,9 +35,19 @@ type metrics struct {
 	ErrClaim          prometheus.Counter
 	ErrWinner         prometheus.Counter
 	ErrCheckIsPlaying prometheus.Counter
+	// PlayCheckRetries counts play checks asked again after a failure, and
+	// PlayCheckRecovered the checks that succeeded after a retry (#773).
+	PlayCheckRetries   prometheus.Counter
+	PlayCheckRecovered prometheus.Counter
 	// RoundMismatch counts commits skipped because the round the node computed
 	// disagreed with the contract's (#540).
 	RoundMismatch prometheus.Counter
+
+	// Counts persisted in the state store across restarts (#725): a stop
+	// knows its outcome only after /metrics is gone.
+	StopWaitedForReveal prometheus.Gauge
+	RevealMissedOnStop  prometheus.Gauge
+	RevealAfterRestart  prometheus.Gauge
 }
 
 func newMetrics() metrics {
@@ -64,6 +78,24 @@ func newMetrics() metrics {
 			Name:      "insufficient_funds_to_play",
 			Help:      "Count of games skipped due to insufficient balance to participate.",
 		}),
+		SkippedWhileEvicting: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "skipped_while_evicting",
+			Help:      "Selected rounds skipped because the node had been evicting from its reserve for at least a minute (wasp #649).",
+		}),
+		SkippedRadiusIncrease: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "skipped_radius_increase_total",
+			Help:      "Selected rounds skipped because the storage radius increased between reading the round's depth and the end of the sample (wasp #658).",
+		}),
+		PlayedAfterDecrease: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "played_after_radius_decrease_total",
+			Help:      "Selected rounds played although the storage radius decreased while the sample was taken; a decrease cannot change the sampled range (wasp #658).",
+		}),
 		ClaimPhase: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
@@ -93,6 +125,12 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "round",
 			Help:      "Current round calculated from the block height.",
+		}),
+		Enabled: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "redistribution_enabled",
+			Help:      "Whether the node will commit in new redistribution rounds (1 enabled, 0 disabled).",
 		}),
 
 		// total call
@@ -145,6 +183,36 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "is_playing_errors",
 			Help:      "total neighborhood selected errors while processing",
+		}),
+		PlayCheckRetries: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "play_check_retries",
+			Help:      "Play checks asked again after an error that may pass a block later.",
+		}),
+		PlayCheckRecovered: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "play_check_recovered",
+			Help:      "Play checks that succeeded after at least one retry.",
+		}),
+		StopWaitedForReveal: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "stop_waited_for_reveal",
+			Help:      "Stops that waited for a pending storage-lottery reveal, over the node's lifetime.",
+		}),
+		RevealMissedOnStop: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "reveal_missed_on_stop",
+			Help:      "Stops whose wait ended without the reveal mined, over the node's lifetime.",
+		}),
+		RevealAfterRestart: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "reveal_after_restart",
+			Help:      "Reveals mined for a commit made before the last start, over the node's lifetime.",
 		}),
 	}
 }

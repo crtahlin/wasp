@@ -57,6 +57,23 @@
 ##
 ## The sample itself does not change with this setting, whatever it is set to.
 # sampler-sort-window: 0
+## most chunks per second reserve eviction deletes.
+##
+## After a radius increase a node evicts about half its reserve. Unpaced, many
+## large nodes evicting at once can make their host unreachable. With a rate,
+## eviction deletes on 2 goroutines and waits after each round of 1,000 chunks;
+## it follows the arrival rate when chunks arrive faster, so the excess over
+## capacity does not grow.
+##
+## Default 500 (#651); set 0 explicitly for no limit, the behaviour before
+## that default (an empty value counts as unset). Raising it finishes an
+## eviction sooner with more CPU and disk load, which on a host with many
+## nodes can make them slow to serve and miss lottery samples; lowering it
+## keeps the node responsive but keeps evicted and expired chunks on disk
+## longer (the shard files stay at their high-water mark), makes the node sit
+## out more lottery rounds while it evicts, and, for expired batches, makes
+## peers fetch and reject their chunks for longer.
+# reserve-eviction-rate: 500
 ## reserve lookups pullsync may have in flight at once.
 ##
 ## pullsync asks the reserve whether it already holds a chunk once per offered
@@ -203,6 +220,8 @@ password-file: "/opt/homebrew/var/lib/swarm-bee/password"
 # postage-stamp-address: ""
 ## postage stamp contract start block number
 # postage-stamp-start-block: "0"
+## largest number of blocks per eth_getLogs request when syncing postage contract events; the page halves after a failed request and grows back to this size
+# postage-sync-block-range: 5000
 ## enable pprof mutex profile
 # pprof-mutex: false
 ## enable pprof block profile
@@ -225,6 +244,14 @@ password-file: "/opt/homebrew/var/lib/swarm-bee/password"
 # statestore-cache-capacity: "100000"
 ## protect nodes from getting kicked out on bootnode
 # static-nodes: []
+## wait, on a stop, for a pending storage-lottery reveal (default true).
+##
+## A node that committed in a round and is stopped before it reveals is
+## frozen for twice as long as for a wrong reveal (about 9 days at depth 9).
+## With this on, a stop waits until the reveal is mined or the round's
+## reveal phase ends: up to about 200 s at 5-second blocks. A second signal
+## ends the wait. The packaged systemd unit allows 300 s for a stop.
+# stop-wait-for-reveal: true
 ## enable storage incentives feature
 # storage-incentives-enable: true
 ## enable swap
@@ -251,8 +278,8 @@ password-file: "/opt/homebrew/var/lib/swarm-bee/password"
 #   sampling-ratio: 1.0
 #   ## service name identifier for tracing
 #   service-name: bee
-## gas limit fallback when estimation fails for contract transactions (default 500000)
-# gas-limit-fallback: 500000
+## gas limit fallback when estimation fails for contract transactions (default 900000)
+# gas-limit-fallback: 900000
 ## skips the gas estimate step for contract transactions
 # transaction-debug-mode: false
 ## log verbosity level 0=silent, 1=error, 2=warn, 3=info, 4=debug, 5=trace
@@ -286,3 +313,92 @@ password-file: "/opt/homebrew/var/lib/swarm-bee/password"
 # use-simd-hashing: false
 ## limit of possible connected light nodes (default: 100)
 # light-node-limit: 100
+## light-node slots that ultra-light peers (light peers without a chequebook)
+## may take; 0 means the same as light-node-limit, and a larger value is
+## reduced to it. Raising it lets clients that cannot pay take more of the
+## node's free bandwidth and handshakes; lowering it refuses such clients
+## sooner and sends them to other nodes, while paying light peers keep their
+## slots
+# ultra-light-node-limit: 0
+## open connections accepted from one IPv4 address or one IPv6 /56 subnet; 0
+## uses the default of 200. Raising it lets one address hold more of this
+## node's connections, handshakes and light slots; lowering it can refuse users
+## who share one address behind a carrier NAT, who must then use other nodes
+# p2p-max-connections-per-ip: 200
+## new connections per second accepted from one IPv4 address or one IPv6 /56
+## subnet; 0 uses the default of 10. Raising it lets one address open
+## connections faster and spend more of this node's handshakes; lowering it
+## slows the reconnects of peers that share one address behind a carrier NAT,
+## who then wait or try other nodes
+# p2p-connection-rate-per-ip: 10
+## new connections accepted at once from one IPv4 address or one IPv6 /56
+## subnet above the per-second rate; 0 uses the default of 40. Raising it lets
+## one address open more connections at once; lowering it can refuse the
+## reconnects of a restarting peer, or of users behind a shared carrier NAT,
+## who then wait or try other nodes
+# p2p-connection-burst-per-ip: 40
+## new inbound connections per second the node accepts in total, checked after
+## the per-IP limits and before the security handshake, in each of two buckets:
+## full peers that completed a handshake with this node, and every other
+## address; 0 uses the default of 30, -1 turns the limit off, other negative
+## values are refused; off on a bootnode unless set. Raising it lets more
+## connection setups through under a flood, which costs this node CPU and takes
+## it from its reserve samples; lowering it makes new light clients wait or go
+## to other nodes, can make new full peers drop this node from their address
+## books after 4 refused dials, and can make other nodes, and this node itself,
+## judge it unreachable
+# p2p-inbound-connection-rate: 30
+
+## apply the inbound stream limits per peer and per protocol group set by the
+## p2p-inbound-stream* settings; off by default until they are measured on real
+## nodes. With it on, a peer or protocol group that reaches its limit has new
+## inbound streams refused (stream reset 0x1002), which keeps one peer or
+## protocol from taking the node-wide stream cap; a refused neighbour cannot
+## sync from or retrieve through this node while it is at the limit, and an
+## upstream neighbour may retry at once in a loop that costs both nodes CPU
+# p2p-inbound-stream-limits: false
+
+## inbound streams one peer may hold at once across all protocols, when
+## p2p-inbound-stream-limits is on; 0 uses the default of 256, -1 turns this
+## limit off, other negative values are refused. Raising it lets one peer take
+## more of this node's stream cap; lowering it can refuse a legitimate
+## neighbour, which then cannot sync from or retrieve through this node, and an
+## upstream neighbour may retry in a tight loop that costs both nodes CPU
+# p2p-inbound-streams-per-peer: 0
+
+## inbound streams kept free for pull-sync, which other protocols and un-
+## negotiated streams cannot use, when p2p-inbound-stream-limits is on; 0 uses
+## the default of 2000, -1 turns this reserve off, other negative values are
+## refused. Raising it leaves less of the node-wide cap for retrieval, push-sync
+## and new connections from other peers; lowering it lets those take more of the
+## room neighbours need to sync from this node
+# p2p-inbound-stream-reserve-pullsync: 0
+
+## inbound streams kept free for every protocol other than pull-sync, when
+## p2p-inbound-stream-limits is on; 0 uses the default of 1000, -1 turns this
+## reserve off, other negative values are refused. Raising it leaves less room
+## for neighbours to sync from this node; lowering it lets pull-sync take room
+## that retrieval, push-sync and new connections need
+# p2p-inbound-stream-reserve-other: 0
+
+## inbound streams the node holds at once before their protocol is negotiated,
+## when p2p-inbound-stream-limits is on; 0 uses the default of 1024, -1 turns
+## this limit off (refused while a reserve is on), other negative values are
+## refused. Raising it leaves less room in the cap for negotiated streams;
+## lowering it can refuse streams of peers that open many at once, such as a
+## neighbour reconnecting after a restart
+# p2p-inbound-streams-transient: 0
+
+## inbound streams one peer may hold at once before their protocol is
+## negotiated, when p2p-inbound-stream-limits is on; 0 uses the default of 64,
+## -1 turns this limit off, other negative values are refused. Raising it lets
+## one peer hold more silent streams that count against the node-wide limit;
+## lowering it can refuse a neighbour that opens its pull-sync streams at once
+## on connect (about 52 at radius 6)
+# p2p-inbound-streams-unnegotiated-per-peer: 0
+## new inbound connections the node accepts at once above
+## p2p-inbound-connection-rate, per bucket; 0 uses the default of 200, -1 turns
+## the limit off, other negative values are refused. Raising it lets a larger
+## flood through before the rate applies; lowering it can refuse the peers that
+## reconnect at once after a restart, who then wait or go to other nodes
+# p2p-inbound-connection-burst: 200

@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1777,6 +1778,122 @@ func TestAnnounceNeighborhoodToNeighbor(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("broadcast did not fire for broadcastTo peer")
+	}
+}
+
+// TestAnnounceBinSubsetToFarPeer checks how many peers of each bin a new
+// peer outside the neighbourhood is told about: two by default, as wasp
+// keeps it, not Bee v2.8.3's six, which measurably multiplied hive traffic.
+func TestAnnounceBinSubsetToFarPeer(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mtx     sync.Mutex
+		farAddr swarm.Address
+		sent    []swarm.Address
+		done    = make(chan struct{})
+		conns   int32
+		disc    = mock.NewDiscovery(
+			mock.WithBroadcastPeers(func(ctx context.Context, p swarm.Address, addrs ...swarm.Address) error {
+				mtx.Lock()
+				defer mtx.Unlock()
+				if p.Equal(farAddr) && sent == nil {
+					sent = slices.Clone(addrs)
+					close(done)
+				}
+				return nil
+			}),
+		)
+		base, kad, ab, _, signer = newTestKademliaWithDiscovery(t, disc, &conns, nil, kademlia.Options{
+			ExcludeFunc:         defaultExcludeFunc,
+			OverSaturationPeers: new(20),
+			SaturationPeers:     new(20),
+		})
+	)
+	kad.SetStorageRadius(0)
+	if err := kad.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	testutil.CleanupCloser(t, kad)
+
+	// eight peers in each of bins 0 to 2
+	for bin := 0; bin <= 2; bin++ {
+		for range 8 {
+			addOne(t, signer, kad, ab, swarm.RandAddressAt(t, base, bin))
+			waitCounter(t, &conns, 1)
+		}
+	}
+	waitPeers(t, kad, 24)
+	// The neighbourhood is the storage radius: with it at 3, bins 0 to 2
+	// are outside it.
+	kad.SetStorageRadius(3)
+
+	mtx.Lock()
+	farAddr = swarm.RandAddressAt(t, base, 0)
+	mtx.Unlock()
+	// Announce directly, as a new connection does, so the test does not
+	// depend on the manage loop dialling the peer.
+	if err := kad.Announce(context.Background(), farAddr, true); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the new peer was not told about any peers")
+	}
+
+	mtx.Lock()
+	defer mtx.Unlock()
+	perBin := map[uint8]int{}
+	for _, a := range sent {
+		perBin[swarm.Proximity(base.Bytes(), a.Bytes())]++
+	}
+	for bin := uint8(0); bin <= 2; bin++ {
+		if perBin[bin] != 2 {
+			t.Fatalf("bin %d: the new peer was told about %d peers, want 2 (all bins: %v)", bin, perBin[bin], perBin)
+		}
+	}
+}
+
+// TestNeighborhoodBroadcasts checks the sets the periodic neighborhood gossip
+// sends out: every neighbor is told about all the other neighbors and never
+// about itself, and the input is not modified along the way.
+func TestNeighborhoodBroadcasts(t *testing.T) {
+	t.Parallel()
+
+	neighbors := make([]swarm.Address, 4)
+	for i := range neighbors {
+		neighbors[i] = swarm.RandAddress(t)
+	}
+	input := slices.Clone(neighbors)
+
+	broadcasts := kademlia.NeighborhoodBroadcasts(neighbors)
+
+	if len(broadcasts) != len(neighbors) {
+		t.Fatalf("got %d broadcasts, want %d", len(broadcasts), len(neighbors))
+	}
+	for i, others := range broadcasts {
+		want := slices.Concat(input[:i], input[i+1:])
+		if !slices.EqualFunc(others, want, swarm.Address.Equal) {
+			t.Fatalf("neighbor %d: got %v, want %v", i, others, want)
+		}
+	}
+	if !slices.EqualFunc(neighbors, input, swarm.Address.Equal) {
+		t.Fatalf("input was modified: got %v, want %v", neighbors, input)
+	}
+}
+
+func TestNeighborhoodBroadcastsSmall(t *testing.T) {
+	t.Parallel()
+
+	if got := kademlia.NeighborhoodBroadcasts(nil); len(got) != 0 {
+		t.Fatalf("no neighbors: got %v, want none", got)
+	}
+
+	got := kademlia.NeighborhoodBroadcasts([]swarm.Address{swarm.RandAddress(t)})
+	if len(got) != 1 || len(got[0]) != 0 {
+		t.Fatalf("single neighbor: got %v, want one empty set", got)
 	}
 }
 

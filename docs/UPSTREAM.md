@@ -34,8 +34,11 @@ commits below are wasp's own.
   column's job is to find the issue.
 
 Derived from the experiment ledger ([`experiments/INDEX.md`](experiments/INDEX.md))
-and the history, last revised 2026-09-22, against the upstream base
-`v2.8.2`. Three issues (#73, #76, #430) were closed not planned. Wasp issue
+and the history, last revised 2026-10-07, against the upstream base
+`v2.8.2`. Re-checked on 2026-10-15 for the sync of Bee v2.8.3: four rows
+(#91, #92, #541, #578) note what that release changed. Bee v2.8.3 makes
+the same fix as #578; whether that issue keeps its label is for the
+operator to decide, and the label is unchanged here. Three issues (#73, #76, #430) were closed not planned. Wasp issue
 numbers can collide with upstream Bee pull-request numbers in the shared
 history, so the commits here were resolved from fork-only merges, not by issue
 number alone.
@@ -84,8 +87,8 @@ whether upstream has the problem. See
 | [#85](https://github.com/crtahlin/wasp/issues/85) | Node with zero peers cannot self-recover: breaker blocks the bootnode fallback | done, validated | `fix/74-breaker-never-isolates` | [`2e3016b7`](https://github.com/crtahlin/wasp/commit/2e3016b7) |
 | [#89](https://github.com/crtahlin/wasp/issues/89) | XKCP generator emits a stack frame smaller than the code it generates needs | done | `fix/89-generated-frame-too-small` | [`4b57e508`](https://github.com/crtahlin/wasp/commit/4b57e508) |
 | [#90](https://github.com/crtahlin/wasp/issues/90) | keccak .syso blobs cannot be rebuilt from source; build fails on modern gcc | done, validated | `fix/90-rebuildable-keccak-blobs` | [`c950d7b6`](https://github.com/crtahlin/wasp/commit/c950d7b6) |
-| [#91](https://github.com/crtahlin/wasp/issues/91) | XKCP go_wrapper writes out of bounds when a lane is shorter than the longest | done, validated | `fix/91-xkcp-oob-write` | [`b5691b68`](https://github.com/crtahlin/wasp/commit/b5691b68) |
-| [#92](https://github.com/crtahlin/wasp/issues/92) | SIMD assembly stub runs foreign code on the goroutine stack and passes Go pointers to it | done, validated | `fix/92-scratch-stack` | [`8fe665dd`](https://github.com/crtahlin/wasp/commit/8fe665dd) |
+| [#91](https://github.com/crtahlin/wasp/issues/91) | XKCP go_wrapper writes out of bounds when a lane is shorter than the longest | done, validated; Bee v2.8.3 refuses unequal lanes before the wrapper runs | `fix/91-xkcp-oob-write` | [`b5691b68`](https://github.com/crtahlin/wasp/commit/b5691b68) |
+| [#92](https://github.com/crtahlin/wasp/issues/92) | SIMD assembly stub runs foreign code on the goroutine stack and passes Go pointers to it | done, validated; Bee v2.8.3 reserves a frame on the goroutine stack instead, wasp keeps its scratch stack | `fix/92-scratch-stack` | [`8fe665dd`](https://github.com/crtahlin/wasp/commit/8fe665dd) |
 | [#99](https://github.com/crtahlin/wasp/issues/99) | TestGetter cancellation waits are bounded at scheduling-latency timescale | done, validated | `fix/replicas-getter-timing-flake` | [`1e389b93`](https://github.com/crtahlin/wasp/commit/1e389b93) |
 | [#109](https://github.com/crtahlin/wasp/issues/109) | blockchain-rpc-endpoint accepts only one endpoint, and a 10-minute outage shuts the node down | done, validated | `feat/109-rpc-failover` | [`d5d36cb1`](https://github.com/crtahlin/wasp/commit/d5d36cb1) |
 | [#114](https://github.com/crtahlin/wasp/issues/114) | goleveldb races on close when a writer is paused at the L0 trigger | done (bundled with #115) | `fix/115-close-without-writing` | [`ac7f7365`](https://github.com/crtahlin/wasp/commit/ac7f7365) |
@@ -124,11 +127,26 @@ whether upstream has the problem. See
 | [#430](https://github.com/crtahlin/wasp/issues/430) | swap: MigratePeer is not atomic, so a failed delete leaves two peers sharing one beneficiary | not planned | `fix/430-migratepeer` | [`b0fb7d82`](https://github.com/crtahlin/wasp/commit/b0fb7d82) |
 | [#511](https://github.com/crtahlin/wasp/issues/511) | A peer behind NAT waits 10 s for its addresses before the handshake | done, validated | `fix/511-identify-wait` | [`a20f4812`](https://github.com/crtahlin/wasp/commit/a20f4812) |
 | [#522](https://github.com/crtahlin/wasp/issues/522) | api: POST /connect to an already connected peer answers 500, and on the reverse direction disconnects the peer | done, validated | `spec/522-connect-already-connected`, `fix/522-connect-already-connected` | [`1063b2bf`](https://github.com/crtahlin/wasp/commit/1063b2bf) |
-| [#541](https://github.com/crtahlin/wasp/issues/541) | swap: fixed gas limits fail under Glamsterdam's state-gas costs; chequebook deploy breaks on Sepolia on 2026-10-06 | fixed, validation pending | `spec/541-swap-gas-estimation`, `fix/541-swap-gas-estimation` | [`97442a76`](https://github.com/crtahlin/wasp/commit/97442a76) |
+| [#541](https://github.com/crtahlin/wasp/issues/541) | swap: fixed gas limits fail under Glamsterdam's state-gas costs; chequebook deploy breaks on Sepolia on 2026-10-06 | fixed, validation pending; Bee v2.8.3 estimates these calls too, with no minimum | `spec/541-swap-gas-estimation`, `fix/541-swap-gas-estimation` | [`97442a76`](https://github.com/crtahlin/wasp/commit/97442a76) |
 | [#548](https://github.com/crtahlin/wasp/issues/548) | swap: a reverted initial deposit into a new chequebook is never retried | open | - | - |
 | [#573](https://github.com/crtahlin/wasp/issues/573) | Puller: a peer that keeps failing pull-sync is retried with no pause (2,000 attempts/s, 1.4 cores) | done | `fix/573-puller-retry-backoff` | [`ab7ed195`](https://github.com/crtahlin/wasp/commit/ab7ed195) |
-| [#578](https://github.com/crtahlin/wasp/issues/578) | Postage listener: a failed log query during catch-up is retried with no pause | done | `fix/578-listener-retry-backoff` | [`cd539e76`](https://github.com/crtahlin/wasp/commit/cd539e76) |
+| [#578](https://github.com/crtahlin/wasp/issues/578) | Postage listener: a failed log query during catch-up is retried with no pause | done; the same fix is in Bee v2.8.3 | `fix/578-listener-retry-backoff` | [`cd539e76`](https://github.com/crtahlin/wasp/commit/cd539e76) |
 | [#579](https://github.com/crtahlin/wasp/issues/579) | Swap: each invalid first cheque costs a chain call under a global lock, and the peer can repeat it at once | open | - | - |
+| [#583](https://github.com/crtahlin/wasp/issues/583) | Postage listener: when postage sync stalls, a running node stops and the process exits with status 0, so a service manager that restarts only on failure leaves it down | open | - | - |
+| [#607](https://github.com/crtahlin/wasp/issues/607) | kademlia: a peer that drops us right after connecting is re-dialled forever, because each brief success resets the failed-attempt count | open | - | - |
+| [#640](https://github.com/crtahlin/wasp/issues/640) | pull-sync: a peer that asks again for a bin leaves its older waiting request open, and these fill the inbound stream cap | done | `feat/640-pullsync-duplicate-requests` | [`bb05949a`](https://github.com/crtahlin/wasp/commit/bb05949a) |
+| [#643](https://github.com/crtahlin/wasp/issues/643) | pull-sync: the requested bin is not checked against the number of bins, so a request for a bin that cannot exist waits forever | done | `feat/643-pullsync-bin-check` | [`e379e428`](https://github.com/crtahlin/wasp/commit/e379e428) |
+| [#647](https://github.com/crtahlin/wasp/issues/647) | pull-sync: data race inside the singleflight library when a caller leaves while another joins the same key | done | `feat/647-singleflight-v041` | [`a7c471b0`](https://github.com/crtahlin/wasp/commit/a7c471b0) |
+| [#695](https://github.com/crtahlin/wasp/issues/695) | puller: one peer that does not answer the cursors request blocks the whole recalculation, so a radius change is not acted on | done | `feat/695-puller-cursors-deadline` | [`03261874`](https://github.com/crtahlin/wasp/commit/03261874) |
+| [#696](https://github.com/crtahlin/wasp/issues/696) | storer: the radius drops a second step while the puller has not synced at the current radius, because a sync rate of 0 counts as synced | done | `feat/696-radius-decrease-after-sync` | [`a724fe45`](https://github.com/crtahlin/wasp/commit/a724fe45) |
+| [#576](https://github.com/crtahlin/wasp/issues/576) | Puller: a peer that keeps answering with an empty offer is still retried with no pause | done | `feat/576-puller-no-progress-and-epoch` | [`366f0a53`](https://github.com/crtahlin/wasp/commit/366f0a53) |
+| [#590](https://github.com/crtahlin/wasp/issues/590) | puller: a failed epoch read or write after GetCursors skips the peer's epoch reset for good | done | `feat/576-puller-no-progress-and-epoch` | [`366f0a53`](https://github.com/crtahlin/wasp/commit/366f0a53) |
+| [#725](https://github.com/crtahlin/wasp/issues/725) | storage incentives: a stop between commit and reveal freezes the node for twice as long; wait for the reveal before stopping | done | `feat/725-reveal-before-stop` | [`63c43149`](https://github.com/crtahlin/wasp/commit/63c43149) |
+| [#773](https://github.com/crtahlin/wasp/issues/773) | storage incentives: the play check at the start of the claim phase reverts on a backend one block behind, and the round is skipped | done | `fix/773-play-check-retry` | [`607a8e3e`](https://github.com/crtahlin/wasp/commit/607a8e3e) |
+| [#783](https://github.com/crtahlin/wasp/issues/783) | storage incentives: an RPC endpoint that never answers blocks the commit for the whole phase; failover is never tried | done | `fix/783-bounded-lottery-rpc` | [`a27454ab`](https://github.com/crtahlin/wasp/commit/a27454ab) |
+| [#819](https://github.com/crtahlin/wasp/issues/819) | transaction: a non-lottery send goes to one RPC endpoint only; if it is never propagated, the node's later transactions (lottery commits included) are blocked | open | - | - |
+| [#821](https://github.com/crtahlin/wasp/issues/821) | transaction: CancelTransaction sends before it stores, so a crash can leave an untracked transaction at a nonce | open | - | - |
+| [#822](https://github.com/crtahlin/wasp/issues/822) | storer: a node with reserve-capacity doubling lowers its radius below its neighbourhood's depth, then flaps back | open | - | - |
 
 #301 and #302 are done, and they settle only half of what #300 says. Its per
 peer half stands: the three chain calls were confirmed directly, and the rate at

@@ -31,7 +31,10 @@ func TestMain(m *testing.M) {
 		goleak.IgnoreTopFunction("github.com/quic-go/quic-go.(*Transport).runSendQueue"),
 		goleak.IgnoreTopFunction("net/http.(*persistConn).roundTrip"),
 		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
-		goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop "),
+		goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop"),
+		// libp2p's NAT discovery can still be closing its SSDP multicast
+		// socket when the tests end, which macOS makes slow.
+		goleak.IgnoreAnyFunction("github.com/libp2p/go-libp2p/p2p/net/nat/internal/nat.discoverNATs.func1"),
 		goleak.IgnoreTopFunction("net.(*netFD).connect.func2"),
 		goleak.IgnoreTopFunction("net/http.(*Transport).getConn"),
 		goleak.IgnoreTopFunction("github.com/libp2p/go-cidranger.(*prefixTrie).insert"),

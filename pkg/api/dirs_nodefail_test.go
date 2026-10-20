@@ -60,7 +60,7 @@ func TestDirsNodeSideFailureAnswers500(t *testing.T) {
 		err:        errors.New("the node cannot write"),
 	})
 
-	client, _, _, _ := newTestServer(t, testServerOptions{
+	client, _, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:          store,
 		PreventRedirect: true,
 		Post:            mockpost.New(mockpost.WithAcceptAll()),

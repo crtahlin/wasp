@@ -42,6 +42,42 @@ type Syncer interface {
 	Start(context.Context)
 }
 
+// RadiusSyncReporter is implemented by a Syncer that can tell since when it
+// has been syncing at a storage radius. The reserve worker then lowers the
+// radius again only after the syncer has acted on the current one (#696).
+type RadiusSyncReporter interface {
+	// ActedOnRadius returns the storage radius the puller has acted on and
+	// since when. ok is false until it has acted on any radius.
+	ActedOnRadius() (radius uint8, since time.Time, ok bool)
+}
+
+// Reasons a radius decrease is deferred (#696).
+const (
+	deferNotStarted  = "puller_not_started"
+	deferNotAtRadius = "puller_not_at_radius"
+	deferSettling    = "puller_settling"
+)
+
+// radiusDecreaseDeferral returns why a decrease from radius must wait for the
+// puller, or "" when it may go ahead. Without a reporter it never defers.
+func (db *DB) radiusDecreaseDeferral(radius uint8, now time.Time) (reason string, acted uint8, age time.Duration) {
+	if db.radiusReporter == nil {
+		return "", 0, 0
+	}
+	acted, since, ok := db.radiusReporter.ActedOnRadius()
+	if !ok {
+		return deferNotStarted, 0, 0
+	}
+	age = now.Sub(since)
+	if acted != radius {
+		return deferNotAtRadius, acted, age
+	}
+	if age < db.reserveOptions.decreaseSettle {
+		return deferSettling, acted, age
+	}
+	return "", acted, age
+}
+
 func threshold(capacity int) int { return capacity * 5 / 10 }
 
 func (db *DB) startReserveWorkers(
@@ -57,6 +93,11 @@ func (db *DB) startReserveWorkers(
 
 	db.inFlight.Add(1)
 	go db.reserveWorker(ctx, ready)
+
+	// Held chunks are validated only with the reserve worker running and
+	// after storer recovery, which New has finished by now (#583).
+	db.inFlight.Add(1)
+	go db.heldValidator(ctx)
 
 	sub, unsubscribe := db.reserveOptions.startupStabilizer.Subscribe()
 	defer unsubscribe()
@@ -256,7 +297,7 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 			return
 		case <-batchExpiryTrigger:
 
-			err := db.evictExpiredBatches(ctx)
+			err := db.evictionRun(evictionKindExpiry, func() error { return db.evictExpiredBatches(ctx) })
 			if err != nil {
 				// A shutdown is not a fault, and the worker is stopping
 				// anyway, so it returns rather than warning (#407).
@@ -275,7 +316,7 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 		case <-overCapTrigger:
 
 			db.metrics.OverCapTriggerCount.Inc()
-			if err := db.unreserve(ctx); err != nil {
+			if err := db.evictionRun(evictionKindUnreserve, func() error { return db.unreserve(ctx) }); err != nil {
 				if errors.Is(err, ErrDBQuit) {
 					return
 				}
@@ -294,7 +335,23 @@ func (db *DB) reserveWorker(ctx context.Context, ready chan<- struct{}) {
 				continue
 			}
 
+			// While the batch store is stale, and for one sync-rate window
+			// after, the radius does not drop: the reserve size is not
+			// reliable while chunks are held, and neither is the sync rate
+			// (#583). A radius increase stays possible.
+			if db.radiusDecreaseBlocked() {
+				db.logger.Debug("reserve radius decrease skipped while the batch store is stale or just recovered", "radius", radius)
+				continue
+			}
+
 			if count < threshold(db.reserve.Capacity()) && db.syncer.SyncRate() == 0 && radius > db.reserveOptions.minimumRadius {
+				// A sync rate of 0 also holds while the puller has not synced at
+				// this radius at all; lower it again only once it has (#696).
+				if reason, acted, age := db.radiusDecreaseDeferral(radius, time.Now()); reason != "" {
+					db.metrics.RadiusDecreaseDeferred.WithLabelValues(reason).Inc()
+					db.logger.Debug("reserve radius decrease deferred until the puller has synced at the current radius", "radius", radius, "puller_radius", acted, "since", age, "reason", reason)
+					continue
+				}
 				radius--
 				if err := db.reserve.SetRadius(radius); err != nil {
 					db.logger.Error(err, "reserve set radius")
@@ -311,6 +368,15 @@ func (db *DB) evictExpiredBatches(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(batches) > 0 {
+		rate, workers := db.evictionRateAndWorkers()
+		db.logger.Info("evict expired batches start", "batches", len(batches), "rate", rate, "workers", workers)
+		db.progressStart(progressKindExpired, len(batches))
+		defer db.progressEnd()
+	}
+	// Expired batches use the same rounds and limiter as unreserve (#623).
+	// A batch expiry does not interrupt this eviction, as before.
+	hooks := db.evictionHooks(ctx, true, nil)
 
 	for _, batchID := range batches {
 		// wasp #407: stop between batches on shutdown. Close waits five
@@ -324,7 +390,7 @@ func (db *DB) evictExpiredBatches(ctx context.Context) error {
 		default:
 		}
 
-		evicted, err := db.evictBatch(ctx, batchID, math.MaxInt, swarm.MaxBins)
+		evicted, err := db.evictBatch(ctx, batchID, math.MaxInt, swarm.MaxBins, hooks)
 		if err != nil {
 			return err
 		}
@@ -337,6 +403,7 @@ func (db *DB) evictExpiredBatches(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		db.progressBatchDone()
 	}
 
 	return nil
@@ -362,6 +429,7 @@ func (db *DB) evictBatch(
 	batchID []byte,
 	evictCount int,
 	upToBin uint8,
+	hooks reserve.EvictionHooks,
 ) (evicted int, err error) {
 	dur := captureDuration(time.Now())
 	defer func() {
@@ -372,11 +440,8 @@ func (db *DB) evictBatch(
 		} else {
 			db.metrics.MethodCalls.WithLabelValues("reserve", "EvictBatch", "failure").Inc()
 		}
-		if upToBin == swarm.MaxBins {
-			db.metrics.ExpiredChunkCount.Add(float64(evicted))
-		} else {
-			db.metrics.EvictedChunkCount.Add(float64(evicted))
-		}
+		// The evicted and expired counters are updated after each round,
+		// in hooks.After (#623).
 		db.logger.Debug(
 			"reserve eviction",
 			"uptoBin", upToBin,
@@ -386,7 +451,7 @@ func (db *DB) evictBatch(
 		)
 	}()
 
-	return db.reserve.EvictBatchBin(ctx, batchID, evictCount, upToBin)
+	return db.reserve.EvictBatchBin(ctx, batchID, evictCount, upToBin, hooks)
 }
 
 // EvictBatch evicts all chunks belonging to a batch from the reserve.
@@ -459,10 +524,30 @@ func (db *DB) ReserveHas(addr swarm.Address, batchID []byte, stampHash []byte) (
 
 // ReservePutter returns a Putter for inserting chunks into the reserve.
 func (db *DB) ReservePutter() storage.Putter {
+	return db.reservePutter(swarm.ChunkTypeUnspecified)
+}
+
+// ReservePutVerified inserts a chunk into the reserve like ReservePutter,
+// for a caller that has already established the chunk's type with
+// cac.Valid and soc.FromChunkValidate on this same chunk, so the reserve
+// does not repeat those checks (wasp #810). Any other caller must use
+// ReservePutter.
+func (db *DB) ReservePutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error {
+	return db.reservePutter(chunkType).Put(ctx, chunk)
+}
+
+// reservePutter returns the reserve Putter; chunkType ChunkTypeUnspecified
+// means the reserve computes the type itself.
+func (db *DB) reservePutter(chunkType swarm.ChunkType) storage.Putter {
 	return putterWithMetrics{
 		storage.PutterFunc(
 			func(ctx context.Context, chunk swarm.Chunk) error {
-				err := db.reserve.Put(ctx, chunk)
+				var err error
+				if chunkType == swarm.ChunkTypeUnspecified {
+					err = db.reserve.Put(ctx, chunk)
+				} else {
+					err = db.reserve.PutVerified(ctx, chunk, chunkType)
+				}
 				if err != nil {
 					db.logger.Debug("reserve put error", "error", err)
 					return fmt.Errorf("reserve putter.Put: %w", err)
@@ -499,10 +584,15 @@ func (db *DB) unreserve(ctx context.Context) (err error) {
 		return nil
 	}
 
-	db.logger.Info("unreserve start", "target", target, "radius", radius)
+	rate, workers := db.evictionRateAndWorkers()
+	db.logger.Info("unreserve start", "target", target, "radius", radius, "rate", rate, "workers", workers)
+	db.progressStart(progressKindUnreserve, 0)
+	defer db.progressEnd()
 
 	batchExpiry, unsub := db.events.Subscribe(batchExpiry)
 	defer unsub()
+
+	hooks := db.evictionHooks(ctx, false, batchExpiry)
 
 	totalEvicted := 0
 
@@ -535,10 +625,17 @@ func (db *DB) unreserve(ctx context.Context) (err error) {
 				// evict at least a min count
 				int(db.reserveOptions.minEvictCount))
 
-			binEvicted, err := db.evictBatch(ctx, b, evict, radius)
+			binEvicted, err := db.evictBatch(ctx, b, evict, radius, hooks)
 			// eviction happens in batches, so we need to keep track of the total
 			// number of chunks evicted even if there was an error
 			totalEvicted += binEvicted
+
+			// A paced wait ends early on shutdown or a batch expiry, with
+			// the same outcome as the checks between batches above (#623).
+			if errors.Is(err, errEvictionExpiry) {
+				db.logger.Debug("stopping unreserve, received batch expiration signal")
+				return nil
+			}
 
 			// we can only get error here for critical cases, for eg. batch commit
 			// error, which is not recoverable
@@ -552,10 +649,22 @@ func (db *DB) unreserve(ctx context.Context) (err error) {
 			}
 		}
 
+		// No radius step while a reserve sample runs: on a default node
+		// the sample walks from the storage radius up, and the rounds
+		// after a step delete in the bin it walks (#649).
+		release, err := db.evictionBarrier(ctx, batchExpiry)
+		if errors.Is(err, errEvictionExpiry) {
+			db.logger.Debug("stopping unreserve, received batch expiration signal")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 		radius++
 		db.logger.Info("reserve radius increase", "radius", radius)
 		_ = db.reserve.SetRadius(radius)
 		db.metrics.StorageRadius.Set(float64(radius))
+		release()
 	}
 
 	return errMaxRadius
@@ -577,7 +686,7 @@ func (db *DB) ReserveIterateChunks(cb func(swarm.Chunk) (bool, error)) error {
 // IsSampling reports whether a reserve sample is currently running. The puller
 // reads it to pause pulling during sampling. See issue #23.
 func (db *DB) IsSampling() bool {
-	return db.samplingInProgress.Load()
+	return db.samplingActive.Load() > 0
 }
 
 func (db *DB) StorageRadius() uint8 {
@@ -585,6 +694,15 @@ func (db *DB) StorageRadius() uint8 {
 		return 0
 	}
 	return db.reserve.Radius()
+}
+
+// RadiusState returns the storage radius and how many times it has
+// increased, from one read, or (0, 0) without a reserve (#658).
+func (db *DB) RadiusState() (uint8, uint64) {
+	if db.reserve == nil {
+		return 0, 0
+	}
+	return db.reserve.RadiusState()
 }
 
 func (db *DB) CommittedDepth() uint8 {

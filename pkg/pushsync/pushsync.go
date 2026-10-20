@@ -61,6 +61,10 @@ var (
 	ErrOutOfDepthStoring = errors.New("storing outside of the neighborhood")
 	ErrWarmup            = errors.New("node warmup time not complete")
 	ErrShallowReceipt    = errors.New("shallow receipt")
+	// ErrChunkHeld answers a pushed chunk this node holds pending stamp
+	// validation while its batch store is stale. No receipt is sent: the
+	// chunk may turn out to be invalid (#583).
+	ErrChunkHeld = errors.New("pushsync: batch not known yet, chunk held")
 )
 
 type PushSyncer interface {
@@ -76,6 +80,9 @@ type Receipt struct {
 type Storer interface {
 	storage.PushReporter
 	ReservePutter() storage.Putter
+	// ReservePutVerified stores a chunk whose type the handler has already
+	// established with cac.Valid and soc.FromChunkValidate (#810).
+	ReservePutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error
 }
 
 type PushSync struct {
@@ -94,10 +101,13 @@ type PushSync struct {
 	metrics        metrics
 	tracer         *tracing.Tracer
 	validStamp     postage.ValidStampFn
-	signer         crypto.Signer
-	fullNode       bool
-	errSkip        *skippeers.List
-	stabilizer     stabilization.Subscriber
+	// holder keeps chunks of batches not seen yet while the batch store is
+	// stale (#583). Nil refuses them as before.
+	holder     postage.ChunkHolder
+	signer     crypto.Signer
+	fullNode   bool
+	errSkip    *skippeers.List
+	stabilizer stabilization.Subscriber
 
 	shallowReceiptTolerance uint8
 	capacityDoubling        uint8
@@ -109,6 +119,12 @@ type receiptResult struct {
 	peer     swarm.Address
 	receipt  *pb.Receipt
 	err      error
+}
+
+// SetChunkHolder lets push-sync hold chunks of batches the node has not seen
+// yet while its batch store is stale (#583).
+func (ps *PushSync) SetChunkHolder(h postage.ChunkHolder) {
+	ps.holder = h
 }
 
 func New(
@@ -245,17 +261,16 @@ func (ps *PushSync) handler(ctx context.Context, p p2p.Peer, stream p2p.Stream) 
 	}
 	chunk.WithStamp(stamp)
 
+	var chunkType swarm.ChunkType
 	if cac.Valid(chunk) {
+		chunkType = swarm.ChunkTypeContentAddressed
 		safe.Go(ps.logger, "pushsync-unwrap-chunk", func() {
 			ps.unwrap(chunk)
 		})
-	} else if chunk, err := soc.FromChunk(chunk); err == nil {
-		addr, err := chunk.Address()
-		if err != nil {
-			return err
-		}
-		ps.logger.Debug("handle gsoc", "peer_address", p.Address, "chunk_address", addr, "wrapped_chunk_address", chunk.WrappedChunk().Address())
-		ps.gsocHandler(chunk)
+	} else if sch, err := soc.FromChunkValidate(chunk); err == nil {
+		chunkType = swarm.ChunkTypeSingleOwner
+		ps.logger.Debug("handle gsoc", "peer_address", p.Address, "chunk_address", chunkAddress, "wrapped_chunk_address", sch.WrappedChunk().Address())
+		ps.gsocHandler(sch)
 	} else {
 		return swarm.ErrInvalidChunk
 	}
@@ -272,10 +287,24 @@ func (ps *PushSync) handler(ctx context.Context, p p2p.Peer, stream p2p.Stream) 
 
 		chunkToPut, err := ps.validStamp(chunk)
 		if err != nil {
+			// While the batch store is stale, a chunk of a batch this node
+			// has not seen yet is held and served, but never receipted: a
+			// receipt promises storage and the chunk may be invalid. The
+			// error sends the uploader on to another storer (#583).
+			if ps.holder != nil && postage.HoldsUnvalidated(err) {
+				res, herr := ps.holder.HoldUnvalidated(ctx, chunk, err)
+				if res.Held() {
+					ps.metrics.Held.Inc()
+					return ErrChunkHeld
+				}
+				if herr != nil {
+					err = errors.Join(err, herr)
+				}
+			}
 			return fmt.Errorf("invalid stamp: %w", err)
 		}
 
-		err = ps.store.ReservePutter().Put(ctx, chunkToPut)
+		err = ps.store.ReservePutVerified(ctx, chunkToPut, chunkType)
 		if err != nil {
 			return fmt.Errorf("reserve put: %w", err)
 		}

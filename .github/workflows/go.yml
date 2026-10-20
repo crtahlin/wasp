@@ -262,6 +262,38 @@ jobs:
         result='${{ needs.test-race.result }}'
         echo "race shards: $result"
         [ "$result" = "success" ]
+  test-recover:
+    # Signature recovery has two implementations (#810): libsecp256k1 when cgo
+    # is on, which every other test job uses, and decred's pure-Go code when it
+    # is off, which release builds use. This job keeps the pure-Go path tested
+    # and linted, and runs the cgo equivalence fuzz target briefly.
+    name: Test signature recovery (cgo and pure Go)
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: nogreenteagc
+      RECOVER_PKGS: ./pkg/crypto/... ./pkg/soc/... ./pkg/postage/... ./pkg/bzz/... ./pkg/pushsync/...
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        cache: true
+        go-version-file: go.mod
+    - name: Tests without cgo (decred path)
+      run: CGO_ENABLED=0 go test -count=1 $RECOVER_PKGS
+    - name: Vet without cgo
+      run: CGO_ENABLED=0 go vet $RECOVER_PKGS
+    - name: Lint without cgo
+      uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+      env:
+        CGO_ENABLED: "0"
+      with:
+        skip-cache: true
+        version: v2.11.3
+        args: ./pkg/crypto/... ./pkg/soc/... ./pkg/postage/... ./pkg/bzz/... ./pkg/pushsync/...
+    - name: Equivalence fuzz with cgo (60 s)
+      run: CGO_ENABLED=1 go test ./pkg/crypto/ -run '^$' -fuzz '^FuzzRecoverEquivalence$' -fuzztime 60s
   lint:
     name: Lint
     runs-on: ubuntu-latest

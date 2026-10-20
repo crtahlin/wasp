@@ -5,46 +5,107 @@
 package libp2p
 
 import (
+	"strings"
+
+	"github.com/ethersphere/bee/v2/pkg/bzz"
 	m "github.com/ethersphere/bee/v2/pkg/metrics"
+	ma "github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/prometheus/client_golang/prometheus"
+)
+
+const (
+	connectionTransportLabelName = "transport"
+	connectionPublicLabelName    = "public"
+)
+
+var (
+	// TCP/WS/WSS only: bee does not register QUIC today.
+	transportLabelValues = []string{
+		bzz.TransportTCP.String(),
+		bzz.TransportWS.String(),
+		bzz.TransportWSS.String(),
+		bzz.TransportUnknown.String(),
+	}
+	publicLabelValues = []string{"true", "false"}
 )
 
 type metrics struct {
 	// all metrics fields must be exported
 	// to be able to return them by Metrics()
 	// using reflection
-	CreatedConnectionCount     prometheus.Counter
-	HandledConnectionCount     prometheus.Counter
+	CreatedConnectionCount     *prometheus.CounterVec
+	HandledConnectionCount     *prometheus.CounterVec
 	CreatedStreamCount         prometheus.Counter
 	ClosedStreamCount          prometheus.Counter
 	StreamResetCount           prometheus.Counter
 	HandledStreamCount         prometheus.Counter
+	ProtocolHandlerCallCount   *prometheus.CounterVec
 	BlocklistedPeerCount       prometheus.Counter
 	BlocklistedPeerErrCount    prometheus.Counter
 	DisconnectCount            prometheus.Counter
 	ConnectBreakerCount        prometheus.Counter
 	UnexpectedProtocolReqCount prometheus.Counter
 	KickedOutPeersCount        prometheus.Counter
+	LightPeerRefusals          *prometheus.CounterVec
+	LightAnnouncementsSkipped  prometheus.Counter
+	InboundAdmitted            *prometheus.CounterVec
+	InboundRefusals            *prometheus.CounterVec
+	KnownFullAddresses         prometheus.Gauge
+	ReachabilityPublic         prometheus.Gauge
+	ReachabilityToPrivate      prometheus.Counter
 	StreamHandlerErrResetCount prometheus.Counter
 	HeadersExchangeDuration    prometheus.Histogram
+	StreamsRefusedByPeer       *prometheus.CounterVec
+	InboundStreamsPerPeerMax   prometheus.Gauge
+	InboundStreamPeersOver     *prometheus.GaugeVec
+
+	InboundStreamsRefused             *prometheus.CounterVec
+	InboundStreamsGroup               *prometheus.GaugeVec
+	InboundStreamsUnnegotiatedPeerMax prometheus.Gauge
+	InboundStreamsPerPeerHighWater    prometheus.Gauge
+	InboundStreamsTransientHighWater  prometheus.Gauge
 }
 
 func newMetrics() metrics {
 	subsystem := "libp2p"
+	transportHelp := "The 'transport' label is one of: " + strings.Join(transportLabelValues, ", ")
+	publicHelp := "The 'public' label is one of: " + strings.Join(publicLabelValues, ", ") + " (true = public remote multiaddr)."
 
-	return metrics{
-		CreatedConnectionCount: prometheus.NewCounter(prometheus.CounterOpts{
+	connectionLabels := []string{connectionTransportLabelName, connectionPublicLabelName}
+
+	createdConnectionCount := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
 			Name:      "created_connection_count",
-			Help:      "Number of initiated outgoing libp2p connections.",
-		}),
-		HandledConnectionCount: prometheus.NewCounter(prometheus.CounterOpts{
+			Help:      "Number of initiated outgoing libp2p connections. " + transportHelp + " " + publicHelp,
+		},
+		connectionLabels,
+	)
+
+	handledConnectionCount := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
 			Name:      "handled_connection_count",
-			Help:      "Number of handled incoming libp2p connections.",
-		}),
+			Help:      "Number of handled incoming libp2p connections. " + transportHelp + " " + publicHelp,
+		},
+		connectionLabels,
+	)
+
+	// Ensure all expected label value combinations exist as 0-valued series,
+	// so Grafana shows a flat line instead of "No Data".
+	for _, transport := range transportLabelValues {
+		for _, public := range publicLabelValues {
+			createdConnectionCount.WithLabelValues(transport, public).Add(0)
+			handledConnectionCount.WithLabelValues(transport, public).Add(0)
+		}
+	}
+
+	return metrics{
+		CreatedConnectionCount: createdConnectionCount,
+		HandledConnectionCount: handledConnectionCount,
 		CreatedStreamCount: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
@@ -69,6 +130,15 @@ func newMetrics() metrics {
 			Name:      "handled_stream_count",
 			Help:      "Number of handled incoming libp2p streams.",
 		}),
+		ProtocolHandlerCallCount: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "protocol_handler_call_count",
+				Help:      "Number of incoming streams passed to the protocol stream handler.",
+			},
+			[]string{"protocol", "version", "stream"},
+		),
 		BlocklistedPeerCount: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
@@ -105,6 +175,48 @@ func newMetrics() metrics {
 			Name:      "kickedout_peers_count",
 			Help:      "Number of total kicked-out peers.",
 		}),
+		LightPeerRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "light_peer_refusals",
+			Help:      "Number of inbound light peers refused at a light limit, by reason.",
+		}, []string{"reason"}),
+		LightAnnouncementsSkipped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "light_announcements_skipped",
+			Help:      "Number of announcements not sent to a light peer because it received one recently.",
+		}),
+		InboundAdmitted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_admitted",
+			Help:      "Number of new inbound connections the total inbound rate admitted, by bucket.",
+		}, []string{"bucket"}),
+		InboundRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_refusals",
+			Help:      "Number of new inbound connections refused before the security handshake because the total inbound rate was used up, by bucket.",
+		}, []string{"bucket"}),
+		KnownFullAddresses: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "known_full_addresses",
+			Help:      "Number of addresses of full peers that completed a handshake with this node, kept for the total inbound rate.",
+		}),
+		ReachabilityPublic: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "reachability_public",
+			Help:      "1 when the node's last reachability event said it is publicly reachable, 0 otherwise.",
+		}),
+		ReachabilityToPrivate: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "reachability_private_switches",
+			Help:      "Number of times the node's reachability changed to private.",
+		}),
 		StreamHandlerErrResetCount: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
@@ -117,7 +229,74 @@ func newMetrics() metrics {
 			Name:      "headers_exchange_duration",
 			Help:      "The duration spent exchanging the headers.",
 		}),
+		StreamsRefusedByPeer: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "streams_refused_by_peer_total",
+			Help:      "Number of streams this node opened that the peer refused at its resource limit (stream reset code 0x1002), by protocol and stream. Peers on older libp2p versions reset with code 0 and are not counted.",
+		}, []string{"protocol", "stream"}),
+		InboundStreamsPerPeerMax: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_streams_per_peer_max",
+			Help:      "The largest number of inbound streams one peer holds, from the resource manager, read every 30 s.",
+		}),
+		InboundStreamPeersOver: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_stream_peers_over",
+			Help:      "Number of peers holding more inbound streams than the threshold, read every 30 s.",
+		}, []string{"threshold"}),
+		InboundStreamsRefused: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_streams_refused_total",
+			Help:      "Number of inbound streams refused by the stream limits of p2p-inbound-stream-limits, by limit: un-negotiated streams of one peer, or the pull-sync or other protocol group. Per-peer and transient refusals are in libp2p_rcmgr_blocked_resources.",
+		}, []string{"limit"}),
+		InboundStreamsGroup: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_streams_group",
+			Help:      "Number of negotiated inbound streams in each protocol group, while p2p-inbound-stream-limits is on.",
+		}, []string{"group"}),
+		InboundStreamsUnnegotiatedPeerMax: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_streams_unnegotiated_per_peer_max",
+			Help:      "The largest number of un-negotiated inbound streams one peer held since the previous 30 s scan, while p2p-inbound-stream-limits is on.",
+		}),
+		InboundStreamsPerPeerHighWater: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_streams_per_peer_high_water",
+			Help:      "The largest number of inbound streams any one peer held at any moment since the previous 30 s scan, from every change the resource manager reports.",
+		}),
+		InboundStreamsTransientHighWater: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "inbound_streams_transient_high_water",
+			Help:      "The largest number of un-negotiated (transient) inbound streams the node held at any moment since the previous 30 s scan.",
+		}),
 	}
+}
+
+func (m metrics) incCreatedConnection(addr ma.Multiaddr) {
+	m.CreatedConnectionCount.WithLabelValues(connectionTransportLabel(addr), connectionPublicLabel(addr)).Inc()
+}
+
+func (m metrics) observeHandledConnection(addr ma.Multiaddr) {
+	m.HandledConnectionCount.WithLabelValues(connectionTransportLabel(addr), connectionPublicLabel(addr)).Inc()
+}
+
+func connectionTransportLabel(addr ma.Multiaddr) string {
+	return bzz.ClassifyTransport(addr).String()
+}
+
+func connectionPublicLabel(addr ma.Multiaddr) string {
+	if manet.IsPublicAddr(addr) {
+		return "true"
+	}
+	return "false"
 }
 
 func (s *Service) Metrics() []prometheus.Collector {

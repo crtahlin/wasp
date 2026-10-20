@@ -5,6 +5,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/ethersphere/bee/v2/pkg/bigint"
@@ -28,6 +29,22 @@ type redistributionStatusResponse struct {
 	Reward                    *bigint.BigInt `json:"reward"`
 	Fees                      *bigint.BigInt `json:"fees"`
 	IsHealthy                 bool           `json:"isHealthy"`
+	RevealPending             bool           `json:"revealPending"`
+	SafeToRestartAfterBlock   uint64         `json:"safeToRestartAfterBlock"`
+	StopWaitedForReveal       uint64         `json:"stopWaitedForReveal"`
+	RevealMissedOnStop        uint64         `json:"revealMissedOnStop"`
+	RevealAfterRestart        uint64         `json:"revealAfterRestart"`
+	Enabled                   bool           `json:"enabled"`
+	HasCommittedThisRound     bool           `json:"hasCommittedThisRound"`
+	HasRevealedThisRound      bool           `json:"hasRevealedThisRound"`
+}
+
+type redistributionToggleRequest struct {
+	Enabled *bool `json:"enabled"`
+}
+
+type redistributionToggleResponse struct {
+	Enabled bool `json:"enabled"`
 }
 
 func (s *Service) redistributionStatusHandler(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +71,9 @@ func (s *Service) redistributionStatusHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	revealPending, safeToRestartAfterBlock := s.redistributionAgent.RevealPending()
+
+	rd := status.RoundData[status.Round]
 	jsonhttp.OK(w, redistributionStatusResponse{
 		MinimumGasFunds:           bigint.Wrap(minGasFunds),
 		HasSufficientFunds:        hasSufficientFunds,
@@ -70,5 +90,37 @@ func (s *Service) redistributionStatusHandler(w http.ResponseWriter, r *http.Req
 		Reward:                    bigint.Wrap(status.Reward),
 		Fees:                      bigint.Wrap(status.Fees),
 		IsHealthy:                 status.IsHealthy,
+		RevealPending:             revealPending,
+		SafeToRestartAfterBlock:   safeToRestartAfterBlock,
+		StopWaitedForReveal:       status.StopWaitedForReveal,
+		RevealMissedOnStop:        status.RevealMissedOnStop,
+		RevealAfterRestart:        status.RevealAfterRestart,
+		Enabled:                   s.redistributionAgent.IsEnabled(),
+		HasCommittedThisRound:     rd.CommitKey != nil,
+		HasRevealedThisRound:      rd.HasRevealed,
 	})
+}
+
+func (s *Service) redistributionToggleHandler(w http.ResponseWriter, r *http.Request) {
+	logger := tracing.NewLoggerWithTraceID(r.Context(), s.logger.WithName("patch_redistributionstate").Build())
+
+	if s.beeMode != FullMode {
+		jsonhttp.BadRequest(w, errOperationSupportedOnlyInFullMode)
+		return
+	}
+
+	var body redistributionToggleRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		logger.Debug("decode body failed", "error", err)
+		logger.Error(nil, "decode body failed")
+		jsonhttp.BadRequest(w, "invalid request body")
+		return
+	}
+	if body.Enabled == nil {
+		jsonhttp.BadRequest(w, "enabled is required")
+		return
+	}
+
+	s.redistributionAgent.SetEnabled(*body.Enabled)
+	jsonhttp.OK(w, redistributionToggleResponse{Enabled: *body.Enabled})
 }

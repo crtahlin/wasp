@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storer"
@@ -96,6 +97,29 @@ func WithSample(s storer.Sample) Option {
 	})
 }
 
+// WithEvictingFor sets what EvictingFor returns (#649).
+func WithEvictingFor(d time.Duration) Option {
+	return optionFunc(func(p *ReserveStore) {
+		p.evictingFor.Store(int64(d))
+	})
+}
+
+// WithSampleContextHook sets a function ReserveSample calls with its
+// context, so a test can see what the caller marked on it (wasp #659).
+func WithSampleContextHook(f func(context.Context)) Option {
+	return optionFunc(func(p *ReserveStore) {
+		p.sampleCtxHook = f
+	})
+}
+
+// WithSampleHook sets a function ReserveSample calls before it returns, so a
+// test can change the store while a sample runs (#649).
+func WithSampleHook(f func()) Option {
+	return optionFunc(func(p *ReserveStore) {
+		p.sampleHook = f
+	})
+}
+
 func WithWindowedSample(s storer.Sample) Option {
 	return optionFunc(func(p *ReserveStore) {
 		p.windowedSample = s
@@ -108,8 +132,12 @@ var _ storer.ReserveStore = (*ReserveStore)(nil)
 type ReserveStore struct {
 	mtx         sync.Mutex
 	chunksCalls int
+	subCalls    int
 	putCalls    int
-	setCalls    int
+	// verifiedTypes records the chunk type each ReservePutVerified call
+	// passed, by chunk address (wasp #810).
+	verifiedTypes map[string]swarm.ChunkType
+	setCalls      int
 
 	chunks    map[string]swarm.Chunk
 	evilAddr  swarm.Address
@@ -120,16 +148,21 @@ type ReserveStore struct {
 	epoch      uint64
 
 	radius           uint8
+	radiusIncreases  uint64
 	reservesize      int
 	capacityDoubling int
 	sampling         atomic.Bool
+	evictingFor      atomic.Int64
 
 	subResponses []chunksResponse
+	subs         map[*subscription]struct{}
 	putHook      func(swarm.Chunk) error
 
 	sample            storer.Sample
 	windowedSample    storer.Sample
 	windowedSampleSet bool
+	sampleHook        func()
+	sampleCtxHook     func(context.Context)
 }
 
 // NewReserve returns a new Reserve mock.
@@ -151,6 +184,14 @@ func (s *ReserveStore) IsSampling() bool                                     { r
 // puller pauses while it is set. See issue #23.
 func (s *ReserveStore) SetSampling(v bool)  { s.sampling.Store(v) }
 func (s *ReserveStore) IsFullySynced() bool { return true }
+
+// EvictingFor returns the duration SetEvictingFor set, 0 by default (#649).
+func (s *ReserveStore) EvictingFor() time.Duration { return time.Duration(s.evictingFor.Load()) }
+
+// SetEvictingFor sets what EvictingFor returns, so a test can check that the
+// storage incentives agent sits out a round while the node evicts.
+func (s *ReserveStore) SetEvictingFor(d time.Duration) { s.evictingFor.Store(int64(d)) }
+
 func (s *ReserveStore) StorageRadius() uint8 {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -159,8 +200,19 @@ func (s *ReserveStore) StorageRadius() uint8 {
 
 func (s *ReserveStore) SetStorageRadius(r uint8) {
 	s.mtx.Lock()
+	if r > s.radius {
+		s.radiusIncreases++
+	}
 	s.radius = r
 	s.mtx.Unlock()
+}
+
+// RadiusState returns the radius and how many times SetStorageRadius raised
+// it (#658).
+func (s *ReserveStore) RadiusState() (uint8, uint64) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.radius, s.radiusIncreases
 }
 
 func (s *ReserveStore) CommittedDepth() uint8 {
@@ -175,16 +227,37 @@ func (s *ReserveStore) CapacityDoubling() uint8 {
 	return uint8(s.capacityDoubling)
 }
 
-// IntervalChunks returns a set of chunk in a requested interval.
+// subscription is an open SubscribeBin call without a prepared response,
+// which PublishBin can deliver to.
+type subscription struct {
+	ctx   context.Context
+	bin   uint8
+	start uint64
+	out   chan *storer.BinC
+}
+
+// SubscribeBin returns the next prepared response (WithSubscribeResp). When no
+// prepared response is left it returns a subscription that stays open and
+// empty until PublishBin delivers to it or its context ends.
 func (s *ReserveStore) SubscribeBin(ctx context.Context, bin uint8, start uint64) (<-chan *storer.BinC, func(), <-chan error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-
-	r := s.subResponses[s.chunksCalls]
-	s.chunksCalls++
+	s.subCalls++
 
 	out := make(chan *storer.BinC)
 	errC := make(chan error, 1)
+
+	if s.chunksCalls >= len(s.subResponses) {
+		sub := &subscription{ctx: ctx, bin: bin, start: start, out: out}
+		if s.subs == nil {
+			s.subs = make(map[*subscription]struct{})
+		}
+		s.subs[sub] = struct{}{}
+		return out, func() { s.dropSub(sub) }, errC
+	}
+
+	r := s.subResponses[s.chunksCalls]
+	s.chunksCalls++
 
 	go func() {
 		for _, c := range r.chunks {
@@ -200,6 +273,50 @@ func (s *ReserveStore) SubscribeBin(ctx context.Context, bin uint8, start uint64
 	}()
 
 	return out, func() {}, errC
+}
+
+func (s *ReserveStore) dropSub(sub *subscription) {
+	s.mtx.Lock()
+	delete(s.subs, sub)
+	s.mtx.Unlock()
+}
+
+// PublishBin delivers c to every open subscription without a prepared
+// response for bin whose start is at or below c.BinID. A subscription whose
+// context has ended is dropped instead.
+func (s *ReserveStore) PublishBin(bin uint8, c *storer.BinC) {
+	s.mtx.Lock()
+	var targets []*subscription
+	for sub := range s.subs {
+		if sub.bin == bin && sub.start <= c.BinID {
+			targets = append(targets, sub)
+		}
+	}
+	s.mtx.Unlock()
+
+	for _, sub := range targets {
+		select {
+		case sub.out <- c:
+		case <-sub.ctx.Done():
+			s.dropSub(sub)
+		}
+	}
+}
+
+// SubscribeBinCalls returns how many times SubscribeBin was called, whether
+// or not a prepared response was left. For tests.
+func (s *ReserveStore) SubscribeBinCalls() int {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.subCalls
+}
+
+// OpenSubscriptions returns the number of open subscriptions without a
+// prepared response.
+func (s *ReserveStore) OpenSubscriptions() int {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return len(s.subs)
 }
 
 func (s *ReserveStore) ReserveSize() int {
@@ -250,6 +367,28 @@ func (s *ReserveStore) ReservePutter() storage.Putter {
 	)
 }
 
+// ReservePutVerified puts a chunk like ReservePutter and records the type
+// the caller passed.
+func (s *ReserveStore) ReservePutVerified(ctx context.Context, c swarm.Chunk, chunkType swarm.ChunkType) error {
+	s.mtx.Lock()
+	s.putCalls++
+	if s.verifiedTypes == nil {
+		s.verifiedTypes = make(map[string]swarm.ChunkType)
+	}
+	s.verifiedTypes[c.Address().ByteString()] = chunkType
+	s.mtx.Unlock()
+	return s.put(ctx, c)
+}
+
+// VerifiedType returns the chunk type the last ReservePutVerified call for
+// addr passed, and whether there was one.
+func (s *ReserveStore) VerifiedType(addr swarm.Address) (swarm.ChunkType, bool) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	t, ok := s.verifiedTypes[addr.ByteString()]
+	return t, ok
+}
+
 // Put chunks.
 func (s *ReserveStore) put(_ context.Context, chs ...swarm.Chunk) error {
 	s.mtx.Lock()
@@ -277,7 +416,13 @@ func (s *ReserveStore) ReserveHas(addr swarm.Address, batchID []byte, stampHash 
 	return true, nil
 }
 
-func (s *ReserveStore) ReserveSample(context.Context, []byte, uint8, uint64, *big.Int) (storer.Sample, error) {
+func (s *ReserveStore) ReserveSample(ctx context.Context, _ []byte, _ uint8, _ uint64, _ *big.Int) (storer.Sample, error) {
+	if s.sampleCtxHook != nil {
+		s.sampleCtxHook(ctx)
+	}
+	if s.sampleHook != nil {
+		s.sampleHook()
+	}
 	return s.sample, nil
 }
 

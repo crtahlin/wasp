@@ -15,6 +15,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/log"
@@ -69,7 +70,7 @@ func countErrors(err error) int {
 }
 
 const (
-	DefaultHistRateWindow = time.Minute * 15
+	DefaultHistRateWindow = time.Minute * 10
 
 	IntervalPrefix = "sync_interval"
 
@@ -96,6 +97,9 @@ type Options struct {
 	// RecalcPeersDur is how often the puller re-decides which peers to sync
 	// from. Zero uses DefaultRecalcPeersDur.
 	RecalcPeersDur time.Duration
+	// DumpDir is where a goroutine profile is written when a recalculation
+	// runs too long; the node's data directory. Empty writes none. See #695.
+	DumpDir string
 }
 
 type Puller struct {
@@ -134,6 +138,20 @@ type Puller struct {
 	// test can change them before Start without racing other tests. See #573.
 	retryBackoffBase time.Duration
 	retryBackoffMax  time.Duration
+
+	// cursorsTimeout bounds one cursors request; blockedRunThreshold and
+	// runWatchInterval drive the blocked-run diagnostic. Fields so a test can
+	// change them before Start. See #695.
+	cursorsTimeout      time.Duration
+	blockedRunThreshold time.Duration
+	runWatchInterval    time.Duration
+	dumpDir             string
+	cursorTimeoutLog    *rateLog
+	runStart            atomic.Int64 // unix nanoseconds of the run in progress, 0 if none
+	dumpedRun           atomic.Int64 // runStart of the last run a profile was written for
+
+	// acted is the radius the puller has acted on and since when (#696).
+	acted actedState
 }
 
 func New(
@@ -180,6 +198,12 @@ func New(
 
 		retryBackoffBase: defaultRetryBackoffBase,
 		retryBackoffMax:  defaultRetryBackoffMax,
+
+		cursorsTimeout:      defaultCursorsTimeout,
+		blockedRunThreshold: defaultBlockedRunThreshold,
+		runWatchInterval:    defaultRunWatchInterval,
+		dumpDir:             o.DumpDir,
+		cursorTimeoutLog:    newRateLog(cursorTimeoutLogInterval),
 	}
 
 	return p
@@ -223,8 +247,9 @@ func (p *Puller) Start(ctx context.Context) {
 		cctx, cancel := context.WithCancel(ctx)
 		p.cancel = cancel
 
-		p.wg.Add(1)
+		p.wg.Add(2)
 		go p.manage(cctx)
+		go p.watchRuns(cctx)
 	})
 }
 
@@ -243,6 +268,12 @@ func (p *Puller) manage(ctx context.Context) {
 	var prevRadius uint8
 
 	onChange := func() {
+		p.metrics.OnChangeRuns.Inc()
+
+		started := time.Now()
+		p.runStarted(started)
+		defer p.runFinished(started)
+
 		p.syncPeersMtx.Lock()
 		defer p.syncPeersMtx.Unlock()
 
@@ -278,6 +309,10 @@ func (p *Puller) manage(ctx context.Context) {
 		}
 
 		p.recalcPeers(ctx, newRadius)
+
+		if p.actedOn(newRadius) {
+			p.recordActed(newRadius, time.Now())
+		}
 	}
 
 	tick := time.NewTicker(p.recalcPeersDur)
@@ -331,12 +366,15 @@ func (p *Puller) syncPeer(ctx context.Context, peer *syncPeer, storageRadius uin
 	defer peer.mtx.Unlock()
 
 	if peer.cursors == nil {
-		cursors, epoch, err := p.syncer.GetCursors(ctx, peer.address)
+		cursors, epoch, err := p.getCursors(ctx, peer.address)
 		if err != nil {
 			return fmt.Errorf("could not get cursors from peer %s: %w", peer.address, err)
 		}
-		peer.cursors = cursors
 
+		// The cursors are kept only once the epoch check has succeeded: set
+		// before it, a failed check would be skipped at every later
+		// recalculation, and the peer synced with intervals from its
+		// previous epoch. See #590.
 		storedEpoch, err := p.getPeerEpoch(peer.address)
 		if err != nil {
 			return fmt.Errorf("retrieve epoch for peer %s: %w", peer.address, err)
@@ -357,6 +395,7 @@ func (p *Puller) syncPeer(ctx context.Context, peer *syncPeer, storageRadius uin
 				return fmt.Errorf("set epoch for peer %s: %w", peer.address, err)
 			}
 		}
+		peer.cursors = cursors
 	}
 
 	if len(peer.cursors) != int(p.bins) {
@@ -489,17 +528,23 @@ func (p *Puller) syncPeerBin(parentCtx context.Context, peer *syncPeer, bin uint
 				}
 				errCount := countErrors(err)
 				p.logger.Debug("syncWorker interval failed", "error_count", errCount, "example_error", errors.Unwrap(err), "peer_address", address, "bin", bin, "cursor", cursor, "start", start, "topmost", top)
-				// A call that failed without advancing the interval is retried
-				// only after a pause; one that advanced (some chunks failed, the
-				// interval moved on) continues at once, as before. Without the
-				// pause, a peer that keeps failing is retried as fast as the
-				// network allows. See #573.
-				if top < start {
-					failures++
-					if !p.waitRetry(ctx, failures) {
-						p.logger.Debug("syncWorker context cancelled", "peer_address", address, "bin", bin)
-						return
-					}
+			} else if top < start {
+				// No error and no progress: an empty offer, or one whose
+				// topmost is below the start. A running peer never sends
+				// one; it waits for a chunk instead. See #576.
+				p.metrics.NoProgress.Inc()
+			}
+
+			// A call that did not advance the interval, with or without an
+			// error, is retried only after a pause; one that advanced
+			// continues at once, as before. Without the pause, a peer that
+			// keeps failing, or keeps answering with nothing, is retried as
+			// fast as the network allows. See #573 and #576.
+			if top < start {
+				failures++
+				if !p.waitRetry(ctx, failures) {
+					p.logger.Debug("syncWorker context cancelled", "peer_address", address, "bin", bin)
+					return
 				}
 			}
 

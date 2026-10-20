@@ -87,7 +87,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/sha3"
 	"golang.org/x/net/idna"
-	"golang.org/x/sync/errgroup"
 )
 
 // LoggerName is the tree path name of the logger for this package.
@@ -131,6 +130,21 @@ type Bee struct {
 	syncingStopped           *syncutil.Signaler
 	accesscontrolCloser      io.Closer
 	ethClientCloser          func()
+	// revealGuard is the storage-lottery Revealer, set as soon as it is
+	// built, so a stop can wait for a pending reveal.
+	revealGuard       revealGuard
+	stopWaitForReveal bool
+}
+
+// revealGuard is what Shutdown needs of the storage-lottery Revealer.
+type revealGuard interface {
+	storageincentives.RevealGuard
+	// BeginShutdown refuses commits from now on.
+	BeginShutdown()
+	// WaitBudget is how long a pending reveal can still take; 0 when none
+	// is pending.
+	WaitBudget() time.Duration
+	io.Closer
 }
 
 type Options struct {
@@ -154,7 +168,17 @@ type Options struct {
 	BlockTimeSet bool
 	// PostageConfirmationDepth is how many blocks behind the chain head postage
 	// events must be before they are applied (#545). At least 1.
-	PostageConfirmationDepth        uint64
+	PostageConfirmationDepth uint64
+	// PostageStallShutdown stops the node once its batch store has been
+	// stale this long (#583). Zero, the default, never stops it: a stale node
+	// stays up in a degraded state.
+	PostageStallShutdown time.Duration
+	// PostageSyncBlockRange is the largest page of the postage listener's
+	// adaptive pager (postage-sync-block-range). Zero uses the default.
+	PostageSyncBlockRange uint64
+	// StopWaitForReveal makes a stop wait for a pending storage-lottery
+	// reveal, bounded by the end of its reveal phase (#725).
+	StopWaitForReveal               bool
 	BlockSyncInterval               uint64
 	BootnodeMode                    bool
 	Bootnodes                       []string
@@ -181,6 +205,14 @@ type Options struct {
 	AutoTLSRegistrationEndpoint     string
 	FullNodeMode                    bool
 	LightNodeLimit                  int
+	UltraLightNodeLimit             int
+	P2PMaxConnectionsPerIP          int
+	P2PConnectionRatePerIP          float64
+	P2PConnectionBurstPerIP         int
+	P2PInboundConnectionRate        float64
+	P2PInboundConnectionBurst       int
+	P2PInboundConnectionLimitSet    bool
+	P2PStreamLimits                 libp2p.StreamLimitOptions
 	GasLimitFallback                uint64
 	Logger                          log.Logger
 	MinimumGasTipCap                uint64
@@ -231,6 +263,7 @@ type Options struct {
 	SamplerReadConcurrency          int
 	SamplerSortWindow               int
 	ReserveHasConcurrency           int
+	ReserveEvictionRate             int
 	KademliaSaturationPeers         int
 	KademliaOverSaturationPeers     int
 	PullSyncMaxChunksPerSecond      int
@@ -314,6 +347,28 @@ func validatePostageConfirmationDepth(depth uint64) error {
 	if depth < 1 || depth > listener.MaxConfirmationDepth {
 		return fmt.Errorf("%w: postage-confirmation-depth %d: must be a number from 1 to %d",
 			ErrConfig, depth, listener.MaxConfirmationDepth)
+	}
+	return nil
+}
+
+// postageReadyForLottery reports whether the postage state allows playing the
+// storage lottery: the batch store is not stale (#583). A sample taken on a
+// stale batch store can disagree with the neighbourhood and freeze a staked
+// node, so the agent skips the round instead.
+func postageReadyForLottery(l postage.Listener) bool {
+	if h, ok := l.(postage.SyncHealth); ok && h.Stale() {
+		return false
+	}
+	return true
+}
+
+// validatePostageStallShutdown refuses a negative postage-stall-shutdown (#583).
+// Zero means never stop; a positive duration stops the node once its batch
+// store has been stale that long.
+func validatePostageStallShutdown(d time.Duration) error {
+	if d < 0 {
+		return fmt.Errorf("%w: postage-stall-shutdown %s: must be 0 (never stop) or a positive duration",
+			ErrConfig, d)
 	}
 	return nil
 }
@@ -473,6 +528,10 @@ func NewBee(
 		return nil, err
 	}
 
+	if err := validatePostageStallShutdown(o.PostageStallShutdown); err != nil {
+		return nil, err
+	}
+
 	if err := validatePublicAddress(o.NATWSSAddr); err != nil {
 		return nil, fmt.Errorf("invalid NAT WSS address %s: %w", o.NATWSSAddr, err)
 	}
@@ -526,10 +585,7 @@ func NewBee(
 
 	defer func(b *Bee) {
 		if err != nil {
-			logger.Error(err, "got error, shutting down...")
-			if err2 := b.Shutdown(); err2 != nil {
-				logger.Error(err2, "got error while shutting down")
-			}
+			b.shutdownAfterBuildError(err)
 		}
 	}(b)
 
@@ -716,8 +772,46 @@ func NewBee(
 
 	blockTime := blockTimeFunc(chainBackend, o.BlockTime, o.BlockTimeSet)
 	go watchBlockTime(ctx, logger, chainBackend, o.BlockTime, o.BlockTimeSet)
-	b.transactionCloser = tracerCloser
+	b.transactionCloser = transactionService
 	b.transactionMonitorCloser = transactionMonitor
+
+	// Compute gas limit for contract transactions: when TrxDebugMode is enabled,
+	// gas estimation is skipped and DefaultGasLimit is used for all contract calls.
+	var contractGasLimit uint64
+	if o.TrxDebugMode {
+		contractGasLimit = transaction.DefaultGasLimit
+	}
+
+	// The storage-lottery state and its Revealer are built as soon as the
+	// chain client, the transaction service and the state store exist: a
+	// reveal pending from before a restart is sent before the chain sync
+	// wait, the store open and the postage catch-up, and a stop from here
+	// on waits for it (#725).
+	var (
+		redistributionContract redistribution.Contract
+		revealer               *storageincentives.Revealer
+	)
+	if o.FullNodeMode && !o.BootnodeMode && o.EnableStorageIncentives {
+		chainCfg, _ := config.GetByChainID(chainID)
+		redistributionContractAddress := chainCfg.RedistributionAddress
+		if o.RedistributionContractAddress != "" {
+			if !common.IsHexAddress(o.RedistributionContractAddress) {
+				return nil, errors.New("malformed redistribution contract address")
+			}
+			redistributionContractAddress = common.HexToAddress(o.RedistributionContractAddress)
+		}
+
+		redistributionContract = redistribution.New(swarmAddress, overlayEthAddress, logger, transactionService, redistributionContractAddress, abiutil.MustParseABI(chainCfg.RedistributionABI), contractGasLimit)
+
+		// the token service comes after the chain sync wait; the agent
+		// sets it on the state
+		redistributionState, err := storageincentives.NewRedistributionState(logger, overlayEthAddress, stateStore, nil, transactionService)
+		if err != nil {
+			return nil, fmt.Errorf("storage incentives state: %w", err)
+		}
+		revealer = storageincentives.NewRevealer(redistributionState, redistributionContract, transactionService, chainBackend, blockTime, storageincentives.DefaultBlocksPerRound, storageincentives.DefaultBlocksPerPhase, logger)
+		b.startRevealer(revealer, o.StopWaitForReveal)
+	}
 
 	beeNodeMode := api.LightMode
 	if o.FullNodeMode {
@@ -975,6 +1069,15 @@ func NewBee(
 		WelcomeMessage:              o.WelcomeMessage,
 		FullNode:                    o.FullNodeMode,
 		LightNodeLimit:              o.LightNodeLimit,
+		BootnodeMode:                o.BootnodeMode,
+		UltraLightNodeLimit:         o.UltraLightNodeLimit,
+		MaxConnectionsPerIP:         o.P2PMaxConnectionsPerIP,
+		ConnectionRatePerIP:         o.P2PConnectionRatePerIP,
+		ConnectionBurstPerIP:        o.P2PConnectionBurstPerIP,
+		InboundConnectionRate:       o.P2PInboundConnectionRate,
+		InboundConnectionBurst:      o.P2PInboundConnectionBurst,
+		InboundConnectionLimitSet:   o.P2PInboundConnectionLimitSet,
+		StreamLimits:                o.P2PStreamLimits,
 		Nonce:                       nonce,
 		AllowPrivateCIDRs:           o.AllowPrivateCIDRs,
 		Registry:                    registry,
@@ -1027,13 +1130,6 @@ func NewBee(
 
 	postageStampContractABI := abiutil.MustParseABI(chainCfg.PostageStampABI)
 
-	// Compute gas limit for contract transactions: when TrxDebugMode is enabled,
-	// gas estimation is skipped and DefaultGasLimit is used for all contract calls.
-	var contractGasLimit uint64
-	if o.TrxDebugMode {
-		contractGasLimit = transaction.DefaultGasLimit
-	}
-
 	postageStampContractService = postagecontract.New(
 		overlayEthAddress,
 		postageStampContractAddress,
@@ -1046,7 +1142,7 @@ func NewBee(
 		contractGasLimit,
 	)
 
-	eventListener = listener.New(b.syncingStopped, logger, chainBackend, postageStampContractAddress, postageStampContractABI, blockTime, o.PostageConfirmationDepth, postageSyncingStallingTimeout, postageSyncingBackoffTimeout)
+	eventListener = listener.New(b.syncingStopped, logger, chainBackend, postageStampContractAddress, postageStampContractABI, blockTime, o.PostageConfirmationDepth, postageSyncingStallingTimeout, postageSyncingBackoffTimeout, listener.WithStallShutdown(o.PostageStallShutdown), listener.WithBlockPage(o.PostageSyncBlockRange))
 	b.listenerCloser = eventListener
 
 	// Construct protocols.
@@ -1121,6 +1217,7 @@ func NewBee(
 		SamplerReadConcurrency:    o.SamplerReadConcurrency,
 		SamplerSortWindow:         o.SamplerSortWindow,
 		ReserveHasConcurrency:     o.ReserveHasConcurrency,
+		ReserveEvictionRate:       o.ReserveEvictionRate,
 		LocalIngestLimit:          o.LocalIngestLimit,
 	}
 	if o.LocalIngestEnable && o.LocalIngestLimit == 0 {
@@ -1134,6 +1231,7 @@ func NewBee(
 		// configure reserve only for full node
 		lo.ReserveCapacity = reserveCapacity
 		lo.ReserveWakeUpDuration = DefaultReserveWakeUpDuration
+		lo.RadiusDecreaseSettle = puller.DefaultHistRateWindow
 		if o.ReserveWakeUpDuration > 0 {
 			lo.ReserveWakeUpDuration = o.ReserveWakeUpDuration
 		}
@@ -1205,7 +1303,9 @@ func NewBee(
 		}
 
 		if paused {
-			return nil, errors.New("postage contract is paused")
+			// The same sentinel as a pause seen at runtime, so both stop
+			// with the same exit status (#583).
+			return nil, fmt.Errorf("check postage contract: %w", listener.ErrPostagePaused)
 		}
 
 		// Refuse to start if the last-synced postage block sits ahead of the
@@ -1261,10 +1361,15 @@ func NewBee(
 				logger.Info("started postage contract data sync in the background...")
 				err := batchSvc.Start(ctx, postageSyncStart)
 				syncStatus.Store(true)
+				if errors.Is(err, context.Canceled) {
+					// A stop, not a sync failure (#757).
+					logger.Debug("postage contract data sync stopped", "error", err)
+					return
+				}
 				if err != nil {
 					syncErr.Store(err)
 					logger.Error(err, "unable to sync batches")
-					b.syncingStopped.Signal() // trigger shutdown in start.go
+					b.syncingStopped.SignalWithError(err) // trigger shutdown in start.go
 				}
 			}()
 		}
@@ -1474,6 +1579,14 @@ func NewBee(
 	pullSyncProtocol := pullsync.New(p2ps, localStore, pssService.TryUnwrap, gsocService.Handle, validStamp, logger, pullsync.DefaultMaxPage, o.PullSyncMaxChunksPerSecond)
 	b.pullSyncCloser = pullSyncProtocol
 
+	// A full node keeps chunks of batches it has not seen yet while its batch
+	// store is stale, so it keeps accepting and serving them (#583). Set
+	// before the protocols are added, so no stream sees the field change.
+	if o.FullNodeMode && !o.BootnodeMode {
+		pushSyncProtocol.SetChunkHolder(localStore)
+		pullSyncProtocol.SetChunkHolder(localStore)
+	}
+
 	retrieveProtocolSpec := retrieval.Protocol()
 	pushSyncProtocolSpec := pushSyncProtocol.Protocol()
 	pullSyncProtocolSpec := pullSyncProtocol.Protocol()
@@ -1583,9 +1696,15 @@ func NewBee(
 		pullerService = puller.New(swarmAddress, stateStore, kad, localStore, pullSyncProtocol, p2ps, logger, puller.Options{
 			MaxChunksPerSecond: o.PullerMaxChunksPerSecond,
 			RecalcPeersDur:     o.PullerRecalcPeersDur,
+			DumpDir:            o.DataDir,
 		})
 		b.pullerCloser = pullerService
 
+		// While the batch store is stale the reserve worker does not lower the
+		// storage radius (#583).
+		if h, ok := eventListener.(postage.SyncHealth); ok {
+			localStore.SetPostageSyncHealth(h)
+		}
 		// we pass an empty channel since startup synchronization is not needed for production code, only tests.
 		localStore.StartReserveWorker(ctx, pullerService, waitNetworkRFunc, nil)
 		nodeStatus.SetSync(pullerService)
@@ -1622,26 +1741,19 @@ func NewBee(
 		}
 
 		if o.EnableStorageIncentives {
-
-			redistributionContractAddress := chainCfg.RedistributionAddress
-			if o.RedistributionContractAddress != "" {
-				if !common.IsHexAddress(o.RedistributionContractAddress) {
-					return nil, errors.New("malformed redistribution contract address")
-				}
-				redistributionContractAddress = common.HexToAddress(o.RedistributionContractAddress)
-			}
-
-			redistributionContract := redistribution.New(swarmAddress, overlayEthAddress, logger, transactionService, redistributionContractAddress, abiutil.MustParseABI(chainCfg.RedistributionABI), contractGasLimit)
-
 			isFullySynced := func() bool {
 				reserveThreshold := reserveCapacity * 5 / 10
 				logger.Debug("Sync status check evaluated", "stabilized", detector.IsStabilized())
-				return localStore.ReserveSize() >= reserveThreshold && syncedWithinThreshold(pullerService.SyncRate(), o.RedistributionSyncRateThreshold, o.ReserveCapacityDoubling) && detector.IsStabilized()
+				// Held chunks are not in the reserve yet, so a sample taken
+				// before they are validated would miss them (#583).
+				return localStore.ReserveSize() >= reserveThreshold && syncedWithinThreshold(pullerService.SyncRate(), o.RedistributionSyncRateThreshold, o.ReserveCapacityDoubling) && detector.IsStabilized() &&
+					postageReadyForLottery(eventListener) && !localStore.HeldPending()
 			}
+
+			revealer.State().SetERC20Service(erc20Service)
 
 			agent, err = storageincentives.New(
 				swarmAddress,
-				overlayEthAddress,
 				chainBackend,
 				redistributionContract,
 				postageStampContractService,
@@ -1651,10 +1763,8 @@ func NewBee(
 				blockTime,
 				storageincentives.DefaultBlocksPerRound,
 				storageincentives.DefaultBlocksPerPhase,
-				stateStore,
+				revealer,
 				batchStore,
-				erc20Service,
-				transactionService,
 				saludService,
 				logger,
 				o.ReserveProofMode,
@@ -1718,8 +1828,14 @@ func NewBee(
 		Steward:         steward,
 		Providers:       providersAPI,
 		SyncStatus:      syncStatusFn,
-		NodeStatus:      nodeStatus,
-		PinIntegrity:    localStore.PinIntegrity(),
+		PostageSyncHealth: func() postage.SyncHealth {
+			if h, ok := eventListener.(postage.SyncHealth); ok {
+				return h
+			}
+			return nil
+		}(),
+		NodeStatus:   nodeStatus,
+		PinIntegrity: localStore.PinIntegrity(),
 	}
 
 	if o.APIAddr != "" {
@@ -1761,6 +1877,8 @@ func NewBee(
 		if pssServiceMetrics, ok := pssService.(metrics.Collector); ok {
 			apiService.MustRegisterMetrics(pssServiceMetrics.Metrics()...)
 		}
+		// This also registers the RPC failover backend's metrics (#772); it
+		// must not be registered again elsewhere (#779).
 		if swapBackendMetrics, ok := chainBackend.(metrics.Collector); ok {
 			apiService.MustRegisterMetrics(swapBackendMetrics.Metrics()...)
 		}
@@ -1786,6 +1904,7 @@ func NewBee(
 		apiService.SetRedistributionAgent(agent)
 
 		// api metrics are constructed on api.Service.Configure
+		apiService.MustRegisterMetrics(apiService.Metrics()...)
 		statusMetricsRegistry.MustRegister(apiService.StatusMetrics()...)
 	}
 
@@ -1798,6 +1917,12 @@ func NewBee(
 	}
 
 	return b, nil
+}
+
+// StopCause returns why the node stopped on its own, after SyncingStopped
+// fired, or nil when it carried no cause (#583).
+func (b *Bee) StopCause() error {
+	return b.syncingStopped.Err()
 }
 
 func (b *Bee) SyncingStopped() chan struct{} {
@@ -1833,8 +1958,73 @@ func (b *Bee) shutdownClosers() []namedCloser {
 	return closers
 }
 
-func (b *Bee) Shutdown() error {
-	var mErr error
+// shutdownSteps are the steps of Shutdown. runShutdown runs them in their
+// order, so the order is testable.
+type shutdownSteps struct {
+	refuseCommits func()                    // no new storage-lottery commit
+	api           func()                    // API closers and server
+	services      func()                    // shutdownClosers, in parallel
+	p2p           func()                    // p2p and price oracle
+	localstore    func()                    // runs alongside the reveal wait
+	waitReveal    func(ctx context.Context) // a pending reveal
+	chain         func()                    // revealer, transactions, chain client
+	rest          func()                    // the remaining services
+	stateStore    func()                    // last
+}
+
+func runShutdown(ctx context.Context, s shutdownSteps) {
+	s.refuseCommits()
+	s.api()
+	s.services()
+	s.p2p()
+
+	// The reveal reads only the state store and memory, so the localstore
+	// closes while it is awaited. The transaction service and its monitor,
+	// the chain client, the signer and the state store stay open until the
+	// wait ends.
+	var wg sync.WaitGroup
+	wg.Go(s.localstore)
+	s.waitReveal(ctx)
+	wg.Wait()
+
+	s.chain()
+	s.rest()
+	s.stateStore()
+}
+
+// startRevealer registers the storage-lottery Revealer, so that any later
+// build error and every stop wait for it, and only then starts its early
+// reveal (#725).
+func (b *Bee) startRevealer(r *storageincentives.Revealer, stopWaitForReveal bool) {
+	b.revealGuard = r
+	b.stopWaitForReveal = stopWaitForReveal
+	r.StartEarlyReveal()
+}
+
+// shutdownAfterBuildError closes what a failed build opened. A pending
+// reveal (an early reveal after a restart) is waited for, bounded by its
+// reveal phase.
+func (b *Bee) shutdownAfterBuildError(err error) {
+	b.logger.Error(err, "got error, shutting down...")
+	ctx, cancel := context.Background(), context.CancelFunc(func() {})
+	if b.revealGuard != nil {
+		if budget := b.revealGuard.WaitBudget(); budget > 0 {
+			ctx, cancel = context.WithTimeout(ctx, budget)
+		}
+	}
+	defer cancel()
+	if err2 := b.Shutdown(ctx); err2 != nil {
+		b.logger.Error(err2, "got error while shutting down")
+	}
+}
+
+// Shutdown stops the node. A pending storage-lottery reveal is waited for
+// until it is mined, its claim phase starts or ctx is done.
+func (b *Bee) Shutdown(ctx context.Context) error {
+	var (
+		mErr   error
+		mErrMu sync.Mutex
+	)
 
 	// if a shutdown is already in process, return here
 	b.shutdownMutex.Lock()
@@ -1869,77 +2059,90 @@ func (b *Bee) Shutdown() error {
 			b.logger.Debug("finished shutdown", "component", component, "elapsed", time.Since(start))
 		}()
 		if err := c.Close(); err != nil {
+			mErrMu.Lock()
 			mErr = multierror.Append(mErr, fmt.Errorf("%s: %w", component, err))
+			mErrMu.Unlock()
 		}
 	}
 
-	tryClose(b.apiCloser, "api")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	var eg errgroup.Group
-	if b.apiServer != nil {
-		eg.Go(func() error {
-			if err := b.apiServer.Shutdown(ctx); err != nil {
-				return fmt.Errorf("api server: %w", err)
+	runShutdown(ctx, shutdownSteps{
+		refuseCommits: func() {
+			if b.revealGuard != nil {
+				b.revealGuard.BeginShutdown()
 			}
-			return nil
-		})
-	}
-	if err := eg.Wait(); err != nil {
-		mErr = multierror.Append(mErr, err)
-	}
+		},
+		api: func() {
+			tryClose(b.apiCloser, "api")
 
-	var wg sync.WaitGroup
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
 
-	closers := b.shutdownClosers()
+			if b.apiServer != nil {
+				if err := b.apiServer.Shutdown(ctx); err != nil {
+					mErrMu.Lock()
+					mErr = multierror.Append(mErr, fmt.Errorf("api server: %w", err))
+					mErrMu.Unlock()
+				}
+			}
+		},
+		services: func() {
+			var wg sync.WaitGroup
+			for _, nc := range b.shutdownClosers() {
+				wg.Go(func() { tryClose(nc.closer, nc.name) })
+			}
+			b.ctxCancel()
+			wg.Wait()
+		},
+		p2p: func() {
+			tryClose(b.p2pService, "p2p server")
+			tryClose(b.priceOracleCloser, "price oracle service")
+		},
+		localstore: func() {
+			// the agent samples the localstore, so it stops first; the
+			// reveal wait does not need it
+			tryClose(b.storageIncetivesCloser, "storage incentives agent")
+			tryClose(b.localstoreCloser, "localstore")
+		},
+		waitReveal: func(ctx context.Context) {
+			if b.revealGuard == nil || !b.stopWaitForReveal {
+				return
+			}
+			if err := b.revealGuard.Wait(ctx); err != nil {
+				b.logger.Info("stop: the storage-lottery reveal wait ended early", "error", err)
+			}
+		},
+		chain: func() {
+			if b.revealGuard != nil {
+				tryClose(b.revealGuard, "storage incentives revealer")
+			}
 
-	wg.Add(len(closers))
-	for _, nc := range closers {
-		go func(c io.Closer, name string) {
-			defer wg.Done()
-			tryClose(c, name)
-		}(nc.closer, nc.name)
-	}
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				tryClose(b.transactionMonitorCloser, "transaction monitor")
+				tryClose(b.transactionCloser, "transaction")
+			})
+			wg.Go(func() { tryClose(b.listenerCloser, "listener") })
+			wg.Go(func() { tryClose(b.postageServiceCloser, "postage service") })
+			wg.Wait()
 
-	b.ctxCancel()
-	wg.Wait()
-
-	tryClose(b.p2pService, "p2p server")
-	tryClose(b.priceOracleCloser, "price oracle service")
-
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		tryClose(b.transactionMonitorCloser, "transaction monitor")
-		tryClose(b.transactionCloser, "transaction")
-	}()
-	go func() {
-		defer wg.Done()
-		tryClose(b.listenerCloser, "listener")
-	}()
-	go func() {
-		defer wg.Done()
-		tryClose(b.postageServiceCloser, "postage service")
-	}()
-
-	wg.Wait()
-
-	if b.ethClientCloser != nil {
-		b.ethClientCloser()
-	}
-
-	tryClose(b.accesscontrolCloser, "accesscontrol")
-	tryClose(b.tracerCloser, "tracer")
-	tryClose(b.topologyCloser, "topology driver")
-	tryClose(b.storageIncetivesCloser, "storage incentives agent")
-	tryClose(b.stabilizationDetector, "stabilization detector")
-	// close localstore before StateStore to avoid ErrClosed / incomplete flush.
-	tryClose(b.localstoreCloser, "localstore")
-	tryClose(b.stateStoreCloser, "statestore")
-	tryClose(b.stamperStoreCloser, "stamperstore")
-	tryClose(b.resolverCloser, "resolver service")
+			if b.ethClientCloser != nil {
+				b.ethClientCloser()
+			}
+		},
+		rest: func() {
+			tryClose(b.accesscontrolCloser, "accesscontrol")
+			tryClose(b.tracerCloser, "tracer")
+			tryClose(b.topologyCloser, "topology driver")
+			tryClose(b.stabilizationDetector, "stabilization detector")
+		},
+		stateStore: func() {
+			// the localstore is closed before the state store, to avoid
+			// ErrClosed or an incomplete flush
+			tryClose(b.stateStoreCloser, "statestore")
+			tryClose(b.stamperStoreCloser, "stamperstore")
+			tryClose(b.resolverCloser, "resolver service")
+		},
+	})
 
 	return mErr
 }

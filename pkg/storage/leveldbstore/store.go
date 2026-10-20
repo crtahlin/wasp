@@ -5,6 +5,7 @@
 package leveldbstore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -385,6 +386,32 @@ func (s *Store) Count(key storage.Key) (int, error) {
 	return c, iter.Error()
 }
 
+// countCheckEvery is how many keys a context-aware count steps over between
+// checks of its context.
+const countCheckEvery = 4096
+
+// CountContext is Count that returns the context's error once the context
+// ends, checked every countCheckEvery keys (wasp #635).
+func (s *Store) CountContext(ctx context.Context, key storage.Key) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	keys := util.BytesPrefix([]byte(key.Namespace() + separator))
+	iter := s.db.NewIterator(keys, nil)
+	defer iter.Release()
+
+	var c int
+	for iter.Next() {
+		c++
+		if c%countCheckEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return c, iter.Error()
+}
+
 // Put implements the storage.Store interface.
 func (s *Store) Put(item storage.Item) error {
 	value, err := item.Marshal()
@@ -393,6 +420,17 @@ func (s *Store) Put(item storage.Item) error {
 	}
 
 	return s.db.Put(key(item), value, nil)
+}
+
+// PutSync implements the storage.SyncWriter interface: the write is synced
+// to disk before it returns.
+func (s *Store) PutSync(item storage.Item) error {
+	value, err := item.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed serializing: %w", err)
+	}
+
+	return s.db.Put(key(item), value, &opt.WriteOptions{Sync: true})
 }
 
 // Delete implements the storage.Store interface.

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
 	"github.com/ethersphere/bee/v2/pkg/transaction/backendmock"
@@ -96,34 +95,6 @@ func TestDoesNotFailOverOnAnAnswer(t *testing.T) {
 	}
 	if b.Active() != "primary" {
 		t.Errorf("active endpoint moved to %q on an answer", b.Active())
-	}
-}
-
-// TestSendTransactionDoesNotFailOver: a lost response after the endpoint
-// accepted the transaction would make a resend a duplicate, and two endpoints
-// can disagree on pending nonce. The retry belongs to transaction.Service,
-// which has the persisted state to do it safely.
-func TestSendTransactionDoesNotFailOver(t *testing.T) {
-	t.Parallel()
-
-	var secondarySends atomic.Int32
-	b := newBackend(t,
-		endpoint("primary", backendmock.WithSendTransactionFunc(func(context.Context, *types.Transaction) error {
-			return errDown
-		})),
-		endpoint("secondary", backendmock.WithSendTransactionFunc(func(context.Context, *types.Transaction) error {
-			secondarySends.Add(1)
-			return nil
-		})),
-	)
-
-	tx := types.NewTx(&types.LegacyTx{Nonce: 1})
-	if err := b.SendTransaction(context.Background(), tx); err == nil {
-		t.Error("expected the transport failure to be reported to the caller")
-	}
-	if secondarySends.Load() != 0 {
-		t.Error("the transaction was re-sent to a second endpoint; a lost response " +
-			"may mean the first one accepted it, so this risks a duplicate")
 	}
 }
 

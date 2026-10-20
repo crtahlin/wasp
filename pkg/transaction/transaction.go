@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
+
 	"github.com/ethersphere/bee/v2/pkg/crypto"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/safe"
@@ -41,7 +42,77 @@ var (
 	ErrTransactionReverted = errors.New("transaction reverted")
 	ErrUnknownTransaction  = errors.New("unknown transaction")
 	ErrAlreadyImported     = errors.New("already imported")
+	// ErrNotBroadcast denotes an error raised before the transaction was
+	// handed to the backend, so it cannot have reached the network.
+	ErrNotBroadcast = errors.New("transaction not broadcast")
+	// ErrNoRawTransaction denotes a stored transaction without its signed
+	// bytes (stored by an older version), which cannot be rebroadcast.
+	ErrNoRawTransaction = errors.New("stored transaction has no signed bytes")
 )
+
+// ReplacementBumpPercent is how much a same-nonce replacement raises the
+// stored fee cap and tip at least; nodes accept a replacement only with
+// both raised by 10 % or more.
+const ReplacementBumpPercent = 12
+
+// AmbiguousPendingTimeout is how long a transaction whose send returned an
+// error, and which the backend does not know, still counts for the next
+// nonce. It may have reached the network through the endpoint; reusing its
+// nonce at once could replace it.
+const AmbiguousPendingTimeout = 10 * time.Minute
+
+// BeforeBroadcastFunc is called with the signed transaction's hash after
+// the signed transaction is stored and before it is sent. An error stops
+// the send.
+type BeforeBroadcastFunc func(txHash common.Hash) error
+
+// TxState is the state of a sent transaction as seen on chain.
+type TxState int
+
+const (
+	// TxPending: the backend knows the transaction and has no receipt.
+	TxPending TxState = iota
+	// TxMined: mined with a successful receipt.
+	TxMined
+	// TxReverted: mined with a failed receipt.
+	TxReverted
+	// TxNotFound: the backend does not know the transaction and its nonce
+	// is not used yet.
+	TxNotFound
+	// TxCancelled: the backend does not know the transaction and its nonce
+	// is used by another transaction.
+	TxCancelled
+)
+
+func (s TxState) String() string {
+	switch s {
+	case TxPending:
+		return "pending"
+	case TxMined:
+		return "mined"
+	case TxReverted:
+		return "reverted"
+	case TxNotFound:
+		return "not found"
+	case TxCancelled:
+		return "cancelled"
+	}
+	return "unknown"
+}
+
+// notBroadcastError marks err as raised before the send; its text is the
+// text of err.
+type notBroadcastError struct{ err error }
+
+func (e *notBroadcastError) Error() string   { return e.err.Error() }
+func (e *notBroadcastError) Unwrap() []error { return []error{ErrNotBroadcast, e.err} }
+
+func notBroadcast(err error) error {
+	if err == nil || errors.Is(err, ErrNotBroadcast) {
+		return err
+	}
+	return &notBroadcastError{err: err}
+}
 
 const (
 	DefaultGasLimit        = 1_000_000 // Used for contract operations when setGasLimit flag is enabled
@@ -49,7 +120,7 @@ const (
 	MaxGasLimit            = 10_000_000 // Maximum allowed gas limit to prevent excessive values
 	MinGasLimit            = 21_000     // Minimum gas for any transaction
 	GasBufferPercent       = 33         // Add 33% buffer to estimated gas
-	FallbackGasLimit       = 500_000    // Fallback when estimation fails and no minimum is set
+	FallbackGasLimit       = 900_000    // Fallback when estimation fails and no minimum is set
 )
 
 // TxRequest describes a request for a transaction that can be executed.
@@ -62,6 +133,18 @@ type TxRequest struct {
 	GasFeeCap            *big.Int        // adds a cap to maximum fee user is willing to pay
 	Value                *big.Int        // amount of wei to send
 	Description          string          // optional description
+	// FallbackOnEstimateError, when estimation fails, uses the configured
+	// gas-limit-fallback instead of MinEstimatedGasLimit, but never less
+	// than MinEstimatedGasLimit. The chequebook's transactions set it, as
+	// Bee v2.8.3 does by having no minimum there; the lottery calls do not,
+	// and keep falling back to their minimum.
+	FallbackOnEstimateError bool
+	// MinBaseFeeMultiple, when above 0 and GasPrice is nil, raises the fee
+	// cap to at least this many times the latest base fee plus the tip.
+	// The fee paid is still the base fee plus the tip; a higher cap only
+	// keeps the transaction includable through more blocks of rising base
+	// fee (#793).
+	MinBaseFeeMultiple uint64
 }
 
 type StoredTransaction struct {
@@ -76,6 +159,14 @@ type StoredTransaction struct {
 	Nonce       uint64          // used nonce
 	Created     int64           // creation timestamp
 	Description string          // description
+	Raw         []byte          // the signed transaction, as sent
+}
+
+// pendingTransaction is the value stored under the pending key.
+type pendingTransaction struct {
+	// Ambiguous is set when the send returned an error: the transaction
+	// may or may not have reached the network.
+	Ambiguous bool `json:"ambiguous,omitempty"`
 }
 
 // Service is the service to send transactions. It takes care of gas price, gas
@@ -84,11 +175,36 @@ type Service interface {
 	io.Closer
 	// Send creates a transaction based on the request (with gasprice increased by provided percentage) and sends it.
 	Send(ctx context.Context, request *TxRequest, tipCapBoostPercent int) (txHash common.Hash, err error)
+	// SendWithHook is Send with a hook: the signed transaction is stored
+	// first, then beforeBroadcast (if not nil) is called with its hash,
+	// then the transaction is sent. Errors raised before the send wrap
+	// ErrNotBroadcast. If the send itself fails, the hash is returned with
+	// the error, the transaction stays stored and counts as pending for
+	// the next nonce, since it may have reached the network.
+	SendWithHook(ctx context.Context, request *TxRequest, tipCapBoostPercent int, beforeBroadcast BeforeBroadcastFunc) (txHash common.Hash, err error)
+	// RebroadcastTransaction sends the stored signed transaction again,
+	// unchanged (same nonce, same fees, same hash). Send errors are
+	// returned.
+	RebroadcastTransaction(ctx context.Context, txHash common.Hash) error
+	// ReplaceTransaction signs the stored transaction again with the same
+	// nonce and raised fees, stores it, calls beforeBroadcast (if not nil)
+	// with the new hash and sends it. Errors are as for SendWithHook.
+	ReplaceTransaction(ctx context.Context, txHash common.Hash, beforeBroadcast BeforeBroadcastFunc) (common.Hash, error)
+	// TransactionStatus looks the transaction up on chain. It does not
+	// check whether the backend is synced; a caller acting on TxNotFound
+	// checks that with IsSynced.
+	TransactionStatus(ctx context.Context, txHash common.Hash) (TxState, error)
 	// Call simulate a transaction based on the request.
 	Call(ctx context.Context, request *TxRequest) (result []byte, err error)
 	// WaitForReceipt waits until either the transaction with the given hash has been mined or the context is cancelled.
 	// This is only valid for transaction sent by this service.
 	WaitForReceipt(ctx context.Context, txHash common.Hash) (receipt *types.Receipt, err error)
+	// WaitForSentReceipt waits for the receipt of a transaction for which
+	// Send or SendWithHook returned txHash and sendErr. After a send error
+	// once the transaction was stored, the receipt decides, with a wait of
+	// at most AmbiguousPendingTimeout (#802). See the package function
+	// WaitForSentReceipt.
+	WaitForSentReceipt(ctx context.Context, txHash common.Hash, sendErr error) (*types.Receipt, error)
 	// WatchSentTransaction start watching the given transaction.
 	// This wraps the monitors watch function by loading the correct nonce from the store.
 	// This is only valid for transaction sent by this service.
@@ -168,6 +284,9 @@ func (t *transactionService) waitForAllPendingTx() error {
 
 	for txHash := range pending {
 		t.waitForPendingTx(txHash)
+		if t.recentAmbiguousTransaction(txHash) != nil {
+			t.rebroadcastAmbiguous(txHash)
+		}
 	}
 
 	return nil
@@ -175,34 +294,42 @@ func (t *transactionService) waitForAllPendingTx() error {
 
 // Send creates and signs a transaction based on the request and sends it.
 func (t *transactionService) Send(ctx context.Context, request *TxRequest, boostPercent int) (txHash common.Hash, err error) {
-	loggerV1 := t.logger.V(1).Register()
+	return t.SendWithHook(ctx, request, boostPercent, nil)
+}
 
+// SendWithHook creates and signs a transaction based on the request, stores
+// it, calls beforeBroadcast and sends it.
+func (t *transactionService) SendWithHook(ctx context.Context, request *TxRequest, boostPercent int, beforeBroadcast BeforeBroadcastFunc) (txHash common.Hash, err error) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
 	nonce, err := t.nextNonce(ctx)
 	if err != nil {
-		return common.Hash{}, err
+		return common.Hash{}, notBroadcast(err)
 	}
 
 	tx, err := t.prepareTransaction(ctx, request, nonce, boostPercent)
 	if err != nil {
-		return common.Hash{}, err
+		return common.Hash{}, notBroadcast(err)
 	}
 
 	signedTx, err := t.signer.SignTx(tx, t.chainID)
 	if err != nil {
-		return common.Hash{}, err
+		return common.Hash{}, notBroadcast(err)
 	}
 
-	loggerV1.Debug("sending transaction", "tx", signedTx.Hash(), "nonce", nonce)
+	return t.storeAndBroadcast(ctx, signedTx, boostPercent, request.Description, beforeBroadcast)
+}
 
-	err = t.backend.SendTransaction(ctx, signedTx)
+// storeAndBroadcast stores the signed transaction, calls beforeBroadcast and
+// sends the transaction. It must be called with t.lock held.
+func (t *transactionService) storeAndBroadcast(ctx context.Context, signedTx *types.Transaction, boostPercent int, description string, beforeBroadcast BeforeBroadcastFunc) (common.Hash, error) {
+	txHash := signedTx.Hash()
+
+	raw, err := signedTx.MarshalBinary()
 	if err != nil {
-		return common.Hash{}, err
+		return common.Hash{}, notBroadcast(err)
 	}
-
-	txHash = signedTx.Hash()
 
 	err = t.store.Put(storedTransactionKey(txHash), StoredTransaction{
 		To:          signedTx.To(),
@@ -215,20 +342,41 @@ func (t *transactionService) Send(ctx context.Context, request *TxRequest, boost
 		Value:       signedTx.Value(),
 		Nonce:       signedTx.Nonce(),
 		Created:     time.Now().Unix(),
-		Description: request.Description,
+		Description: description,
+		Raw:         raw,
 	})
 	if err != nil {
-		return common.Hash{}, err
+		return common.Hash{}, notBroadcast(err)
 	}
 
-	err = t.store.Put(pendingTransactionKey(txHash), struct{}{})
+	if beforeBroadcast != nil {
+		if err := beforeBroadcast(txHash); err != nil {
+			return common.Hash{}, notBroadcast(err)
+		}
+	}
+
+	t.logger.V(1).Register().Debug("sending transaction", "tx", txHash, "nonce", signedTx.Nonce())
+
+	sendErr := t.backend.SendTransaction(ctx, signedTx)
+	if sendErr != nil {
+		// The transaction may have reached the network through the
+		// endpoint: keep it stored and count its nonce as used.
+		if err := t.store.Put(pendingTransactionKey(txHash), pendingTransaction{Ambiguous: true}); err != nil {
+			t.logger.Error(err, "registering possibly sent transaction as pending failed", "tx", txHash)
+		}
+		t.waitForPendingTx(txHash)
+		t.rebroadcastAmbiguous(txHash)
+		return txHash, sendErr
+	}
+
+	err = t.store.Put(pendingTransactionKey(txHash), pendingTransaction{})
 	if err != nil {
-		return common.Hash{}, err
+		return txHash, err
 	}
 
 	t.waitForPendingTx(txHash)
 
-	return signedTx.Hash(), nil
+	return txHash, nil
 }
 
 func (t *transactionService) waitForPendingTx(txHash common.Hash) {
@@ -299,11 +447,12 @@ func (t *transactionService) prepareTransaction(ctx context.Context, request *Tx
 				"description", request.Description,
 			)
 
-			if request.MinEstimatedGasLimit > 0 {
+			if request.MinEstimatedGasLimit > 0 && !request.FallbackOnEstimateError {
 				gasLimit = request.MinEstimatedGasLimit
 			} else if len(request.Data) > 0 {
-				// Contract call - use configured fallback
-				gasLimit = t.fallbackGasLimit
+				// Contract call - use configured fallback, never below the
+				// request's minimum
+				gasLimit = max(t.fallbackGasLimit, request.MinEstimatedGasLimit)
 			} else {
 				// Simple transfer - use minimum
 				gasLimit = MinGasLimit
@@ -352,6 +501,9 @@ func (t *transactionService) prepareTransaction(ctx context.Context, request *Tx
 	if err != nil {
 		return nil, err
 	}
+	if request.GasPrice == nil && request.MinBaseFeeMultiple > 0 {
+		gasFeeCap = t.raiseFeeCap(ctx, gasFeeCap, gasTipCap, request.MinBaseFeeMultiple)
+	}
 
 	t.logger.Debug("prepared transaction",
 		"to", request.To,
@@ -373,6 +525,20 @@ func (t *transactionService) prepareTransaction(ctx context.Context, request *Tx
 		GasTipCap: gasTipCap,
 		Data:      request.Data,
 	}), nil
+}
+
+// raiseFeeCap returns gasFeeCap raised to at least multiple times the
+// latest base fee plus gasTipCap. Without a readable base fee it returns
+// gasFeeCap unchanged: the suggestion it came from is still valid.
+func (t *transactionService) raiseFeeCap(ctx context.Context, gasFeeCap, gasTipCap *big.Int, multiple uint64) *big.Int {
+	header, err := t.backend.HeaderByNumber(ctx, nil)
+	if err != nil || header == nil || header.BaseFee == nil {
+		t.logger.Debug("base fee unavailable; keeping the suggested fee cap", "error", err)
+		return gasFeeCap
+	}
+	floor := new(big.Int).Mul(header.BaseFee, new(big.Int).SetUint64(multiple))
+	floor.Add(floor, gasTipCap)
+	return bigMax(gasFeeCap, floor)
 }
 
 func storedTransactionKey(txHash common.Hash) string {
@@ -467,6 +633,12 @@ func (t *transactionService) filterPendingTransactions(ctx context.Context, txHa
 		// unless it was not found
 		if err != nil {
 			if errors.Is(err, ethereum.NotFound) {
+				if ambiguousTx := t.recentAmbiguousTransaction(txHash); ambiguousTx != nil {
+					// sent with an error and not known to the backend:
+					// keep counting its nonce for a while
+					result[txHash] = ambiguousTx
+					continue
+				}
 				t.logger.Error(err, "pending transactions not found", "tx", txHash)
 
 				isPending = false
@@ -486,6 +658,140 @@ func (t *transactionService) filterPendingTransactions(ctx context.Context, txHa
 	}
 
 	return result
+}
+
+// recentAmbiguousTransaction returns the stored signed transaction if the
+// pending key marks it as ambiguous and it was created less than
+// AmbiguousPendingTimeout ago; otherwise nil.
+func (t *transactionService) recentAmbiguousTransaction(txHash common.Hash) *types.Transaction {
+	var pending pendingTransaction
+	if err := t.store.Get(pendingTransactionKey(txHash), &pending); err != nil || !pending.Ambiguous {
+		return nil
+	}
+	stored, err := t.StoredTransaction(txHash)
+	if err != nil || len(stored.Raw) == 0 {
+		return nil
+	}
+	if time.Since(time.Unix(stored.Created, 0)) >= AmbiguousPendingTimeout {
+		return nil
+	}
+	tx := new(types.Transaction)
+	if err := tx.UnmarshalBinary(stored.Raw); err != nil {
+		return nil
+	}
+	return tx
+}
+
+// RebroadcastTransaction sends the stored signed transaction again.
+func (t *transactionService) RebroadcastTransaction(ctx context.Context, txHash common.Hash) error {
+	stored, err := t.StoredTransaction(txHash)
+	if err != nil {
+		return err
+	}
+	if len(stored.Raw) == 0 {
+		return ErrNoRawTransaction
+	}
+	tx := new(types.Transaction)
+	if err := tx.UnmarshalBinary(stored.Raw); err != nil {
+		return err
+	}
+	if tx.Hash() != txHash {
+		return fmt.Errorf("stored transaction %s decodes to hash %s", txHash, tx.Hash())
+	}
+	return t.backend.SendTransaction(ctx, tx)
+}
+
+// ReplaceTransaction sends a same-nonce replacement with raised fees.
+func (t *transactionService) ReplaceTransaction(ctx context.Context, txHash common.Hash, beforeBroadcast BeforeBroadcastFunc) (common.Hash, error) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	stored, err := t.StoredTransaction(txHash)
+	if err != nil {
+		return common.Hash{}, notBroadcast(err)
+	}
+
+	gasFeeCap, gasTipCap, err := t.backend.SuggestedFeeAndTip(ctx, sctx.GetGasPrice(ctx), stored.GasTipBoost)
+	if err != nil {
+		return common.Hash{}, notBroadcast(err)
+	}
+	gasFeeCap = bigMax(gasFeeCap, bumped(stored.GasFeeCap))
+	gasTipCap = bigMax(gasTipCap, bumped(stored.GasTipCap))
+	gasFeeCap = bigMax(gasFeeCap, gasTipCap)
+
+	signedTx, err := t.signer.SignTx(types.NewTx(&types.DynamicFeeTx{
+		Nonce:     stored.Nonce,
+		ChainID:   t.chainID,
+		To:        stored.To,
+		Value:     stored.Value,
+		Gas:       stored.GasLimit,
+		GasTipCap: gasTipCap,
+		GasFeeCap: gasFeeCap,
+		Data:      stored.Data,
+	}), t.chainID)
+	if err != nil {
+		return common.Hash{}, notBroadcast(err)
+	}
+
+	return t.storeAndBroadcast(ctx, signedTx, stored.GasTipBoost, fmt.Sprintf("%s (replacement)", stored.Description), beforeBroadcast)
+}
+
+// TransactionStatus looks the transaction up on chain.
+func (t *transactionService) TransactionStatus(ctx context.Context, txHash common.Hash) (TxState, error) {
+	receipt, err := t.backend.TransactionReceipt(ctx, txHash)
+	switch {
+	case err == nil && receipt != nil:
+		if receipt.Status == types.ReceiptStatusSuccessful {
+			return TxMined, nil
+		}
+		return TxReverted, nil
+	case err != nil && !errors.Is(err, ethereum.NotFound):
+		return 0, err
+	}
+
+	_, _, err = t.backend.TransactionByHash(ctx, txHash)
+	if err == nil {
+		// known to the backend; a mined one without its receipt yet is
+		// pending too
+		return TxPending, nil
+	}
+	if !errors.Is(err, ethereum.NotFound) {
+		return 0, err
+	}
+
+	stored, err := t.StoredTransaction(txHash)
+	if err != nil {
+		if errors.Is(err, ErrUnknownTransaction) {
+			return TxNotFound, nil
+		}
+		return 0, err
+	}
+	nonce, err := t.backend.NonceAt(ctx, t.sender, nil)
+	if err != nil {
+		return 0, err
+	}
+	if nonce > stored.Nonce {
+		return TxCancelled, nil
+	}
+	return TxNotFound, nil
+}
+
+// bumped raises v by ReplacementBumpPercent, rounded up, so that a small
+// value is raised too and the replacement is not rejected as underpriced.
+func bumped(v *big.Int) *big.Int {
+	if v == nil {
+		return new(big.Int)
+	}
+	n := new(big.Int).Mul(v, big.NewInt(100+ReplacementBumpPercent))
+	n.Add(n, big.NewInt(99))
+	return n.Div(n, big.NewInt(100))
+}
+
+func bigMax(a, b *big.Int) *big.Int {
+	if a == nil || a.Cmp(b) < 0 {
+		return new(big.Int).Set(b)
+	}
+	return a
 }
 
 func (t *transactionService) ResendTransaction(ctx context.Context, txHash common.Hash) error {
@@ -571,6 +877,10 @@ func (t *transactionService) CancelTransaction(ctx context.Context, originalTxHa
 	}
 
 	txHash := signedTx.Hash()
+	raw, err := signedTx.MarshalBinary()
+	if err != nil {
+		return common.Hash{}, err
+	}
 	err = t.store.Put(storedTransactionKey(txHash), StoredTransaction{
 		To:          signedTx.To(),
 		Data:        signedTx.Data(),
@@ -583,6 +893,7 @@ func (t *transactionService) CancelTransaction(ctx context.Context, originalTxHa
 		Nonce:       signedTx.Nonce(),
 		Created:     time.Now().Unix(),
 		Description: fmt.Sprintf("%s (cancellation)", storedTransaction.Description),
+		Raw:         raw,
 	})
 	if err != nil {
 		return common.Hash{}, err

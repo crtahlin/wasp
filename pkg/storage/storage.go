@@ -159,6 +159,7 @@ type Store interface {
 
 	Reader
 	Writer
+	SyncWriter
 }
 
 // Reader groups methods that read from the store.
@@ -181,6 +182,23 @@ type Reader interface {
 	Count(Key) (int, error)
 }
 
+// ContextCounter is implemented by a store whose count can be stopped by a
+// context. A full count of a large namespace takes minutes on a large
+// reserve, so a node stopping during startup must not wait for it (wasp
+// #635).
+type ContextCounter interface {
+	CountContext(context.Context, Key) (int, error)
+}
+
+// CountContext counts the items in k's namespace with r's CountContext when
+// r has one, and with Count otherwise.
+func CountContext(ctx context.Context, r Reader, k Key) (int, error) {
+	if c, ok := r.(ContextCounter); ok {
+		return c.CountContext(ctx, k)
+	}
+	return r.Count(k)
+}
+
 // Writer groups methods that change the state of the store.
 type Writer interface {
 	// Put inserts or updates the given Item identified by its Key.ID.
@@ -189,6 +207,13 @@ type Writer interface {
 	// Delete removes the given Item form the store.
 	// It will not return error if the key doesn't exist.
 	Delete(Item) error
+}
+
+// SyncWriter writes an item to stable storage before it returns, so it
+// survives a power loss once PutSync has returned (wasp #725). A store
+// without stable storage (in memory, a batch committed later) writes as Put.
+type SyncWriter interface {
+	PutSync(Item) error
 }
 
 // BatchStore is a store that supports batching of Writer method calls.
@@ -206,6 +231,7 @@ type Recoverer interface {
 type IndexStore interface {
 	Reader
 	Writer
+	SyncWriter
 }
 
 type Sharky interface {

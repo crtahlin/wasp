@@ -6,11 +6,13 @@ package redistribution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/sctx"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -20,6 +22,12 @@ import (
 const (
 	loggerName      = "redistributionContract"
 	BoostTipPercent = 50
+	// RevealBaseFeeMultiple is the reveal's fee cap in multiples of the
+	// latest base fee (plus the tip), against twice for other transactions:
+	// a reveal that is not included in its phase freezes the stake, and a
+	// cap of four times stays above a base fee rising through about 11 full
+	// blocks. The fee paid is unchanged (#793).
+	RevealBaseFeeMultiple = 4
 )
 
 type Contract interface {
@@ -27,8 +35,11 @@ type Contract interface {
 	IsPlaying(context.Context, uint8) (bool, error)
 	IsWinner(context.Context) (bool, error)
 	Claim(context.Context, ChunkInclusionProofs) (common.Hash, error)
-	Commit(context.Context, []byte, uint64) (common.Hash, error)
-	Reveal(context.Context, uint8, []byte, []byte) (common.Hash, error)
+	// Commit and Reveal call beforeBroadcast (if not nil) with the signed
+	// hash after the transaction is stored and before it is sent; see
+	// transaction.Service.SendWithHook.
+	Commit(ctx context.Context, obfusHash []byte, round uint64, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error)
+	Reveal(ctx context.Context, storageDepth uint8, reserveCommitmentHash []byte, randomNonce []byte, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error)
 	// CurrentRound returns the round the contract is in. The node computes
 	// the round itself from its compiled-in round length; this lets it check
 	// that the two agree before committing (#540).
@@ -138,11 +149,11 @@ func (c *contract) Claim(ctx context.Context, proofs ChunkInclusionProofs) (comm
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             max(sctx.GetGasLimit(ctx), c.gasLimit),
-		MinEstimatedGasLimit: 500_000,
+		MinEstimatedGasLimit: 800_000,
 		Value:                big.NewInt(0),
 		Description:          "claim win transaction",
 	}
-	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent)
+	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, waitOnAmbiguous, nil)
 	if err != nil {
 		return txHash, fmt.Errorf("claim: %w", err)
 	}
@@ -151,7 +162,7 @@ func (c *contract) Claim(ctx context.Context, proofs ChunkInclusionProofs) (comm
 }
 
 // Commit submits the obfusHash hash by sending a transaction to the blockchain.
-func (c *contract) Commit(ctx context.Context, obfusHash []byte, round uint64) (common.Hash, error) {
+func (c *contract) Commit(ctx context.Context, obfusHash []byte, round uint64, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error) {
 	callData, err := c.incentivesContractABI.Pack("commit", common.BytesToHash(obfusHash), round)
 	if err != nil {
 		return common.Hash{}, err
@@ -161,11 +172,11 @@ func (c *contract) Commit(ctx context.Context, obfusHash []byte, round uint64) (
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             max(sctx.GetGasLimit(ctx), c.gasLimit),
-		MinEstimatedGasLimit: 500_000,
+		MinEstimatedGasLimit: 800_000,
 		Value:                big.NewInt(0),
 		Description:          "commit transaction",
 	}
-	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent)
+	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, waitOnAmbiguous, beforeBroadcast)
 	if err != nil {
 		return txHash, fmt.Errorf("commit: obfusHash %v: %w", common.BytesToHash(obfusHash), err)
 	}
@@ -174,7 +185,7 @@ func (c *contract) Commit(ctx context.Context, obfusHash []byte, round uint64) (
 }
 
 // Reveal submits the storageDepth, reserveCommitmentHash and RandomNonce in a transaction to blockchain.
-func (c *contract) Reveal(ctx context.Context, storageDepth uint8, reserveCommitmentHash []byte, RandomNonce []byte) (common.Hash, error) {
+func (c *contract) Reveal(ctx context.Context, storageDepth uint8, reserveCommitmentHash []byte, RandomNonce []byte, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error) {
 	callData, err := c.incentivesContractABI.Pack("reveal", storageDepth, common.BytesToHash(reserveCommitmentHash), common.BytesToHash(RandomNonce))
 	if err != nil {
 		return common.Hash{}, err
@@ -184,11 +195,12 @@ func (c *contract) Reveal(ctx context.Context, storageDepth uint8, reserveCommit
 		Data:                 callData,
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             max(sctx.GetGasLimit(ctx), c.gasLimit),
-		MinEstimatedGasLimit: 500_000,
+		MinEstimatedGasLimit: 800_000,
+		MinBaseFeeMultiple:   RevealBaseFeeMultiple,
 		Value:                big.NewInt(0),
 		Description:          "reveal transaction",
 	}
-	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent)
+	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, failOnAmbiguous, beforeBroadcast)
 	if err != nil {
 		return txHash, fmt.Errorf("reveal: storageDepth %d reserveCommitmentHash %v RandomNonce %v: %w", storageDepth, common.BytesToHash(reserveCommitmentHash), common.BytesToHash(RandomNonce), err)
 	}
@@ -216,7 +228,24 @@ func (c *contract) ReserveSalt(ctx context.Context) ([]byte, error) {
 	return salt[:], nil
 }
 
-func (c *contract) sendAndWait(ctx context.Context, request *transaction.TxRequest, boostPercent int) (txHash common.Hash, err error) {
+// ambiguousSend says what sendAndWait does when the send itself returned an
+// error after the transaction was stored, so that it may still reach the
+// network (#772).
+type ambiguousSend bool
+
+const (
+	// waitOnAmbiguous waits for the receipt, as for a successful send. The
+	// transaction service re-broadcasts the stored transaction meanwhile, so
+	// a claim or commit whose first send failed can still be mined in its
+	// phase.
+	waitOnAmbiguous ambiguousSend = true
+	// failOnAmbiguous returns the send error at once. The revealer uses it:
+	// it checks its reveal every block and replaces it with raised fees,
+	// which a wait here would hold up until the claim phase.
+	failOnAmbiguous ambiguousSend = false
+)
+
+func (c *contract) sendAndWait(ctx context.Context, request *transaction.TxRequest, boostPercent int, onAmbiguous ambiguousSend, beforeBroadcast transaction.BeforeBroadcastFunc) (txHash common.Hash, err error) {
 	defer func() {
 		err = c.txService.UnwrapABIError(
 			ctx,
@@ -226,9 +255,21 @@ func (c *contract) sendAndWait(ctx context.Context, request *transaction.TxReque
 		)
 	}()
 
-	txHash, err = c.txService.Send(ctx, request, boostPercent)
+	txHash, err = c.txService.SendWithHook(ctx, request, boostPercent, beforeBroadcast)
 	if err != nil {
-		return txHash, err
+		if onAmbiguous == failOnAmbiguous || errors.Is(err, transaction.ErrNotBroadcast) || txHash == (common.Hash{}) {
+			return txHash, err
+		}
+		c.logger.Warning("sending the transaction returned an error; waiting for it to be mined", "description", request.Description, "tx", txHash, "error", err)
+		sendErr := err
+		receipt, err := c.txService.WaitForReceipt(ctx, txHash)
+		if err != nil {
+			return txHash, errors.Join(sendErr, err)
+		}
+		if receipt.Status == 0 {
+			return txHash, transaction.ErrTransactionReverted
+		}
+		return txHash, nil
 	}
 	receipt, err := c.txService.WaitForReceipt(ctx, txHash)
 	if err != nil {

@@ -16,6 +16,12 @@ type metrics struct {
 	SyncWorkerErrCounter  prometheus.Counter     // count number of errors
 	MaxUintErrCounter     prometheus.Counter     // how many times we got maxuint as topmost
 	PullsyncRate          prometheus.GaugeFunc   // rate of historical syncing
+	OnChangeRuns          prometheus.Counter     // recalculations of the sync peers
+	OnChangeStarted       prometheus.Gauge       // start time of the recalculation in progress, 0 if none
+	OnChangeDuration      prometheus.Histogram   // duration of completed recalculations
+	CursorRequestsFailed  *prometheus.CounterVec // failed cursors requests by reason
+	ActedRadius           prometheus.Gauge       // storage radius the puller has acted on
+	NoProgress            prometheus.Counter     // sync calls with no error and no progress
 }
 
 func newMetrics(pullsyncRate func() float64) metrics {
@@ -58,7 +64,51 @@ func newMetrics(pullsyncRate func() float64) metrics {
 			Name:      "pullsync_rate",
 			Help:      "Rate of historical syncing in chunks.",
 		}, pullsyncRate),
+		OnChangeRuns: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "on_change_runs",
+			Help:      "Number of times the sync peers were recalculated, after a topology change or on the timer.",
+		}),
+		OnChangeStarted: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "on_change_started_timestamp_seconds",
+			Help:      "Unix time the sync-peer recalculation in progress started, 0 when none runs; now minus this is how long a blocked run has run.",
+		}),
+		OnChangeDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "on_change_duration_seconds",
+			Help:      "Duration of completed sync-peer recalculations.",
+			Buckets:   []float64{0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 900, 1800, 3600},
+		}),
+		CursorRequestsFailed: cursorRequestsFailed(subsystem),
+		NoProgress: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "no_progress_total",
+			Help:      "Pull-sync calls that returned no error and did not advance the interval: an empty offer, or an offer whose topmost is below the start. A running peer never sends one; a neighbour that is shutting down may send one. Such calls are retried after the same growing pause as failed calls (#576).",
+		}),
+		ActedRadius: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "acted_radius",
+			Help:      "Storage radius at which the puller last started syncing from at least one neighbour; the reserve worker lowers the radius again only after a sync-rate window at it (#696).",
+		}),
 	}
+}
+
+func cursorRequestsFailed(subsystem string) *prometheus.CounterVec {
+	c := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: m.Namespace,
+		Subsystem: subsystem,
+		Name:      "cursor_requests_failed_total",
+		Help:      "Cursors requests to peers that failed, by reason: timeout (no answer within the deadline) or error.",
+	}, []string{"reason"})
+	c.WithLabelValues(cursorFailTimeout)
+	c.WithLabelValues(cursorFailError)
+	return c
 }
 
 func (p *Puller) Metrics() []prometheus.Collector {

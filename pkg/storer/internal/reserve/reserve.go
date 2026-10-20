@@ -5,6 +5,7 @@
 package reserve
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/ethersphere/bee/v2/pkg/log"
@@ -38,7 +40,21 @@ type Reserve struct {
 
 	capacity int
 	size     atomic.Int64
-	radius   atomic.Uint32
+	// radius holds the storage radius in the low 8 bits and the number of
+	// radius increases in the rest, in one word, so a reader never sees a
+	// radius and a count from different writes (#658).
+	radius atomic.Uint64
+	// arrivals counts the chunks Put added to the reserve, that is the
+	// increments of size. Eviction paces itself against its rate (#623).
+	arrivals atomic.Uint64
+	// shadowCalls counts PutVerified calls that reached the type check, and
+	// shadowMismatches the sampled ones whose verified type differed from
+	// storage.ChunkType (wasp #810).
+	shadowCalls      atomic.Uint64
+	shadowMismatches atomic.Uint64
+	// shadowAlways rechecks every verified type instead of a sample: in
+	// race builds and tests.
+	shadowAlways bool
 
 	multx *multex.Multex
 	st    transaction.Storage
@@ -51,7 +67,22 @@ func New(
 	radiusSetter topology.SetStorageRadiuser,
 	logger log.Logger,
 ) (*Reserve, error) {
+	return NewContext(context.Background(), baseAddr, st, capacity, radiusSetter, logger)
+}
+
+// NewContext is New whose reserve count, the slowest step on a large
+// reserve, ends with the context's error once the context ends, so a stop
+// during startup does not wait for it (wasp #635).
+func NewContext(
+	ctx context.Context,
+	baseAddr swarm.Address,
+	st transaction.Storage,
+	capacity int,
+	radiusSetter topology.SetStorageRadiuser,
+	logger log.Logger,
+) (*Reserve, error) {
 	rs := &Reserve{
+		shadowAlways: raceEnabled || testing.Testing(),
 		baseAddr:     baseAddr,
 		st:           st,
 		capacity:     capacity,
@@ -60,13 +91,13 @@ func New(
 		multx:        multex.New(),
 	}
 
-	err := st.Run(context.Background(), func(s transaction.Store) error {
+	err := st.Run(ctx, func(s transaction.Store) error {
 		rItem := &radiusItem{}
 		err := s.IndexStore().Get(rItem)
 		if err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
-		rs.radius.Store(uint32(rItem.Radius))
+		rs.radius.Store(uint64(rItem.Radius))
 
 		epochItem := &EpochItem{}
 		err = s.IndexStore().Get(epochItem)
@@ -81,7 +112,7 @@ func New(
 			}
 		}
 
-		size, err := s.IndexStore().Count(&BatchRadiusItem{})
+		size, err := storage.CountContext(ctx, s.IndexStore(), &BatchRadiusItem{})
 		if err != nil {
 			return err
 		}
@@ -100,6 +131,53 @@ func New(
 //  3. A new chunk that has the same address belonging to the same stamp index with an already stored chunk will overwrite the existing chunk
 //     if the new chunk has a higher stamp timestamp (regardless of batch type and chunk type, eg CAC & SOC).
 func (r *Reserve) Put(ctx context.Context, chunk swarm.Chunk) error {
+	return r.put(ctx, chunk, swarm.ChunkTypeUnspecified)
+}
+
+// PutVerified is Put for a chunk whose type the caller has already
+// established with the same checks storage.ChunkType runs (cac.Valid, then
+// soc.FromChunkValidate) on this same chunk, so the reserve does not repeat
+// them. Only pullsync and the pushsync handler call it (wasp #810). A
+// sample of calls is still checked against storage.ChunkType; see
+// verifiedChunkType.
+func (r *Reserve) PutVerified(ctx context.Context, chunk swarm.Chunk, chunkType swarm.ChunkType) error {
+	if chunkType != swarm.ChunkTypeContentAddressed && chunkType != swarm.ChunkTypeSingleOwner {
+		return fmt.Errorf("verified chunk type %v: %w", chunkType, storage.ErrInvalidChunk)
+	}
+	return r.put(ctx, chunk, chunkType)
+}
+
+// ChunkTypeShadowMismatches returns how many verified chunk types the shadow
+// check found different from storage.ChunkType since the reserve was opened.
+func (r *Reserve) ChunkTypeShadowMismatches() uint64 {
+	return r.shadowMismatches.Load()
+}
+
+// shadowCheckEvery is how often the type a caller passed to PutVerified is
+// recomputed with storage.ChunkType on a node: every shadowCheckEvery-th
+// call. Tests and race builds recompute every call.
+const shadowCheckEvery = 1000
+
+// verifiedChunkType returns the chunk type to store for a chunk passed with
+// a verified type. On a sampled call it recomputes the type with
+// storage.ChunkType and, if the two differ, uses the recomputed type, logs
+// the mismatch and counts it.
+func (r *Reserve) verifiedChunkType(chunk swarm.Chunk, verified swarm.ChunkType) swarm.ChunkType {
+	n := r.shadowCalls.Add(1)
+	if !r.shadowAlways && n%shadowCheckEvery != 0 {
+		return verified
+	}
+	computed := storage.ChunkType(chunk)
+	if computed == verified {
+		return verified
+	}
+	r.shadowMismatches.Add(1)
+	r.logger.Error(nil, "reserve: verified chunk type differs from computed type, using computed type",
+		"chunk_address", chunk.Address(), "verified", verified, "computed", computed)
+	return computed
+}
+
+func (r *Reserve) put(ctx context.Context, chunk swarm.Chunk, verified swarm.ChunkType) error {
 	// batchID lock, Put vs Eviction
 	r.multx.Lock(string(chunk.Stamp().BatchID()))
 	defer r.multx.Unlock(string(chunk.Stamp().BatchID()))
@@ -118,7 +196,15 @@ func (r *Reserve) Put(ctx context.Context, chunk swarm.Chunk) error {
 		return nil
 	}
 
-	chunkType := storage.ChunkType(chunk)
+	chunkType := verified
+	if chunkType == swarm.ChunkTypeUnspecified {
+		chunkType = storage.ChunkType(chunk)
+	} else {
+		chunkType = r.verifiedChunkType(chunk, chunkType)
+	}
+	if chunkType == swarm.ChunkTypeUnspecified {
+		return fmt.Errorf("chunk type unspecified: %w", storage.ErrInvalidChunk)
+	}
 
 	bin := swarm.Proximity(r.baseAddr.Bytes(), chunk.Address().Bytes())
 
@@ -294,8 +380,16 @@ func (r *Reserve) Put(ctx context.Context, chunk swarm.Chunk) error {
 	}
 	if shouldIncReserveSize {
 		r.size.Add(1)
+		r.arrivals.Add(1)
 	}
 	return nil
+}
+
+// Arrivals returns how many chunks Put has added to the reserve since the
+// reserve was opened. It counts only additions that grew the reserve size:
+// not a chunk the reserve already held, and not a stamp-index replacement.
+func (r *Reserve) Arrivals() uint64 {
+	return r.arrivals.Load()
 }
 
 func (r *Reserve) Has(addr swarm.Address, batchID []byte, stampHash []byte) (bool, error) {
@@ -326,14 +420,127 @@ func (r *Reserve) Get(ctx context.Context, addr swarm.Address, batchID []byte, s
 	return ch.WithStamp(stamp), nil
 }
 
-// EvictBatchBin evicts all chunks from bins upto the bin provided.
-// Pinned chunks are protected from eviction to maintain data integrity.
+// EvictionRound is the most items one round of EvictBatchBin reads and
+// deletes. The batch lock is held only for one round, and only one round of
+// items is in memory at a time, whatever the count asked for (wasp #623).
+const EvictionRound = 1000
+
+// evictionRound is EvictionRound, a variable so tests can use small rounds.
+var evictionRound = EvictionRound
+
+// RoundStall, when set, is called at the first item of every eviction
+// round, inside the round. Tests set it to model a round slowed by a busy
+// disk (wasp #634); it is nil in production.
+var RoundStall func()
+
+// EvictionYield is how long EvictBatchBin waits, with the batch lock
+// released, before the next round of the same batch. The lock (a
+// condition variable woken by Broadcast) gives no turn to waiters: an
+// eviction that unlocks and locks again at once keeps it, and a Put or
+// Get of the batch then waits for the whole eviction, as before rounds.
+// The yield gives a waiting Put or Get the lock between rounds. It costs
+// about 1 ms per round of 1,000 chunks, about 14 s for 14 million.
+const EvictionYield = time.Millisecond
+
+// evictionYield is EvictionYield, a variable so tests can change it.
+var evictionYield = EvictionYield
+
+// EvictionHooks are the per-round callbacks of EvictBatchBin (wasp #623).
+// The zero value runs every round at full speed on runtime.NumCPU()
+// goroutines.
+type EvictionHooks struct {
+	// Workers returns how many goroutines delete the next round's items.
+	// Nil, or a result below 1, means runtime.NumCPU().
+	Workers func() int
+	// After is called with the batch lock held, right after a round deleted
+	// n items in the duration took.
+	After func(n int, took time.Duration)
+	// Before is called before each round, before the batch lock is taken.
+	// It may wait, and an error ends EvictBatchBin before the round. The
+	// returned release, if not nil, is called after the round, once the
+	// batch lock is released and before Pay (wasp #649: no round runs
+	// while a reserve sample runs).
+	Before func() (release func(), err error)
+	// Pay is called after the batch lock is released, for a round that
+	// deleted n > 0 items. It may wait, and it is where a shutdown or a
+	// batch expiry stops the eviction between rounds. An error ends
+	// EvictBatchBin before the next round and is returned.
+	Pay func(n int) error
+}
+
+// EvictBatchBin evicts the chunks of a batch in bins below the bin provided,
+// up to count chunks, in rounds of at most EvictionRound items. Each round
+// calls hooks.Before, reads and deletes under the batch lock, calls
+// hooks.After, releases the lock, calls the release hooks.Before returned,
+// and then calls hooks.Pay. Pinned chunks are protected from eviction
+// to maintain data integrity.
 func (r *Reserve) EvictBatchBin(
 	ctx context.Context,
 	batchID []byte,
 	count int,
 	bin uint8,
+	hooks EvictionHooks,
 ) (int, error) {
+	total := 0
+	var resume string // ID of the last item the previous round read
+	for count > 0 {
+		var release func()
+		if hooks.Before != nil {
+			rel, err := hooks.Before()
+			if err != nil {
+				return total, err
+			}
+			release = rel
+		}
+		read, evicted, last, err := r.evictRound(ctx, batchID, min(count, evictionRound), bin, resume, hooks)
+		if release != nil {
+			release()
+		}
+		total += evicted
+		if err != nil {
+			return total, err
+		}
+		if read == 0 {
+			return total, nil
+		}
+		count -= read
+		resume = last
+		if evicted > 0 && hooks.Pay != nil {
+			if err := hooks.Pay(evicted); err != nil {
+				return total, err
+			}
+		}
+		if read < evictionRound || count <= 0 {
+			// The batch's entries below bin ended inside this round, or
+			// the count is reached: no round follows.
+			return total, nil
+		}
+		time.Sleep(evictionYield)
+	}
+	return total, nil
+}
+
+// evictRound reads at most limit items of the batch below bin, starting at
+// the key resume (the first item when resume is empty), and deletes them,
+// all under the batch lock. It returns how many items it read, how many it
+// evicted, and the ID of the last item read.
+//
+// A later round resumes with PrefixAtStart at that ID, so it never walks
+// again over the deletion markers of earlier rounds. Not SkipFirst: the
+// resume key was deleted, so skipping the first result would skip a live
+// item. With PrefixAtStart the store bounds the iteration only by the
+// namespace, so the callback stops when an item belongs to another batch.
+// Reading and deleting stay under one lock: a Put between them could
+// replace an item at the same stamp index, and the delete would then remove
+// the new chunk's data.
+func (r *Reserve) evictRound(
+	ctx context.Context,
+	batchID []byte,
+	limit int,
+	bin uint8,
+	resume string,
+	hooks EvictionHooks,
+) (read, evictedN int, last string, err error) {
 	r.multx.Lock(string(batchID))
 	defer r.multx.Unlock(string(batchID))
 
@@ -342,22 +549,30 @@ func (r *Reserve) EvictBatchBin(
 		pinnedEvictedItems []*BatchRadiusItem
 	)
 
-	if count <= 0 {
-		return 0, nil
-	}
-
 	pinUuids, err := pinstore.GetCollectionUUIDs(r.st.IndexStore())
 	if err != nil {
-		return 0, err
+		return 0, 0, "", err
 	}
 
-	err = r.st.IndexStore().Iterate(storage.Query{
+	q := storage.Query{
 		Factory: func() storage.Item { return &BatchRadiusItem{} },
 		Prefix:  string(batchID),
-	}, func(res storage.Result) (bool, error) {
+	}
+	if resume != "" {
+		q.Prefix = resume
+		q.PrefixAtStart = true
+	}
+
+	count := limit
+	err = r.st.IndexStore().Iterate(q, func(res storage.Result) (bool, error) {
 		batchRadius := res.Entry.(*BatchRadiusItem)
-		if batchRadius.Bin >= bin {
+		if !bytes.Equal(batchRadius.BatchID, batchID) || batchRadius.Bin >= bin {
 			return true, nil
+		}
+		read++
+		last = batchRadius.ID()
+		if read == 1 && RoundStall != nil {
+			RoundStall()
 		}
 
 		// Check if the chunk is pinned in any collection
@@ -384,11 +599,22 @@ func (r *Reserve) EvictBatchBin(
 		return false, nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, 0, "", err
+	}
+	if read == 0 {
+		return 0, 0, "", nil
 	}
 
+	workers := runtime.NumCPU()
+	if hooks.Workers != nil {
+		if w := hooks.Workers(); w >= 1 {
+			workers = w
+		}
+	}
+
+	start := time.Now()
 	eg, ctx := errgroup.WithContext(ctx)
-	eg.SetLimit(runtime.NumCPU())
+	eg.SetLimit(workers)
 
 	var evicted atomic.Int64
 
@@ -424,9 +650,13 @@ func (r *Reserve) EvictBatchBin(
 
 	err = eg.Wait()
 
-	r.size.Add(-evicted.Load())
+	n := evicted.Load()
+	r.size.Add(-n)
+	if hooks.After != nil {
+		hooks.After(int(n), time.Since(start))
+	}
 
-	return int(evicted.Load()), err
+	return read, int(n), last, err
 }
 
 func (r *Reserve) removeChunk(
@@ -695,6 +925,13 @@ func (r *Reserve) Radius() uint8 {
 	return uint8(r.radius.Load())
 }
 
+// RadiusState returns the storage radius and the number of times it has
+// increased, from one read (#658).
+func (r *Reserve) RadiusState() (uint8, uint64) {
+	w := r.radius.Load()
+	return uint8(w), w >> 8
+}
+
 func (r *Reserve) Size() int {
 	return int(r.size.Load())
 }
@@ -715,7 +952,16 @@ func (r *Reserve) EvictionTarget() int {
 }
 
 func (r *Reserve) SetRadius(rad uint8) error {
-	r.radius.Store(uint32(rad))
+	for {
+		old := r.radius.Load()
+		count := old >> 8
+		if rad > uint8(old) {
+			count++
+		}
+		if r.radius.CompareAndSwap(old, count<<8|uint64(rad)) {
+			break
+		}
+	}
 	r.radiusSetter.SetStorageRadius(rad)
 	return r.st.Run(context.Background(), func(s transaction.Store) error {
 		return s.IndexStore().Put(&radiusItem{Radius: rad})

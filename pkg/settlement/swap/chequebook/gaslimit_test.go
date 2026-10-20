@@ -48,6 +48,11 @@ func expectEstimated(t *testing.T, request *transaction.TxRequest, floor uint64)
 	if request.MinEstimatedGasLimit != floor {
 		t.Fatalf("got gas floor %d, want %d", request.MinEstimatedGasLimit, floor)
 	}
+	// When estimation fails, gas-limit-fallback is used, as in Bee v2.8.3
+	// (operator decision of 2026-10-16), not the floor.
+	if !request.FallbackOnEstimateError {
+		t.Fatal("a failed estimate falls back to the floor, want gas-limit-fallback")
+	}
 }
 
 func TestDeployEstimatesGas(t *testing.T) {
@@ -133,6 +138,9 @@ func TestCashoutGasLimit(t *testing.T) {
 			}
 			if got.MinEstimatedGasLimit != chequebook.CashoutGasLimitFloor {
 				t.Fatalf("got gas floor %d, want %d", got.MinEstimatedGasLimit, chequebook.CashoutGasLimitFloor)
+			}
+			if !got.FallbackOnEstimateError {
+				t.Fatal("a failed estimate falls back to the floor, want gas-limit-fallback")
 			}
 		})
 	}

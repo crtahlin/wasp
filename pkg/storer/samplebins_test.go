@@ -61,13 +61,6 @@ func TestReserveSampleScansOnlyAnchorBins(t *testing.T) {
 			chs = append(chs, stamped(chunk.GenerateValidRandomChunkAt(t, baseAddr, po)))
 		}
 	}
-	// Chunks in bin 31, which random chunks almost never reach, so that the
-	// upper end of the range is exercised. They are not valid content-addressed
-	// chunks, so the sampler counts them in TotalIterated and then drops them
-	// as rogue, which is enough to see whether the scan reached them.
-	for range chunksPerBin {
-		chs = append(chs, stamped(chunk.GenerateTestRandomChunkAt(t, baseAddr, int(swarm.MaxPO))))
-	}
 
 	// Anchors at a chosen proximity p to the overlay, each with chunks of its own
 	// neighbourhood (proximity above committedDepth to the anchor), so that a
@@ -84,6 +77,19 @@ func TestReserveSampleScansOnlyAnchorBins(t *testing.T) {
 	putter := st.ReservePutter()
 	for _, ch := range chs {
 		if err := putter.Put(context.Background(), ch); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Entries in bin 31, which random chunks almost never reach, so that the
+	// upper end of the range is exercised. They are legacy entries of
+	// unspecified type, which reserve.Put refuses since Bee v2.8.3, so they
+	// are written straight into the index: the sampler counts them in
+	// TotalIterated and then drops them as rogue, which is enough to see
+	// whether the scan reached them.
+	for i := range chunksPerBin {
+		addr := swarm.RandAddressAt(t, baseAddr, int(swarm.MaxPO))
+		if err := st.PutLegacyRogueBinItem(context.Background(), swarm.MaxPO, uint64(1_000_000+i), addr, make([]byte, swarm.HashSize)); err != nil {
 			t.Fatal(err)
 		}
 	}

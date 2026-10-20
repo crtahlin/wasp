@@ -41,12 +41,20 @@ const (
 	cursorStreamName = "cursors"
 )
 
-var ErrUnsolicitedChunk = errors.New("peer sent unsolicited chunk")
+var (
+	ErrUnsolicitedChunk    = errors.New("peer sent unsolicited chunk")
+	errStreamLimitExceeded = errors.New("pullsync: peer exceeded concurrent stream limit")
+)
+
+// errBinOutOfRange refuses a request for a bin the reserve cannot hold (#643).
+var errBinOutOfRange = errors.New("pullsync: requested bin out of range")
+
+const reasonBinOutOfRange = "bin_out_of_range"
 
 const (
 	MaxCursor             = math.MaxUint64
 	DefaultMaxPage uint64 = 250
-	pageTimeout           = time.Second
+	pageTimeout           = 250 * time.Millisecond
 	// DefaultMaxChunksPerSecond is the per-peer inbound chunk rate a node will
 	// serve. It is a fairness and stability choice rather than a capability
 	// limit, which is why it is a default rather than a constant: with eight
@@ -67,20 +75,29 @@ type Interface interface {
 }
 
 type Syncer struct {
-	streamer       p2p.Streamer
-	metrics        metrics
-	logger         log.Logger
-	store          storer.Reserve
-	quit           chan struct{}
-	unwrap         func(swarm.Chunk)
-	gsocHandler    func(*soc.SOC)
-	validStamp     postage.ValidStampFn
+	streamer    p2p.Streamer
+	metrics     metrics
+	logger      log.Logger
+	store       storer.Reserve
+	quit        chan struct{}
+	unwrap      func(swarm.Chunk)
+	gsocHandler func(*soc.SOC)
+	validStamp  postage.ValidStampFn
+	// holder keeps chunks of batches not seen yet while the batch store is
+	// stale (#583). Nil drops them as before.
+	holder         postage.ChunkHolder
 	intervalsSF    singleflight.Group[string, *collectAddrsResult]
 	syncInProgress atomic.Int32
+	// waiting tracks inbound requests still building their offer, so a
+	// request the same peer replaced can be ended (#640).
+	waiting waitingRequests
 
 	maxPage uint64
 
 	limiter *ratelimit.Limiter
+
+	syncStreams   *peerStreamLimiter
+	cursorStreams *peerStreamLimiter
 
 	Interface
 	io.Closer
@@ -99,7 +116,7 @@ func New(
 	if maxChunksPerSecond <= 0 {
 		maxChunksPerSecond = DefaultMaxChunksPerSecond
 	}
-	return &Syncer{
+	s := &Syncer{
 		streamer:    streamer,
 		store:       store,
 		metrics:     newMetrics(),
@@ -110,7 +127,15 @@ func New(
 		quit:        make(chan struct{}),
 		maxPage:     maxPage,
 		limiter:     ratelimit.New(time.Second/time.Duration(maxChunksPerSecond), int(maxPage)),
+
+		syncStreams:   newPeerStreamLimiter(maxPeerSyncStreams),
+		cursorStreams: newPeerStreamLimiter(maxPeerCursorStreams),
 	}
+	s.waiting.gauge = s.metrics.WaitingRequests.Set
+	// Export the refusal series at 0, so an absent series and no refusals
+	// can be told apart.
+	s.metrics.RequestsRefused.WithLabelValues(reasonBinOutOfRange)
+	return s
 }
 
 func (s *Syncer) Protocol() p2p.ProtocolSpec {
@@ -142,6 +167,12 @@ func (s *Syncer) handler(streamCtx context.Context, p p2p.Peer, stream p2p.Strea
 		defer s.syncInProgress.Add(-1)
 	}
 
+	release, ok := s.syncStreams.acquire(p.Address)
+	if !ok {
+		return s.streamLimitExceeded(p, stream, streamName, maxPeerSyncStreams)
+	}
+	defer release()
+
 	r := protobuf.NewReader(stream)
 	defer func() {
 		if err != nil {
@@ -168,14 +199,80 @@ func (s *Syncer) handler(streamCtx context.Context, p p2p.Peer, stream p2p.Strea
 		return fmt.Errorf("read get range: %w", err)
 	}
 
+	// The reserve holds bins 0 to swarm.MaxBins-1 only. Check the raw value
+	// before any conversion: a bin above that would wait for ever on an
+	// empty bin, and a value that does not fit a uint8 would wrap to another
+	// bin (#643).
+	if rn.Bin < 0 || rn.Bin >= int32(swarm.MaxBins) {
+		s.metrics.RequestsRefused.WithLabelValues(reasonBinOutOfRange).Inc()
+		return fmt.Errorf("%w: %d", errBinOutOfRange, rn.Bin)
+	}
+
 	// recreate the reader to allow the first one to be garbage collected
 	// before the makeOffer function call, to reduce the total memory allocated
 	// while makeOffer is executing (waiting for the new chunks)
 	w, r := protobuf.NewWriterAndReader(stream)
 
-	// make an offer to the upstream peer in return for the requested range
-	offer, err := s.makeOffer(ctx, rn)
+	// make an offer to the upstream peer in return for the requested range.
+	// Only this step can be ended: by a newer request from the same peer for
+	// the same bin (#640), or by the requester going away (#641); everything
+	// after it keeps the handler context.
+	reqCtx, cancelReq := context.WithCancelCause(ctx)
+	entry, ended, sameStart, overCap := s.waiting.register(p.Address, uint8(rn.Bin), rn.Start, reqCtx, cancelReq)
+	if sameStart > 0 {
+		s.metrics.RequestsReplaced.WithLabelValues(reasonSameStart).Add(float64(sameStart))
+	}
+	if overCap > 0 {
+		s.metrics.RequestsReplaced.WithLabelValues(reasonOverCap).Add(float64(overCap))
+	}
+	watch := startWatcher(stream, cancelReq)
+	if watch == nil {
+		s.metrics.RequestsUnwatched.Inc()
+	}
+	// Wait until the ended requests have unregistered; they return as soon
+	// as they see the cancel. This does not wait for their subscription to
+	// be released: that happens in the shared collection's own goroutine.
+	// When an ended request was the collection's only caller, this request
+	// starts a fresh subscription instead of joining it. Whether to keep the
+	// wait is #693.
+	for _, e := range ended {
+		select {
+		case <-e.done:
+		case <-reqCtx.Done():
+		}
+	}
+	// A request ended while it waited above starts no collection (#648).
+	var offer *pb.Offer
+	if err = reqCtx.Err(); err == nil {
+		offer, err = s.makeOffer(reqCtx, rn)
+	}
+	afterMakeOffer()
+	watch.stop()
+	s.waiting.unregister(entry)
+	cause := context.Cause(reqCtx)
+	cancelReq(nil)
+	if errors.Is(cause, errRequesterGone) || errors.Is(cause, errUnexpectedData) {
+		s.metrics.RequestsAbandoned.WithLabelValues(watch.reason).Inc()
+		return fmt.Errorf("make offer: %w (%s)", cause, watch.reason)
+	}
+	// The connection ended (libp2p cancels the stream's handler context on a
+	// disconnect) and that cancel reached the request before the watcher's,
+	// or the request had no watcher. It is abandoned all the same; count it,
+	// unless the node is stopping or the same peer replaced it. A request
+	// whose offer was built just as the connection ended is counted here and
+	// not written; the write would fail. See #672.
+	if streamCtx.Err() != nil && !s.stopping() && !errors.Is(cause, errRequestReplaced) {
+		reason := reasonDisconnect
+		if watch != nil && watch.reason != "" {
+			reason = watch.reason
+		}
+		s.metrics.RequestsAbandoned.WithLabelValues(reason).Inc()
+		return fmt.Errorf("make offer: %w (%s)", errRequesterGone, reason)
+	}
 	if err != nil {
+		if errors.Is(cause, errRequestReplaced) {
+			err = cause
+		}
 		return fmt.Errorf("make offer: %w", err)
 	}
 
@@ -318,8 +415,14 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 	}
 
 	chunksToPut := make([]swarm.Chunk, 0, ctr)
+	// chunkTypes[i] is the type the checks below established for
+	// chunksToPut[i]; the reserve stores it without repeating them (#810).
+	chunkTypes := make([]swarm.ChunkType, 0, ctr)
 
-	var chunkErr error
+	var (
+		chunkErr error
+		notHeld  bool
+	)
 	for ; ctr > 0; ctr-- {
 		var delivery pb.Delivery
 		if err = r.ReadMsgWithContext(ctx, &delivery); err != nil {
@@ -357,21 +460,36 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 
 		chunk, err := s.validStamp(newChunk.WithStamp(stamp))
 		if err != nil {
+			// While the batch store is stale, a genuine chunk of a batch
+			// this node has not seen yet is held instead of dropped, so the
+			// interval can advance without losing it (#583).
+			if res, hold := s.hold(ctx, newChunk.WithStamp(stamp), err); res.Held() {
+				// Unwrap only when the chunk's data is newly held, so a
+				// chunk offered again is not delivered twice.
+				if res == postage.HeldNew {
+					s.unwrapHeld(newChunk.WithStamp(stamp))
+				}
+				continue
+			} else if hold != nil {
+				// It could have been kept but was not: do not advance
+				// past it.
+				notHeld = true
+				chunkErr = errors.Join(chunkErr, hold)
+				continue
+			}
 			s.logger.Debug("unverified stamp", "error", err, "peer_address", peer, "chunk_address", newChunk)
 			chunkErr = errors.Join(chunkErr, err)
 			continue
 		}
 
+		var chunkType swarm.ChunkType
 		if cac.Valid(chunk) {
+			chunkType = swarm.ChunkTypeContentAddressed
 			go s.unwrap(chunk)
-		} else if chunk, err := soc.FromChunk(chunk); err == nil {
-			addr, err := chunk.Address()
-			if err != nil {
-				chunkErr = errors.Join(chunkErr, err)
-				continue
-			}
-			s.logger.Debug("sync gsoc", "peer_address", peer, "chunk_address", addr, "wrapped_chunk_address", chunk.WrappedChunk().Address())
-			s.gsocHandler(chunk)
+		} else if sch, err := soc.FromChunkValidate(chunk); err == nil {
+			chunkType = swarm.ChunkTypeSingleOwner
+			s.logger.Debug("sync gsoc", "peer_address", peer, "chunk_address", addr, "wrapped_chunk_address", sch.WrappedChunk().Address())
+			s.gsocHandler(sch)
 		} else {
 			s.logger.Debug("invalid cac/soc chunk", "error", swarm.ErrInvalidChunk, "peer_address", peer, "chunk", chunk)
 			chunkErr = errors.Join(chunkErr, swarm.ErrInvalidChunk)
@@ -379,6 +497,7 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 			continue
 		}
 		chunksToPut = append(chunksToPut, chunk)
+		chunkTypes = append(chunkTypes, chunkType)
 	}
 
 	chunksPut := 0
@@ -387,8 +506,8 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 		s.metrics.Delivered.Add(float64(len(chunksToPut)))
 		s.metrics.LastReceived.WithLabelValues(fmt.Sprintf("%d", bin)).Add(float64(len(chunksToPut)))
 
-		for _, c := range chunksToPut {
-			if err := s.store.ReservePutter().Put(ctx, c); err != nil {
+		for i, c := range chunksToPut {
+			if err := s.store.ReservePutVerified(ctx, c, chunkTypes[i]); err != nil {
 				// in case of these errors, no new items are added to the storage, so it
 				// is safe to continue with the next chunk
 				if errors.Is(err, storage.ErrOverwriteNewerChunk) {
@@ -402,7 +521,55 @@ func (s *Syncer) Sync(ctx context.Context, peer swarm.Address, bin uint8, start 
 		}
 	}
 
+	// A wanted chunk that could become valid once caught up but could not be
+	// held: report no progress for the page, so the puller records nothing
+	// and retries it later instead of advancing past the chunk (#583).
+	if notHeld {
+		return 0, chunksPut, chunkErr
+	}
+
 	return topmost, chunksPut, chunkErr
+}
+
+// SetChunkHolder lets the syncer hold chunks of batches the node has not seen
+// yet while its batch store is stale (#583).
+func (s *Syncer) SetChunkHolder(h postage.ChunkHolder) {
+	s.holder = h
+}
+
+// hold offers a chunk whose stamp failed validation to the holder. It reports
+// what the holder did, or the error that kept a chunk that qualified from
+// being held. A chunk that does not qualify returns NotHeld and nil.
+func (s *Syncer) hold(ctx context.Context, ch swarm.Chunk, cause error) (postage.HoldResult, error) {
+	if s.holder == nil || !postage.HoldsUnvalidated(cause) {
+		return postage.NotHeld, nil
+	}
+	// Only a chunk whose content checks out is held: its data is genuine
+	// and only its stamp cannot be checked yet.
+	if !cac.Valid(ch) && !soc.Valid(ch) {
+		return postage.NotHeld, nil
+	}
+	res, err := s.holder.HoldUnvalidated(ctx, ch, cause)
+	if res.Held() {
+		s.metrics.Held.Inc()
+	}
+	return res, err
+}
+
+// unwrapHeld hands a held chunk to pss or gsoc, as a stored one is. Push-sync
+// also unwraps before it checks the stamp, so a message carried by a held
+// chunk is delivered now rather than after the batch store catches up. The
+// chunk comes from a peer, so a SOC is parsed with FromChunkValidate, which
+// also checks that the chunk's address is the SOC's, as Bee v2.8.3 does in
+// its push-sync and pull-sync handlers.
+func (s *Syncer) unwrapHeld(ch swarm.Chunk) {
+	if cac.Valid(ch) {
+		go s.unwrap(ch)
+		return
+	}
+	if sc, err := soc.FromChunkValidate(ch); err == nil {
+		s.gsocHandler(sc)
+	}
 }
 
 // makeOffer tries to assemble an offer for a given requested interval.
@@ -548,6 +715,12 @@ func (s *Syncer) GetCursors(ctx context.Context, peer swarm.Address) (retr []uin
 }
 
 func (s *Syncer) cursorHandler(ctx context.Context, p p2p.Peer, stream p2p.Stream) (err error) {
+	release, ok := s.cursorStreams.acquire(p.Address)
+	if !ok {
+		return s.streamLimitExceeded(p, stream, cursorStreamName, maxPeerCursorStreams)
+	}
+	defer release()
+
 	w, r := protobuf.NewWriterAndReader(stream)
 	s.logger.Debug("peer wants cursors", "peer_address", p.Address)
 	defer func() {
@@ -577,8 +750,19 @@ func (s *Syncer) cursorHandler(ctx context.Context, p p2p.Peer, stream p2p.Strea
 	return nil
 }
 
+// streamLimitExceeded resets the stream and returns an error which makes the
+// p2p layer disconnect the peer.
+func (s *Syncer) streamLimitExceeded(p p2p.Peer, stream p2p.Stream, name string, limit int) error {
+	s.metrics.StreamLimitExceeded.Inc()
+	s.logger.Warning("peer exceeded concurrent stream limit, disconnecting", "peer_address", p.Address, "stream", name, "limit", limit)
+	_ = stream.Reset()
+	return p2p.NewDisconnectError(errStreamLimitExceeded)
+}
+
 func (s *Syncer) disconnect(peer p2p.Peer) error {
 	s.limiter.Clear(peer.Address.ByteString())
+	s.syncStreams.clear(peer.Address)
+	s.cursorStreams.clear(peer.Address)
 	return nil
 }
 
@@ -604,6 +788,20 @@ func (s *Syncer) Close() error {
 	}
 	return nil
 }
+
+// stopping reports whether the syncer is shutting down.
+func (s *Syncer) stopping() bool {
+	select {
+	case <-s.quit:
+		return true
+	default:
+		return false
+	}
+}
+
+// afterMakeOffer runs between makeOffer and unregistering the request. It
+// does nothing; tests replace it to force the boundary race (#640).
+var afterMakeOffer = func() {}
 
 // singleflight key for intervals
 func sfKey(bin uint8, start uint64) string {

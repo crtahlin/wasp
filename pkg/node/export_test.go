@@ -16,6 +16,8 @@ var (
 	ErrNetworkRadiusUnknown          = errNetworkRadiusUnknown
 	RunStakeRecoveryOnStartup        = runStakeRecoveryOnStartup
 	ValidatePostageConfirmationDepth = validatePostageConfirmationDepth
+	ValidatePostageStallShutdown     = validatePostageStallShutdown
+	PostageReadyForLottery           = postageReadyForLottery
 )
 
 // NewTestBeeWithClosers builds a Bee with only the push-sync and retrieval
@@ -25,6 +27,11 @@ func NewTestBeeWithClosers(pushSync, retrieval io.Closer) *Bee {
 		pushSyncCloser:  pushSync,
 		retrievalCloser: retrieval,
 	}
+}
+
+// NewTestBeeWithProviders builds a Bee with only the providers closer set.
+func NewTestBeeWithProviders(providers io.Closer) *Bee {
+	return &Bee{providersCloser: providers}
 }
 
 // ShutdownClosersByName returns the Shutdown fan-out closers keyed by name.

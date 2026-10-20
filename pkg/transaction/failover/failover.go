@@ -5,11 +5,21 @@
 // Package failover routes chain calls across an ordered list of RPC endpoints,
 // so that losing one does not take the node down.
 //
-// A single endpoint is what bee has today, and when it fails the node does not
-// degrade — it stops. Writes to the chain fail, the postage listener stalls,
-// and ten minutes later the stall timeout shuts the node down; if the endpoint
-// is still unreachable it will not start again. See issue #109 and
-// docs/experiments/rpc-endpoint-failover/spec.md.
+// A single endpoint is what bee has, and when it fails the node does not
+// degrade, it stops: writes to the chain fail, the postage listener stalls,
+// and ten minutes later the stall timeout shuts the node down. See issue #109
+// and docs/experiments/rpc-endpoint-failover/spec.md. In wasp a stall no
+// longer stops the node: its batch store is marked stale and it keeps
+// serving (#583). Losing every endpoint still leaves it degraded until one
+// answers again.
+//
+// Each attempt gets the caller's remaining time divided by the connected
+// endpoints still to try, at least 10 s, and a call does not move on once
+// the caller's own deadline has passed. So a caller whose deadline is under
+// about 20 s, such as a 5 s cheque emission, gives its whole deadline to the
+// active endpoint and does not fail over from one that hangs; it fails over
+// only from one whose connection fails. The postage listener's calls
+// and the storage-incentives agent's are long enough to move on (#583).
 //
 // Per-call routing is enough because every chain call bee makes is
 // request/response: transaction.Backend embeds backend.Geth, which is sixteen
@@ -22,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -77,9 +88,19 @@ type Backend struct {
 	endpoints []*endpoint
 	logger    log.Logger
 	maxLag    uint64
+	metrics   metrics
 
 	active  atomic.Int32  // index into endpoints
 	highest atomic.Uint64 // highest block number observed anywhere
+
+	// closed ends the copies of a persistent send (#783) when the backend is
+	// closed; copies tracks them so Close waits for them before it closes
+	// the connections they use. copiesMu orders starting a copy against
+	// Close, so no copy starts once Close has begun to wait.
+	closed      context.Context
+	closeCopies context.CancelFunc
+	copiesMu    sync.Mutex
+	copies      sync.WaitGroup
 }
 
 var _ transaction.Backend = (*Backend)(nil)
@@ -97,7 +118,8 @@ func New(logger log.Logger, maxLag uint64, endpoints ...Endpoint) (*Backend, err
 		maxLag = DefaultMaxBlockLag
 	}
 
-	b := &Backend{logger: logger, maxLag: maxLag}
+	b := &Backend{logger: logger, maxLag: maxLag, metrics: newMetrics()}
+	b.closed, b.closeCopies = context.WithCancel(context.Background())
 	first := -1
 	for i, e := range endpoints {
 		ep := &endpoint{name: e.Name, dial: e.Dial}
@@ -150,25 +172,120 @@ func (b *Backend) advance(from int, cause error) bool {
 	return false
 }
 
+// minAttemptTimeout is the least time one endpoint attempt gets when a
+// caller's deadline is shared out among the endpoints still to try (#583).
+var minAttemptTimeout = 10 * time.Second
+
+// wrapPause is how long a persistent call (#783) waits before it starts again
+// at the first endpoint, so that endpoints which all fail at once are asked
+// at most once a second per call.
+var wrapPause = time.Second
+
+// attemptContext derives the context for one endpoint attempt. A persistent
+// call (#783) gets its own fixed bound. Otherwise a caller with no deadline
+// keeps its own context, as before, and a caller with a deadline gets
+// that remaining time divided by the connected endpoints still to try, from
+// the active one on, with a floor of minAttemptTimeout, so an endpoint that
+// hangs uses one share and the next one is still asked within the call
+// (#583). The derived context never outlives the caller's.
+func (b *Backend) attemptContext(ctx context.Context, from int) (context.Context, context.CancelFunc) {
+	if attempt, ok := transaction.PersistentCalls(ctx); ok {
+		return context.WithTimeout(ctx, attempt)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	left := 0
+	for i := from; i < len(b.endpoints); i++ {
+		if b.endpoints[i].live.Load() != nil {
+			left++
+		}
+	}
+	if left < 1 {
+		left = 1
+	}
+	share := time.Until(deadline) / time.Duration(left)
+	if share < minAttemptTimeout {
+		share = minAttemptTimeout
+	}
+	return context.WithTimeout(ctx, share)
+}
+
 // call runs op against the active endpoint, moving on when an endpoint fails to
 // answer. An answer, including an error answer, is returned as-is.
-func call[T any](b *Backend, op func(transaction.Backend) (T, error)) (T, error) {
+//
+// Each attempt runs under its own deadline (attemptContext). When the caller's
+// own context has ended, call returns the error instead of moving on: every
+// further endpoint would fail at once on the expired context, and the shared
+// active endpoint would jump past endpoints nobody asked (#583).
+//
+// An ordinary call tries each endpoint once. A persistent call (#783) does not
+// stop after the last: it starts again at the first connected endpoint, after
+// a pause, until an endpoint answers or the caller's context ends.
+func call[T any](ctx context.Context, b *Backend, op func(context.Context, transaction.Backend) (T, error)) (T, error) {
 	var zero T
-	for attempts := 0; attempts < len(b.endpoints); attempts++ {
+	_, persist := transaction.PersistentCalls(ctx)
+	for attempts := 0; persist || attempts < len(b.endpoints); attempts++ {
 		i, ep, live := b.current()
-		v, err := op(live)
+		actx, cancel := b.attemptContext(ctx, i)
+		v, err := op(actx, live)
+		cancel()
 		if err == nil {
 			return v, nil
 		}
 		if !isTransportFailure(err) {
 			return v, err
 		}
-		if !b.advance(i, err) {
+		if ctx.Err() != nil {
+			return zero, err
+		}
+		if b.advance(i, err) {
+			continue
+		}
+		if !persist {
 			return zero, fmt.Errorf("failover: all %d endpoints failed, last was %s: %w",
 				len(b.endpoints), ep.name, err)
 		}
+		if !b.startAgain(ctx, i, err) {
+			return zero, err
+		}
 	}
 	return zero, errors.New("failover: exhausted endpoints")
+}
+
+// startAgain moves the active endpoint back to the first connected one for a
+// persistent call that found no further endpoint, then waits wrapPause. It
+// reports false when the caller's context ended during the wait.
+//
+// Moving back to the first is what Recover would do once that endpoint answered
+// its probe; this does it sooner. The compare-and-swap lets a concurrent call
+// that moved first win, as in advance.
+func (b *Backend) startAgain(ctx context.Context, from int, cause error) bool {
+	first := from
+	for i, ep := range b.endpoints {
+		if ep.live.Load() != nil {
+			first = i
+			break
+		}
+	}
+	b.active.CompareAndSwap(int32(from), int32(first))
+	b.metrics.Wraparounds.Inc()
+	b.logger.Warning("all blockchain rpc endpoints failed; starting again at the first",
+		"first", b.endpoints[first].name, "cause", cause)
+	return pause(ctx)
+}
+
+// pause waits wrapPause, and reports false when ctx ends first.
+func pause(ctx context.Context) bool {
+	t := time.NewTimer(wrapPause)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // --- transaction.Backend -----------------------------------------------------
@@ -176,7 +293,7 @@ func call[T any](b *Backend, op func(transaction.Backend) (T, error)) (T, error)
 // BlockNumber also maintains the high-water mark used to bound how far behind a
 // failover target may be.
 func (b *Backend) BlockNumber(ctx context.Context) (uint64, error) {
-	n, err := call(b, func(be transaction.Backend) (uint64, error) {
+	n, err := call(ctx, b, func(ctx context.Context, be transaction.Backend) (uint64, error) {
 		return be.BlockNumber(ctx)
 	})
 	if err != nil {
@@ -203,43 +320,45 @@ func (b *Backend) BlockNumber(ctx context.Context) (uint64, error) {
 }
 
 func (b *Backend) BalanceAt(ctx context.Context, a common.Address, n *big.Int) (*big.Int, error) {
-	return call(b, func(be transaction.Backend) (*big.Int, error) { return be.BalanceAt(ctx, a, n) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (*big.Int, error) { return be.BalanceAt(ctx, a, n) })
 }
 
 func (b *Backend) CallContract(ctx context.Context, m ethereum.CallMsg, n *big.Int) ([]byte, error) {
-	return call(b, func(be transaction.Backend) ([]byte, error) { return be.CallContract(ctx, m, n) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) ([]byte, error) { return be.CallContract(ctx, m, n) })
 }
 
 func (b *Backend) ChainID(ctx context.Context) (*big.Int, error) {
-	return call(b, func(be transaction.Backend) (*big.Int, error) { return be.ChainID(ctx) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (*big.Int, error) { return be.ChainID(ctx) })
 }
 
 func (b *Backend) CodeAt(ctx context.Context, c common.Address, n *big.Int) ([]byte, error) {
-	return call(b, func(be transaction.Backend) ([]byte, error) { return be.CodeAt(ctx, c, n) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) ([]byte, error) { return be.CodeAt(ctx, c, n) })
 }
 
 func (b *Backend) EstimateGas(ctx context.Context, m ethereum.CallMsg) (uint64, error) {
-	return call(b, func(be transaction.Backend) (uint64, error) { return be.EstimateGas(ctx, m) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (uint64, error) { return be.EstimateGas(ctx, m) })
 }
 
 func (b *Backend) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
-	return call(b, func(be transaction.Backend) ([]types.Log, error) { return be.FilterLogs(ctx, q) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) ([]types.Log, error) { return be.FilterLogs(ctx, q) })
 }
 
 func (b *Backend) HeaderByNumber(ctx context.Context, n *big.Int) (*types.Header, error) {
-	return call(b, func(be transaction.Backend) (*types.Header, error) { return be.HeaderByNumber(ctx, n) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (*types.Header, error) {
+		return be.HeaderByNumber(ctx, n)
+	})
 }
 
 func (b *Backend) NonceAt(ctx context.Context, a common.Address, n *big.Int) (uint64, error) {
-	return call(b, func(be transaction.Backend) (uint64, error) { return be.NonceAt(ctx, a, n) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (uint64, error) { return be.NonceAt(ctx, a, n) })
 }
 
 func (b *Backend) PendingNonceAt(ctx context.Context, a common.Address) (uint64, error) {
-	return call(b, func(be transaction.Backend) (uint64, error) { return be.PendingNonceAt(ctx, a) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (uint64, error) { return be.PendingNonceAt(ctx, a) })
 }
 
 func (b *Backend) SuggestGasTipCap(ctx context.Context) (*big.Int, error) {
-	return call(b, func(be transaction.Backend) (*big.Int, error) { return be.SuggestGasTipCap(ctx) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (*big.Int, error) { return be.SuggestGasTipCap(ctx) })
 }
 
 func (b *Backend) TransactionByHash(ctx context.Context, h common.Hash) (*types.Transaction, bool, error) {
@@ -247,7 +366,7 @@ func (b *Backend) TransactionByHash(ctx context.Context, h common.Hash) (*types.
 		tx      *types.Transaction
 		pending bool
 	}
-	r, err := call(b, func(be transaction.Backend) (res, error) {
+	r, err := call(ctx, b, func(ctx context.Context, be transaction.Backend) (res, error) {
 		tx, pending, err := be.TransactionByHash(ctx, h)
 		return res{tx, pending}, err
 	})
@@ -255,42 +374,30 @@ func (b *Backend) TransactionByHash(ctx context.Context, h common.Hash) (*types.
 }
 
 func (b *Backend) TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error) {
-	return call(b, func(be transaction.Backend) (*types.Receipt, error) { return be.TransactionReceipt(ctx, h) })
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (*types.Receipt, error) {
+		return be.TransactionReceipt(ctx, h)
+	})
 }
 
 func (b *Backend) SuggestedFeeAndTip(ctx context.Context, gasPrice *big.Int, boost int) (*big.Int, *big.Int, error) {
 	type res struct{ fee, tip *big.Int }
-	r, err := call(b, func(be transaction.Backend) (res, error) {
+	r, err := call(ctx, b, func(ctx context.Context, be transaction.Backend) (res, error) {
 		f, t, err := be.SuggestedFeeAndTip(ctx, gasPrice, boost)
 		return res{f, t}, err
 	})
 	return r.fee, r.tip, err
 }
 
-// SendTransaction deliberately does NOT fail over.
-//
-// If the endpoint accepted the transaction and the response was lost, resending
-// elsewhere risks a duplicate; and two endpoints can hold different mempools, so
-// the nonce this was built against may not be the nonce the next one expects.
-// bee already persists pending transactions through transaction.Service and
-// watches them to confirmation, so the retry belongs there, with the state to do
-// it safely. Reads fail over; writes do not.
-func (b *Backend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
-	_, ep, live := b.current()
-	if err := live.SendTransaction(ctx, tx); err != nil {
-		if isTransportFailure(err) {
-			b.logger.Warning("send transaction failed at the transport level; not retrying "+
-				"elsewhere, because a lost response may mean it was accepted",
-				"endpoint", ep.name, "tx", tx.Hash())
-		}
-		return err
-	}
-	return nil
-}
-
 // Close closes every connected endpoint, not only the active one. Endpoints
 // that were never reachable have nothing to close.
+//
+// Copies of a persistent send still under way are ended first, and Close
+// waits for them, so none uses a connection after it is closed.
 func (b *Backend) Close() {
+	b.copiesMu.Lock()
+	b.closeCopies()
+	b.copiesMu.Unlock()
+	b.copies.Wait()
 	for _, ep := range b.endpoints {
 		if c := ep.live.Load(); c != nil {
 			c.Close()

@@ -20,12 +20,14 @@ import (
 	contractMock "github.com/ethersphere/bee/v2/pkg/postage/postagecontract/mock"
 	erc20mock "github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20/mock"
 	statestore "github.com/ethersphere/bee/v2/pkg/statestore/mock"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storageincentives"
 	"github.com/ethersphere/bee/v2/pkg/storageincentives/redistribution"
 	"github.com/ethersphere/bee/v2/pkg/storageincentives/staking/mock"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	resMock "github.com/ethersphere/bee/v2/pkg/storer/mock"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
 	transactionmock "github.com/ethersphere/bee/v2/pkg/transaction/mock"
 	"github.com/ethersphere/bee/v2/pkg/util/testutil"
 )
@@ -160,6 +162,305 @@ func TestAgent(t *testing.T) {
 	}
 }
 
+func TestAgentEnabledDefault(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		backend := &mockchainBackend{
+			incrementBy: 1,
+			block:       9,
+			limit:       18,
+			balance:     big.NewInt(4_000_000_000),
+		}
+		contract := &mockContract{t: t, expectedRadius: 8}
+		service, err := createService(t, swarm.RandAddress(t), backend, contract, 9, 3, 8, 0, storer.ReserveProofModeClassic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testutil.CleanupCloser(t, service)
+
+		if !service.IsEnabled() {
+			t.Fatal("expected redistribution to be enabled by default")
+		}
+
+		service.SetEnabled(false)
+		if service.IsEnabled() {
+			t.Fatal("expected redistribution to be disabled")
+		}
+
+		service.SetEnabled(true)
+		if !service.IsEnabled() {
+			t.Fatal("expected redistribution to be enabled")
+		}
+	})
+}
+
+func TestAgentParticipationToggle(t *testing.T) {
+	t.Parallel()
+
+	const (
+		blocksPerRound = uint64(9)
+		blocksPerPhase = uint64(3)
+		limit          = uint64(108)
+	)
+	bigBalance := big.NewInt(4_000_000_000)
+
+	// wasp: a disabled node does not sample, unlike Bee v2.8.3, where it
+	// samples and only skips the commit.
+	t.Run("disabled before sample does not sample or commit", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wait := make(chan struct{}, 1)
+			backend := &mockchainBackend{
+				limit: limit,
+				limitCallback: func() {
+					wait <- struct{}{}
+				},
+				incrementBy: 1,
+				block:       blocksPerRound,
+				balance:     bigBalance,
+			}
+			contract := &mockContract{t: t, expectedRadius: 8}
+			service, err := createService(t, swarm.RandAddress(t), backend, contract, blocksPerRound, blocksPerPhase, 8, 0, storer.ReserveProofModeClassic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.CleanupCloser(t, service)
+
+			service.SetEnabled(false)
+
+			<-wait
+			synctest.Wait()
+
+			if got := contract.playingCount(); got != 0 {
+				t.Fatalf("expected no sampling while disabled, isPlaying called %d times", got)
+			}
+			if got := contract.countCalls(commitCall); got != 0 {
+				t.Fatalf("expected no commit calls, got %d", got)
+			}
+			if got := contract.countCalls(revealCall); got != 0 {
+				t.Fatalf("expected no reveal calls, got %d", got)
+			}
+		})
+	})
+
+	t.Run("disable after sample skips commit", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wait := make(chan struct{}, 1)
+			started := make(chan struct{})
+			unblock := make(chan struct{})
+			var once sync.Once
+			backend := &mockchainBackend{
+				limit: limit,
+				limitCallback: func() {
+					wait <- struct{}{}
+				},
+				incrementBy: 1,
+				block:       blocksPerRound,
+				balance:     bigBalance,
+			}
+			contract := &mockContract{
+				t:              t,
+				expectedRadius: 8,
+				beforeIsPlaying: func() {
+					once.Do(func() { close(started) })
+					<-unblock
+				},
+			}
+			service, err := createService(t, swarm.RandAddress(t), backend, contract, blocksPerRound, blocksPerPhase, 8, 0, storer.ReserveProofModeClassic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.CleanupCloser(t, service)
+
+			<-started
+			service.SetEnabled(false)
+			close(unblock)
+
+			<-wait
+			synctest.Wait()
+
+			if got := contract.playingCount(); got == 0 {
+				t.Fatal("expected isPlaying to run before disable")
+			}
+			if got := contract.countCalls(commitCall); got != 0 {
+				t.Fatalf("expected no commit calls, got %d", got)
+			}
+		})
+	})
+
+	t.Run("disable after commit still reveals", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wait := make(chan struct{}, 1)
+			committed := make(chan struct{})
+			var once sync.Once
+			backend := &mockchainBackend{
+				limit: limit,
+				limitCallback: func() {
+					wait <- struct{}{}
+				},
+				incrementBy: 1,
+				block:       blocksPerRound,
+				balance:     bigBalance,
+			}
+			// The node wins, so the claim phase must claim although the
+			// node was switched off after its commit.
+			contract := &mockContract{
+				t:              t,
+				expectedRadius: 8,
+				isWinner:       true,
+				salt:           testutil.RandBytes(t, swarm.HashSize),
+				beforeCommit: func() {
+					once.Do(func() { close(committed) })
+				},
+			}
+			service, err := createService(t, swarm.RandAddress(t), backend, contract, blocksPerRound, blocksPerPhase, 8, 0, storer.ReserveProofModeClassic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.CleanupCloser(t, service)
+
+			<-committed
+			service.SetEnabled(false)
+
+			<-wait
+			synctest.Wait()
+
+			if got := contract.countCalls(commitCall); got != 1 {
+				t.Fatalf("expected exactly one commit, got %d", got)
+			}
+			if got := contract.countCalls(revealCall); got != 1 {
+				t.Fatalf("expected reveal after commit, got %d", got)
+			}
+			if got := contract.countCalls(isWinnerCall); got != 1 {
+				t.Fatalf("expected claim-phase winner check, got %d", got)
+			}
+			if got := contract.countCalls(claimCall); got != 1 {
+				t.Fatalf("expected the won round to be claimed while disabled, got %d claims", got)
+			}
+		})
+	})
+
+	t.Run("disable during commit still reveals", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wait := make(chan struct{}, 1)
+			started := make(chan struct{})
+			unblock := make(chan struct{})
+			var once sync.Once
+			backend := &mockchainBackend{
+				limit: limit,
+				limitCallback: func() {
+					wait <- struct{}{}
+				},
+				incrementBy: 1,
+				block:       blocksPerRound,
+				balance:     bigBalance,
+			}
+			contract := &mockContract{
+				t:              t,
+				expectedRadius: 8,
+				beforeCommit: func() {
+					once.Do(func() { close(started) })
+					<-unblock
+				},
+			}
+			service, err := createService(t, swarm.RandAddress(t), backend, contract, blocksPerRound, blocksPerPhase, 8, 0, storer.ReserveProofModeClassic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.CleanupCloser(t, service)
+
+			<-started
+			service.SetEnabled(false)
+			close(unblock)
+
+			<-wait
+			synctest.Wait()
+
+			if got := contract.countCalls(commitCall); got != 1 {
+				t.Fatalf("expected in-flight commit to finish, got %d", got)
+			}
+			if got := contract.countCalls(revealCall); got != 1 {
+				t.Fatalf("expected reveal after in-flight commit, got %d", got)
+			}
+		})
+	})
+
+	t.Run("re-enable in same commit phase does not retry", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			wait := make(chan struct{}, 1)
+			started := make(chan struct{})
+			unblock := make(chan struct{})
+			var once sync.Once
+			backend := &mockchainBackend{
+				limit: limit,
+				limitCallback: func() {
+					wait <- struct{}{}
+				},
+				incrementBy: 1,
+				block:       blocksPerRound,
+				balance:     bigBalance,
+			}
+			contract := &mockContract{
+				t:              t,
+				expectedRadius: 8,
+				beforeIsPlaying: func() {
+					once.Do(func() { close(started) })
+					<-unblock
+				},
+			}
+			service, err := createService(t, swarm.RandAddress(t), backend, contract, blocksPerRound, blocksPerPhase, 8, 0, storer.ReserveProofModeClassic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.CleanupCloser(t, service)
+
+			<-started
+			service.SetEnabled(false)
+			close(unblock)
+
+			waitUntilStatus(t, service, func(status *storageincentives.Status) bool {
+				return status.Phase.String() == "commit" && status.Round >= 2
+			})
+			synctest.Wait()
+
+			if got := contract.countCalls(commitCall); got != 0 {
+				t.Fatalf("expected skipped commit, got %d", got)
+			}
+
+			service.SetEnabled(true)
+			time.Sleep(200 * time.Millisecond)
+			synctest.Wait()
+
+			if got := contract.countCalls(commitCall); got != 0 {
+				t.Fatalf("re-enable in the same commit phase should not commit, got %d", got)
+			}
+
+			<-wait
+			synctest.Wait()
+
+			if got := contract.countCalls(commitCall); got == 0 {
+				t.Fatal("expected commit after the next sample cycle")
+			}
+		})
+	})
+}
+
+func waitUntilStatus(t *testing.T, agent *storageincentives.Agent, pred func(*storageincentives.Status) bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		status, err := agent.Status()
+		if err == nil && pred(status) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for redistribution status")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func createService(
 	t *testing.T,
 	addr swarm.Address,
@@ -207,8 +508,13 @@ func createServiceWithBlockTime(
 	}, reserveOpts...)
 	reserve := resMock.NewReserve(reserveOpts...)
 
+	revealer, err := newRevealer(statestore.NewStateStore(), contract, transactionmock.New(), revealBackend{backend}, blockTime, blocksPerRound, blocksPerPhase)
+	if err != nil {
+		return nil, err
+	}
+
 	return storageincentives.New(
-		addr, common.Address{},
+		addr,
 		backend,
 		contract,
 		postageContract,
@@ -218,14 +524,31 @@ func createServiceWithBlockTime(
 		blockTime,
 		blocksPerRound,
 		blocksPerPhase,
-		statestore.NewStateStore(),
+		revealer,
 		&postage.NoOpBatchStore{},
-		erc20mock.New(),
-		transactionmock.New(),
 		&mockHealth{},
 		log.Noop,
 		reserveProofMode,
 	)
+}
+
+// newRevealer builds the shared state and Revealer an agent runs on.
+func newRevealer(store storage.StateStorer, contract redistribution.Contract, txService transaction.Service, backend storageincentives.RevealBackend, blockTime func() time.Duration, blocksPerRound, blocksPerPhase uint64) (*storageincentives.Revealer, error) {
+	state, err := storageincentives.NewRedistributionState(log.Noop, common.Address{}, store, erc20mock.New(), txService)
+	if err != nil {
+		return nil, err
+	}
+	return storageincentives.NewRevealer(state, contract, txService, backend, blockTime, blocksPerRound, blocksPerPhase, log.Noop), nil
+}
+
+// revealBackend gives an agent test's chain backend the nonce read the
+// Revealer needs; no test here reaches the missing-commit check.
+type revealBackend struct {
+	storageincentives.ChainBackend
+}
+
+func (revealBackend) NonceAt(context.Context, common.Address, *big.Int) (uint64, error) {
+	return 0, nil
 }
 
 type mockchainBackend struct {
@@ -261,6 +584,10 @@ func (m *mockchainBackend) HeaderByNumber(context.Context, *big.Int) (*types.Hea
 	}, nil
 }
 
+func (m *mockchainBackend) NonceAt(context.Context, common.Address, *big.Int) (uint64, error) {
+	return 0, nil
+}
+
 func (m *mockchainBackend) BalanceAt(ctx context.Context, address common.Address, block *big.Int) (*big.Int, error) {
 	return m.balance, nil
 }
@@ -293,10 +620,18 @@ const (
 )
 
 type mockContract struct {
-	callsList      []contractCall
-	mtx            sync.Mutex
-	expectedRadius uint8
-	t              *testing.T
+	callsList       []contractCall
+	mtx             sync.Mutex
+	expectedRadius  uint8
+	t               *testing.T
+	isPlayingCount  int
+	beforeIsPlaying func()
+	beforeCommit    func()
+	// isWinner is what IsWinner answers.
+	isWinner bool
+	// salt is what ReserveSalt answers; a claim needs one to build its
+	// inclusion proofs.
+	salt []byte
 	// currentRound answers CurrentRound. When nil the call fails, and the
 	// agent commits on its own round, as it did before the round check.
 	currentRound func(ctx context.Context) (uint64, error)
@@ -321,14 +656,36 @@ func (m *mockContract) getCalls() []contractCall {
 	return calls
 }
 
+func (m *mockContract) countCalls(call contractCall) int {
+	n := 0
+	for _, c := range m.getCalls() {
+		if c == call {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *mockContract) playingCount() int {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+	return m.isPlayingCount
+}
+
 func (m *mockContract) ReserveSalt(context.Context) ([]byte, error) {
-	return nil, nil
+	return m.salt, nil
 }
 
 func (m *mockContract) IsPlaying(_ context.Context, r uint8) (bool, error) {
+	if m.beforeIsPlaying != nil {
+		m.beforeIsPlaying()
+	}
 	if r != m.expectedRadius {
 		m.t.Fatalf("isPlaying: expected radius %d, got %d", m.expectedRadius, r)
 	}
+	m.mtx.Lock()
+	m.isPlayingCount++
+	m.mtx.Unlock()
 	return true, nil
 }
 
@@ -336,7 +693,7 @@ func (m *mockContract) IsWinner(context.Context) (bool, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	m.callsList = append(m.callsList, isWinnerCall)
-	return false, nil
+	return m.isWinner, nil
 }
 
 func (m *mockContract) Claim(context.Context, redistribution.ChunkInclusionProofs) (common.Hash, error) {
@@ -346,14 +703,17 @@ func (m *mockContract) Claim(context.Context, redistribution.ChunkInclusionProof
 	return common.Hash{}, nil
 }
 
-func (m *mockContract) Commit(context.Context, []byte, uint64) (common.Hash, error) {
+func (m *mockContract) Commit(context.Context, []byte, uint64, transaction.BeforeBroadcastFunc) (common.Hash, error) {
+	if m.beforeCommit != nil {
+		m.beforeCommit()
+	}
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	m.callsList = append(m.callsList, commitCall)
 	return common.Hash{}, nil
 }
 
-func (m *mockContract) Reveal(_ context.Context, r uint8, _ []byte, _ []byte) (common.Hash, error) {
+func (m *mockContract) Reveal(_ context.Context, r uint8, _ []byte, _ []byte, _ transaction.BeforeBroadcastFunc) (common.Hash, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 

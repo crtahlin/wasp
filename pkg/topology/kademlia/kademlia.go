@@ -65,10 +65,33 @@ const (
 	defaultSaturationPeers             = 8
 	defaultOverSaturationPeers         = 18
 	defaultBootNodeOverSaturationPeers = 20
-	defaultShortRetry                  = 10 * time.Second
-	defaultTimeToRetry                 = 2 * defaultShortRetry
-	defaultPruneWakeup                 = 5 * time.Minute
-	defaultBroadcastBinSize            = 2
+	// The ShortRetry option no longer has any effect: a successful dial
+	// used to set the next retry to it, which this fork removed (#607).
+	// The constant still defines defaultTimeToRetry, and the option is
+	// kept so that upstream merges stay simple.
+	defaultShortRetry  = 10 * time.Second
+	defaultTimeToRetry = 2 * defaultShortRetry
+	defaultPruneWakeup = 5 * time.Minute
+	// Bee v2.8.3 raised it to 6. On the bench a fresh node on the
+	// v2.8.3-based build then sent 2.3 times the hive messages and 9.6
+	// times the peer records of one on the earlier build, above the limit
+	// of 2 times set for the sync, so wasp keeps 2. See DIFFERENCES.md.
+	defaultBroadcastBinSize = 2
+)
+
+// Backoff from peers that drop the connection right after it is made. They
+// are package variables only so that tests can set them; they are read once,
+// in New.
+var (
+	// stableConnection is how long a connection must last before its end
+	// resets the peer's failure count. A shorter one counts as short-lived.
+	stableConnection = time.Minute
+	// maxShortLivedBackoff caps the wait after short-lived connections,
+	// which doubles from TimeToRetry with each one in a row.
+	maxShortLivedBackoff = 15 * time.Minute
+	// prunedEntryTTL is how long the reduced retry entry of a pruned peer
+	// with short-lived connections is kept after its wait ends.
+	prunedEntryTTL = time.Hour
 )
 
 var (
@@ -254,7 +277,7 @@ func New(
 		connectedPeers:    pslice.New(int(swarm.MaxBins), base),
 		knownPeers:        pslice.New(int(swarm.MaxBins), base),
 		manageC:           make(chan struct{}, 1),
-		waitNext:          waitnext.New(),
+		waitNext:          waitnext.New(stableConnection, maxShortLivedBackoff, prunedEntryTTL),
 		logger:            logger.WithName(loggerName).Register(),
 		bootnode:          opt.BootnodeMode,
 		collector:         imc,
@@ -464,8 +487,6 @@ func (k *Kad) connectionAttemptsHandler(ctx context.Context, wg *sync.WaitGroup,
 			return
 		}
 
-		k.waitNext.Set(peer.addr, time.Now().Add(k.opt.ShortRetry), 0)
-
 		k.connectedPeers.Add(peer.addr)
 
 		k.metrics.TotalOutboundConnections.Inc()
@@ -499,7 +520,11 @@ func (k *Kad) connectionAttemptsHandler(ctx context.Context, wg *sync.WaitGroup,
 				}
 
 				inProgressMu.Lock()
-				if !inProgress[addr] {
+				// A producer can queue a peer while another dial to it is
+				// still running; once that dial succeeds the peer is
+				// connected and must not be dialled again. Before #607 the
+				// ShortRetry wait set after a successful dial covered this.
+				if !inProgress[addr] && !k.connectedPeers.Exists(peer.addr) {
 					inProgress[addr] = true
 					inProgressMu.Unlock()
 					connect(peer)
@@ -558,6 +583,34 @@ const (
 	// shuttingDown means the node is stopping and the loop should return.
 	shuttingDown
 )
+
+// neighborhoodBroadcasts returns, for every neighbor, the other neighbors it
+// should be told about.
+func neighborhoodBroadcasts(neighbors []swarm.Address) [][]swarm.Address {
+	broadcasts := make([][]swarm.Address, len(neighbors))
+	for i := range neighbors {
+		broadcasts[i] = slices.Concat(neighbors[:i], neighbors[i+1:])
+	}
+	return broadcasts
+}
+
+// rebroadcastNeighborhood tells each neighbor about the other neighbors.
+func (k *Kad) rebroadcastNeighborhood(ctx context.Context) {
+	var neighbors []swarm.Address
+	_ = k.connectedPeers.EachBin(func(addr swarm.Address, bin uint8) (stop bool, jumpToNext bool, err error) {
+		if bin < k.neighborhoodDepth() {
+			return true, false, nil
+		}
+		neighbors = append(neighbors, addr)
+		return false, false, nil
+	})
+	broadcasts := neighborhoodBroadcasts(neighbors)
+	for i, peer := range neighbors {
+		if err := k.discovery.BroadcastPeers(ctx, peer, broadcasts[i]...); err != nil {
+			k.logger.Debug("broadcast neighborhood failure", "peer_address", peer, "error", err)
+		}
+	}
+}
 
 // manage is a forever loop that manages the connection to new peers
 // once they get added or once others leave.
@@ -633,6 +686,7 @@ func (k *Kad) manage() {
 				return
 			case <-time.After(k.opt.PruneWakeup):
 				k.opt.PruneFunc(k.neighborhoodDepth())
+				k.waitNext.Sweep(time.Now())
 			}
 		}
 	})
@@ -682,19 +736,7 @@ func (k *Kad) manage() {
 			case <-k.quit:
 				return
 			case <-time.After(15 * time.Minute):
-				var neighbors []swarm.Address
-				_ = k.connectedPeers.EachBin(func(addr swarm.Address, bin uint8) (stop bool, jumpToNext bool, err error) {
-					if bin < k.neighborhoodDepth() {
-						return true, false, nil
-					}
-					neighbors = append(neighbors, addr)
-					return false, false, nil
-				})
-				for i, peer := range neighbors {
-					if err := k.discovery.BroadcastPeers(ctx, peer, append(neighbors[:i], neighbors[i+1:]...)...); err != nil {
-						k.logger.Debug("broadcast neighborhood failure", "peer_address", peer, "error", err)
-					}
-				}
+				k.rebroadcastNeighborhood(ctx)
 			}
 		}
 	})
@@ -1029,6 +1071,8 @@ func binPruneCount(oversaturationAmount int, staticNode staticPeerFunc) pruneCou
 
 // recalcDepth calculates, assigns the new depth, and returns if depth has changed
 func (k *Kad) recalcDepth() {
+	k.metrics.DepthRecalculations.Inc()
+
 	k.depthMu.Lock()
 	defer k.depthMu.Unlock()
 
@@ -1128,13 +1172,16 @@ func (k *Kad) connect(ctx context.Context, peer swarm.Address, ma []ma.Multiaddr
 	case err != nil:
 		k.logger.Info("could not connect to peer", "peer_address", peer, "error", err)
 
-		retryTime := time.Now().Add(k.opt.TimeToRetry)
+		now := time.Now()
+		retryTime := now.Add(k.opt.TimeToRetry)
+		// A refusal by the connection breaker is not the peer's fault, so it
+		// neither increases nor resets the peer's failure count.
 		var e *p2p.ConnectionBackoffError
-		failedAttempts := 0
-		if errors.As(err, &e) {
+		breaker := errors.As(err, &e)
+		failedAttempts := k.waitNext.Attempts(peer)
+		if breaker {
 			retryTime = e.TryAfter()
 		} else {
-			failedAttempts = k.waitNext.Attempts(peer)
 			failedAttempts++
 		}
 
@@ -1146,15 +1193,17 @@ func (k *Kad) connect(ctx context.Context, peer swarm.Address, ma []ma.Multiaddr
 			maxAttempts = maxNeighborAttempts
 		}
 
-		if failedAttempts >= maxAttempts {
-			k.waitNext.Remove(peer)
+		if !breaker && failedAttempts >= maxAttempts {
+			// A peer with short-lived connections keeps a reduced entry,
+			// so its wait holds when it is announced again soon after.
+			k.waitNext.Pruned(peer, now, k.opt.TimeToRetry)
 			k.knownPeers.Remove(peer)
 			if err := k.addressBook.Remove(peer); err != nil {
 				k.logger.Debug("could not remove peer from addressbook", "peer_address", peer)
 			}
 			k.logger.Debug("peer pruned from address book", "peer_address", peer)
 		} else {
-			k.waitNext.Set(peer, retryTime, failedAttempts)
+			k.waitNext.Failed(peer, now, retryTime, failedAttempts, k.opt.TimeToRetry)
 		}
 
 		return err
@@ -1163,6 +1212,11 @@ func (k *Kad) connect(ctx context.Context, peer swarm.Address, ma []ma.Multiaddr
 		_ = k.p2p.Disconnect(i.Overlay, errOverlayMismatch.Error())
 		return errOverlayMismatch
 	}
+
+	// Recorded before the announcement: a peer that drops the connection
+	// within a second can close it while Announce still runs, and the
+	// disconnect must find the start of the connection to count it.
+	k.waitNext.Connected(peer, time.Now())
 
 	k.detector.Record()
 
@@ -1177,6 +1231,12 @@ func (k *Kad) Announce(ctx context.Context, peer swarm.Address, fullnode bool) e
 	depth := k.neighborhoodDepth()
 	isNeighbor := swarm.Proximity(peer.Bytes(), k.base.Bytes()) >= depth
 
+	if isNeighbor {
+		k.metrics.AnnounceIsNeighborTotal.WithLabelValues("true").Inc()
+	} else {
+		k.metrics.AnnounceIsNeighborTotal.WithLabelValues("false").Inc()
+	}
+
 outer:
 	for bin := range swarm.MaxBins {
 
@@ -1187,11 +1247,15 @@ outer:
 
 		if bin >= depth && isNeighbor {
 			connectedPeers = k.binPeers(bin, false) // broadcast all neighborhood peers
+			k.recordAnnounceBinSelection("full", len(connectedPeers), len(connectedPeers))
 		} else {
-			connectedPeers, err = randomSubset(k.binPeers(bin, true), k.opt.BroadcastBinSize)
+			binPeers := k.binPeers(bin, true)
+			connectedPeers, err = randomSubset(binPeers, k.opt.BroadcastBinSize)
 			if err != nil {
+				k.metrics.AnnounceErrorsTotal.WithLabelValues("random_subset").Inc()
 				return err
 			}
+			k.recordAnnounceBinSelection("subset", len(binPeers), len(connectedPeers))
 		}
 
 		for _, connectedPeer := range connectedPeers {
@@ -1236,13 +1300,24 @@ outer:
 	default:
 	}
 
+	k.metrics.AnnouncePeersSentToNewPeer.Observe(float64(len(addrs)))
+
 	err := k.discovery.BroadcastPeers(ctx, peer, addrs...)
 	if err != nil {
+		k.metrics.AnnounceErrorsTotal.WithLabelValues("broadcast_to_new").Inc()
 		k.logger.Error(err, "could not broadcast to peer", "peer_address", peer)
 		_ = k.p2p.Disconnect(peer, "failed broadcasting to peer")
 	}
 
 	return err
+}
+
+func (k *Kad) recordAnnounceBinSelection(mode string, available, selected int) {
+	if available == 0 {
+		return
+	}
+	k.metrics.AnnounceBinPeersAvailable.WithLabelValues(mode).Observe(float64(available))
+	k.metrics.AnnounceBinPeersSelected.WithLabelValues(mode).Observe(float64(selected))
 }
 
 // AnnounceTo announces a selected peer to another.
@@ -1348,7 +1423,7 @@ func (k *Kad) onConnected(ctx context.Context, addr swarm.Address) error {
 
 	k.knownPeers.Add(addr)
 	k.connectedPeers.Add(addr)
-	k.waitNext.Remove(addr)
+	k.waitNext.Connected(addr, time.Now())
 	k.recalcDepth()
 	k.notifyManageLoop()
 	k.notifyPeerSig()
@@ -1359,11 +1434,34 @@ func (k *Kad) onConnected(ctx context.Context, addr swarm.Address) error {
 
 // Disconnected is called when peer disconnects.
 func (k *Kad) Disconnected(peer p2p.Peer) {
+	// Only peers in kademlia's own peer list change its depth, its
+	// neighbours or the sync peers. Light peers are never in that list,
+	// so their disconnects return here without any further work. The
+	// check is on the list and not on peer.FullNode, because the peer
+	// registry can drop the full-node flag before it reports the
+	// disconnect, so a full peer can arrive here marked as light.
+	if !k.connectedPeers.Exists(peer.Address) {
+		// A full peer kademlia dials has the start of its connection
+		// recorded before the announcement, but joins the peer list only
+		// after it. A peer that drops the connection during the
+		// announcement is still counted as a short connection here,
+		// and nothing else is done. Light peers never have a recorded
+		// start, so no entry is created for them.
+		if _, shortLived, lasted := k.waitNext.DisconnectedIfConnected(peer.Address, time.Now(), k.opt.TimeToRetry); shortLived {
+			k.metrics.ShortLivedConnections.Inc()
+			k.logger.Debug("short-lived connection", "peer_address", peer.Address, "duration", lasted)
+		}
+		return
+	}
+
 	k.logger.Debug("disconnected peer", "peer_address", peer.Address)
 
 	k.connectedPeers.Remove(peer.Address)
 
-	k.waitNext.SetTryAfter(peer.Address, time.Now().Add(k.opt.TimeToRetry))
+	if shortLived, lasted := k.waitNext.Disconnected(peer.Address, time.Now(), k.opt.TimeToRetry); shortLived {
+		k.metrics.ShortLivedConnections.Inc()
+		k.logger.Debug("short-lived connection", "peer_address", peer.Address, "duration", lasted)
+	}
 
 	k.metrics.TotalInboundDisconnections.Inc()
 	k.collector.Record(peer.Address, im.PeerLogOut(time.Now()))

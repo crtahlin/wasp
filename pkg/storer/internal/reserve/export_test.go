@@ -4,6 +4,8 @@
 
 package reserve
 
+import "time"
+
 type (
 	RadiusItem = radiusItem
 )
@@ -12,3 +14,25 @@ var (
 	ErrMarshalInvalidAddress = errMarshalInvalidAddress
 	ErrUnmarshalInvalidSize  = errUnmarshalInvalidSize
 )
+
+// SetEvictionRound sets the round size of EvictBatchBin for a test and
+// returns a function that restores it.
+func SetEvictionRound(n int) func() {
+	old := evictionRound
+	evictionRound = n
+	return func() { evictionRound = old }
+}
+
+// SetEvictionYield sets the wait between rounds for a test and returns a
+// function that restores it.
+func SetEvictionYield(d time.Duration) func() {
+	old := evictionYield
+	evictionYield = d
+	return func() { evictionYield = old }
+}
+
+// SetShadowAlways sets whether every verified chunk type is rechecked
+// (true) or only every shadowCheckEvery-th one (false), as on a node.
+func (r *Reserve) SetShadowAlways(v bool) { r.shadowAlways = v }
+
+const ShadowCheckEvery = shadowCheckEvery

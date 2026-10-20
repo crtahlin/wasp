@@ -96,6 +96,8 @@ const (
 	SwarmActTimestampHeader           = "Swarm-Act-Timestamp"
 	SwarmActPublisherHeader           = "Swarm-Act-Publisher"
 	SwarmActHistoryAddressHeader      = "Swarm-Act-History-Address"
+	SwarmSocFieldsHeader              = "Swarm-Soc-Fields"
+	SwarmCacheWrappedChunkHeader      = "Swarm-Cache-Wrapped-Chunk"
 
 	ImmutableHeader = "Immutable"
 	GasPriceHeader  = "Gas-Price"
@@ -201,6 +203,17 @@ type Service struct {
 	wsWg sync.WaitGroup // wait for all websockets to close on exit
 	quit chan struct{}
 
+	// bgCtx is the context form of quit: it is canceled by Close and bounds
+	// node-local work that a handler starts and that has to outlive the
+	// request or connection which triggered it.
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+
+	// gsocCacheSubs holds the caching subscriptions shared by the GSOC
+	// websocket subscribers, keyed by GSOC address, see gsoc.go.
+	gsocCacheMu   sync.Mutex
+	gsocCacheSubs map[string]*gsocCacheSub
+
 	overlay           *swarm.Address
 	publicKey         ecdsa.PublicKey
 	pssPublicKey      ecdsa.PublicKey
@@ -221,6 +234,8 @@ type Service struct {
 	pinIntegrity PinIntegrity
 
 	syncStatus func() (bool, error)
+	// postageSyncHealth reports whether the batch store is stale (#583).
+	postageSyncHealth postage.SyncHealth
 
 	swap        swap.Interface
 	transaction transaction.Service
@@ -300,8 +315,11 @@ type ExtraOptions struct {
 	// LocalIngestEnabled gates POST /wasp/ingest. See issue #326.
 	LocalIngestEnabled bool
 	SyncStatus         func() (bool, error)
-	NodeStatus         *status.Service
-	PinIntegrity       PinIntegrity
+	// PostageSyncHealth reports whether the batch store is stale, for
+	// /status (#583). Nil leaves the fields out.
+	PostageSyncHealth postage.SyncHealth
+	NodeStatus        *status.Service
+	PinIntegrity      PinIntegrity
 }
 
 func New(
@@ -369,6 +387,8 @@ func (s *Service) Configure(signer crypto.Signer, tracer *tracing.Tracer, o Opti
 	s.metrics = newMetrics()
 
 	s.quit = make(chan struct{})
+	s.bgCtx, s.bgCancel = context.WithCancel(context.Background())
+	s.gsocCacheSubs = make(map[string]*gsocCacheSub)
 
 	s.storer = e.Storer
 	s.resolver = e.Resolver
@@ -405,6 +425,7 @@ func (s *Service) Configure(signer crypto.Signer, tracer *tracing.Tracer, o Opti
 	s.chainID = chainID
 	s.erc20Service = erc20
 	s.syncStatus = e.SyncStatus
+	s.postageSyncHealth = e.PostageSyncHealth
 
 	s.statusService = e.NodeStatus
 
@@ -436,6 +457,7 @@ func (s *Service) SetIsWarmingUp(v bool) {
 func (s *Service) Close() error {
 	s.logger.Info("api shutting down")
 	close(s.quit)
+	s.bgCancel()
 
 	done := make(chan struct{})
 	go func() {
@@ -643,7 +665,7 @@ func (s *Service) corsHandler(h http.Handler) http.Handler {
 		SwarmRedundancyStrategyHeader, SwarmRedundancyFallbackModeHeader, SwarmChunkRetrievalTimeoutHeader, SwarmLookAheadBufferSizeHeader,
 		SwarmFeedIndexHeader, SwarmFeedIndexNextHeader, SwarmSocSignatureHeader, SwarmOnlyRootChunk, GasPriceHeader, GasLimitHeader, ImmutableHeader,
 		SwarmActHeader, SwarmActTimestampHeader, SwarmActPublisherHeader, SwarmActHistoryAddressHeader,
-		WaspProvidersHeader,
+		WaspProvidersHeader, SwarmSocFieldsHeader, SwarmCacheWrappedChunkHeader,
 	}
 	allowedHeadersStr := strings.Join(allowedHeaders, ", ")
 
@@ -652,7 +674,7 @@ func (s *Service) corsHandler(h http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Origin", o)
 			w.Header().Set("Access-Control-Allow-Headers", allowedHeadersStr)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE")
 			w.Header().Set("Access-Control-Max-Age", "3600")
 		}
 		h.ServeHTTP(w, r)

@@ -37,15 +37,22 @@ type libp2pServiceOpts struct {
 	lightNodes         *lightnode.Container
 	notifier           p2p.PickyNotifier
 	autoTLSCertManager libp2p.AutoTLSCertManager
+	// swarmKey, when set, is the key the overlay address is derived from,
+	// so two services can share one overlay.
+	swarmKey *ecdsa.PrivateKey
 }
 
 // newService constructs a new libp2p service.
 func newService(t *testing.T, networkID uint64, o libp2pServiceOpts) (s *libp2p.Service, overlay swarm.Address) {
 	t.Helper()
 
-	swarmKey, err := crypto.GenerateSecp256k1Key()
-	if err != nil {
-		t.Fatal(err)
+	var err error
+	swarmKey := o.swarmKey
+	if swarmKey == nil {
+		swarmKey, err = crypto.GenerateSecp256k1Key()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	nonce := common.HexToHash("0x1").Bytes()
@@ -55,7 +62,11 @@ func newService(t *testing.T, networkID uint64, o libp2pServiceOpts) (s *libp2p.
 		t.Fatal(err)
 	}
 
-	addr := ":0"
+	// Bind loopback only so host.Addrs() stays small and independent of the
+	// machine's docker/bridge NICs. Handshake truncates underlays to
+	// maxUnderlaysPerPeer; listening on :0 expands to every local interface
+	// and breaks addressbook equality checks on hosts with many addresses.
+	addr := "127.0.0.1:0"
 
 	if o.Logger == nil {
 		o.Logger = log.Noop

@@ -17,28 +17,41 @@ import (
 
 // metrics groups storer related prometheus counters.
 type metrics struct {
-	MethodCalls                   *prometheus.CounterVec
-	MethodCallsDuration           *prometheus.HistogramVec
-	ReserveSize                   prometheus.Gauge
-	ReserveSizeWithinRadius       prometheus.Gauge
-	ReserveCleanup                prometheus.Counter
-	StorageRadius                 prometheus.Gauge
-	CacheSize                     prometheus.Gauge
-	EvictedChunkCount             prometheus.Counter
-	ExpiredChunkCount             prometheus.Counter
-	OverCapTriggerCount           prometheus.Counter
-	ExpiredBatchCount             prometheus.Counter
-	LevelDBStats                  *prometheus.HistogramVec
-	ExpiryTriggersCount           prometheus.Counter
-	ExpiryRunsCount               prometheus.Counter
-	ReserveMissingBatch           prometheus.Gauge
-	ReserveSampleDuration         *prometheus.HistogramVec
-	ReserveSampleRunSummary       *prometheus.GaugeVec
-	ReserveSampleLastRunTimestamp prometheus.Gauge
-	RecoveryPrunedChunkCount      prometheus.Counter
-	ReserveHasWaitDuration        prometheus.Histogram
-	ReserveScanDuration           *prometheus.HistogramVec
-	LocalIngestChunks             prometheus.Gauge
+	MethodCalls                     *prometheus.CounterVec
+	MethodCallsDuration             *prometheus.HistogramVec
+	ReserveSize                     prometheus.Gauge
+	ReserveSizeWithinRadius         prometheus.Gauge
+	ReserveCleanup                  prometheus.Counter
+	StorageRadius                   prometheus.Gauge
+	CacheSize                       prometheus.Gauge
+	EvictedChunkCount               prometheus.Counter
+	ExpiredChunkCount               prometheus.Counter
+	OverCapTriggerCount             prometheus.Counter
+	RadiusDecreaseDeferred          *prometheus.CounterVec
+	ExpiredBatchCount               prometheus.Counter
+	LevelDBStats                    *prometheus.HistogramVec
+	ExpiryTriggersCount             prometheus.Counter
+	ExpiryRunsCount                 prometheus.Counter
+	ReserveMissingBatch             prometheus.Gauge
+	ReserveSampleDuration           *prometheus.HistogramVec
+	ReserveSampleRunSummary         *prometheus.GaugeVec
+	ReserveSampleLastRunTimestamp   prometheus.Gauge
+	RecoveryPrunedChunkCount        prometheus.Counter
+	ReserveHasWaitDuration          prometheus.Histogram
+	ReserveScanDuration             *prometheus.HistogramVec
+	LocalIngestChunks               prometheus.Gauge
+	HeldChunks                      prometheus.Gauge
+	HeldPromoted                    prometheus.Counter
+	HeldDropped                     prometheus.Counter
+	HeldValidationSeconds           prometheus.Gauge
+	HeldValidationErrors            prometheus.Counter
+	ReserveEvictionWorkers          prometheus.Gauge
+	ReserveArrivalRate              prometheus.Gauge
+	EvictionPausedSeconds           prometheus.Counter
+	EvictionExpirySeconds           prometheus.Counter
+	EvictionPauseCapped             prometheus.Counter
+	EvictionRemaining               prometheus.Gauge
+	EvictionExpiredBatchesRemaining prometheus.Gauge
 }
 
 // newMetrics is a convenient constructor for creating new metrics.
@@ -112,6 +125,47 @@ func newMetrics() metrics {
 				Help: "Distinct chunks held from local ingests (issue #326). " +
 					"An upper bound on disk rather than a measurement of it: a chunk " +
 					"this node already held cost no new disk and is still counted.",
+			},
+		),
+		HeldChunks: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: "postage",
+				Name:      "held_chunks",
+				Help: "Distinct chunks held while the batch store is stale because their stamp names a batch not seen yet (#583). " +
+					"They are served, and validated once caught up. Downgrade only when this reads 0.",
+			},
+		),
+		HeldPromoted: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: "postage",
+				Name:      "held_promoted",
+				Help:      "Held chunks found valid and inside the radius after catch-up and put into the reserve (#583).",
+			},
+		),
+		HeldDropped: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: "postage",
+				Name:      "held_dropped",
+				Help:      "Held chunks dropped after catch-up: invalid stamp, outside the radius, or gone from the chunk store (#583).",
+			},
+		),
+		HeldValidationSeconds: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: "postage",
+				Name:      "held_validation_seconds",
+				Help:      "Duration of the last validation pass that emptied the held area (#583).",
+			},
+		),
+		HeldValidationErrors: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: "postage",
+				Name:      "held_validation_errors",
+				Help:      "Held chunks whose validation hit an error and was left for a later pass (#583).",
 			},
 		),
 		CacheSize: prometheus.NewGauge(
@@ -248,7 +302,80 @@ func newMetrics() metrics {
 				},
 			},
 		),
+		ReserveEvictionWorkers: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "reserve_eviction_workers",
+				Help:      "Goroutines a paced reserve eviction deletes with (wasp #623). 0 when eviction is not paced.",
+			},
+		),
+		ReserveArrivalRate: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "reserve_arrival_rate",
+				Help:      "Chunks per second added to the reserve over the last minute, as seen by a paced eviction (wasp #623). Updated only while a paced eviction runs; between evictions it keeps its last value.",
+			},
+		),
+		EvictionExpirySeconds: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "eviction_expiry_seconds_total",
+				Help:      "Active time of expired-batch eviction runs, not counting time paused for a sample; these runs do not count toward the eviction episode (wasp #663).",
+			},
+		),
+		EvictionPausedSeconds: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "eviction_paused_seconds_total",
+				Help:      "Time reserve eviction spent waiting for a reserve sample to end (wasp #649).",
+			},
+		),
+		EvictionRemaining: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "eviction_remaining",
+				Help:      "Chunks the reserve holds above its capacity, which eviction still has to remove; 0 within capacity (wasp #626).",
+			},
+		),
+		EvictionExpiredBatchesRemaining: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "eviction_expired_batches_remaining",
+				Help:      "Expired batches left in the expired-batch eviction in progress; 0 when none runs (wasp #626).",
+			},
+		),
+		EvictionPauseCapped: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: m.Namespace,
+				Subsystem: subsystem,
+				Name:      "eviction_pause_capped_total",
+				Help:      "Stretches of sampling that reached the cap on how long eviction waits; eviction then ran during the sample (wasp #649).",
+			},
+		),
+		RadiusDecreaseDeferred: radiusDecreaseDeferred(subsystem),
 	}
+}
+
+func radiusDecreaseDeferred(subsystem string) *prometheus.CounterVec {
+	c := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "radius_decrease_deferred_total",
+			Help:      "Radius decreases the reserve worker deferred because the puller had not yet synced at the current radius, by reason (wasp #696).",
+		},
+		[]string{"reason"},
+	)
+	for _, r := range []string{deferNotStarted, deferNotAtRadius, deferSettling} {
+		c.WithLabelValues(r)
+	}
+	return c
 }
 
 var _ storage.Putter = (*putterWithMetrics)(nil)

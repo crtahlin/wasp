@@ -15,6 +15,7 @@ package pebblestore
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -187,6 +188,16 @@ func (s *Store) Put(item storage.Item) error {
 	return s.db.Set(key(item), value, pebble.NoSync)
 }
 
+// PutSync implements the storage.SyncWriter interface: the write is synced
+// to disk before it returns.
+func (s *Store) PutSync(item storage.Item) error {
+	value, err := item.Marshal()
+	if err != nil {
+		return fmt.Errorf("failed serializing: %w", err)
+	}
+	return s.db.Set(key(item), value, pebble.Sync)
+}
+
 func (s *Store) Delete(item storage.Item) error {
 	// Entries written before namespaces existed have no namespace, and their
 	// key is the bare ID with no separator. Carried over from leveldbstore
@@ -211,6 +222,34 @@ func (s *Store) Count(k storage.Key) (int, error) {
 	var c int
 	for iter.First(); iter.Valid(); iter.Next() {
 		c++
+	}
+	return c, errors.Join(iter.Error(), iter.Close())
+}
+
+// countCheckEvery is how many keys a context-aware count steps over between
+// checks of its context.
+const countCheckEvery = 4096
+
+// CountContext is Count that returns the context's error once the context
+// ends, checked every countCheckEvery keys (wasp #635).
+func (s *Store) CountContext(ctx context.Context, k storage.Key) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	prefix := []byte(k.Namespace() + separator)
+	iter, err := s.db.NewIter(prefixBounds(prefix))
+	if err != nil {
+		return 0, err
+	}
+
+	var c int
+	for iter.First(); iter.Valid(); iter.Next() {
+		c++
+		if c%countCheckEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, errors.Join(err, iter.Close())
+			}
+		}
 	}
 	return c, errors.Join(iter.Error(), iter.Close())
 }

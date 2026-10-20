@@ -16,6 +16,7 @@ import (
 	chaincfg "github.com/ethersphere/bee/v2/pkg/config"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/node"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p"
 	"github.com/ethersphere/bee/v2/pkg/postage/listener"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	p2pforge "github.com/ipshipyard/p2p-forge/client"
@@ -48,6 +49,7 @@ const (
 	optionNameSamplerReadConcurrency       = "sampler-read-concurrency"
 	optionNameSamplerSortWindow            = "sampler-sort-window"
 	optionNameReserveHasConcurrency        = "reserve-has-concurrency"
+	optionNameReserveEvictionRate          = "reserve-eviction-rate"
 	optionNameKademliaSaturationPeers      = "kademlia-saturation-peers"
 	optionNameKademliaOverSaturationPeers  = "kademlia-over-saturation-peers"
 	optionNameLogSinkBuffer                = "log-sink-buffer"
@@ -80,8 +82,21 @@ const (
 	optionNameChequebookMinBalance         = "chequebook-min-balance"
 	optionNameFullNode                     = "full-node"
 	optionNameLightNodeLimit               = "light-node-limit"
+	optionNameUltraLightNodeLimit          = "ultra-light-node-limit"
+	optionNameP2PMaxConnectionsPerIP       = "p2p-max-connections-per-ip"
+	optionNameP2PConnectionRatePerIP       = "p2p-connection-rate-per-ip"
+	optionNameP2PConnectionBurstPerIP      = "p2p-connection-burst-per-ip"
+	optionNameP2PInboundConnectionRate     = "p2p-inbound-connection-rate"
+	optionNameP2PInboundConnectionBurst    = "p2p-inbound-connection-burst"
+	optionNameP2PInboundStreamLimits       = "p2p-inbound-stream-limits"
+	optionNameP2PInboundStreamsPerPeer     = "p2p-inbound-streams-per-peer"
+	optionNameP2PInboundStreamReservePull  = "p2p-inbound-stream-reserve-pullsync"
+	optionNameP2PInboundStreamReserveOther = "p2p-inbound-stream-reserve-other"
+	optionNameP2PInboundStreamsTransient   = "p2p-inbound-streams-transient"
+	optionNameP2PInboundStreamsUnnegPeer   = "p2p-inbound-streams-unnegotiated-per-peer"
 	optionNamePostageContractAddress       = "postage-stamp-address"
 	optionNamePostageContractStartBlock    = "postage-stamp-start-block"
+	optionNamePostageSyncBlockRange        = "postage-sync-block-range"
 	optionNamePriceOracleAddress           = "price-oracle-address"
 	optionNameRedistributionAddress        = "redistribution-address"
 	optionNameStakingAddress               = "staking-address"
@@ -89,6 +104,7 @@ const (
 	optionNameBlockTime                    = "block-time"
 	optionNameBlockSyncInterval            = "block-sync-interval"
 	optionNamePostageConfirmationDepth     = "postage-confirmation-depth"
+	optionNamePostageStallShutdown         = "postage-stall-shutdown"
 	optionWarmUpTime                       = "warmup-time"
 	optionNameMainNet                      = "mainnet"
 	optionNameRetrievalCaching             = "cache-retrieval"
@@ -104,6 +120,7 @@ const (
 	optionNameAllowPrivateCIDRs            = "allow-private-cidrs"
 	optionNameSleepAfter                   = "sleep-after"
 	optionNameStorageIncentivesEnable      = "storage-incentives-enable"
+	optionNameStopWaitForReveal            = "stop-wait-for-reveal"
 	optionNameStateStoreCacheCapacity      = "statestore-cache-capacity"
 	optionNameTargetNeighborhood           = "target-neighborhood"
 	optionNameNeighborhoodSuggester        = "neighborhood-suggester"
@@ -341,6 +358,32 @@ func (c *command) setHomeDir() (err error) {
 	return nil
 }
 
+// defaultReserveEvictionRate is the reserve-eviction-rate a node uses when
+// the setting is unset: 500 chunks per second per node, chosen by the
+// operator ahead of the measurement in #650 (spec:
+// docs/experiments/eviction-rate-default/spec.md). An explicit 0 still
+// means no limit.
+const defaultReserveEvictionRate = 500
+
+// reserveEvictionRate returns the configured reserve-eviction-rate: the flag
+// default when the key is unset, the set value otherwise, including 0.
+func reserveEvictionRate(config *viper.Viper) int {
+	return config.GetInt(optionNameReserveEvictionRate)
+}
+
+// inboundStreamLimits reads the inbound stream limit settings, as start
+// passes them to the node.
+func inboundStreamLimits(config *viper.Viper) libp2p.StreamLimitOptions {
+	return libp2p.StreamLimitOptions{
+		Enabled:             config.GetBool(optionNameP2PInboundStreamLimits),
+		PerPeer:             config.GetInt(optionNameP2PInboundStreamsPerPeer),
+		ReservePullSync:     config.GetInt(optionNameP2PInboundStreamReservePull),
+		ReserveOther:        config.GetInt(optionNameP2PInboundStreamReserveOther),
+		Transient:           config.GetInt(optionNameP2PInboundStreamsTransient),
+		UnnegotiatedPerPeer: config.GetInt(optionNameP2PInboundStreamsUnnegPeer),
+	}
+}
+
 func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().String(optionNameDataDir, filepath.Join(c.homeDir, ".bee"), "data directory")
 	cmd.Flags().Uint64(optionNameCacheCapacity, 1_000_000, fmt.Sprintf("cache capacity in chunks, multiply by %d to get approximate capacity in bytes", swarm.ChunkSize))
@@ -386,6 +429,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(optionNameSamplerReadConcurrency, 0, "chunk loads the reserve sampler keeps in flight; 0 uses the default, which matches the CPU count and preserves previous behaviour")
 	cmd.Flags().Int(optionNameSamplerSortWindow, 0, "chunks the reserve sampler buffers and sorts into disk order before reading; 0 reads in bin order, which is the previous behaviour")
 	cmd.Flags().Int(optionNameReserveHasConcurrency, 0, "reserve lookups pullsync may have in flight at once; 0 leaves them unbounded, which is the previous behaviour")
+	cmd.Flags().Int(optionNameReserveEvictionRate, defaultReserveEvictionRate, "most chunks per second reserve eviction deletes, raised to the rate chunks arrive at; 0 (set explicitly) means no limit, the behaviour before this default; an empty value counts as unset. Raising it finishes an eviction sooner with more CPU and disk load meanwhile, which on a host with many nodes can make them all slow to serve and miss lottery samples; lowering it keeps the node responsive but keeps evicted and expired chunks on disk longer, makes the node sit out more lottery rounds while it evicts, and makes peers fetch and reject chunks of expired batches for longer")
 	cmd.Flags().Int(optionNameKademliaSaturationPeers, 0, "connected peers per bin below which the bin is not considered saturated; 0 uses the default of 8. Raising it consumes other nodes' connection budget, not only your own")
 	cmd.Flags().Int(optionNameKademliaOverSaturationPeers, 0, "connected peers per bin above which the bin is over-saturated and further peers are pruned; 0 uses the default of 18. Raising it consumes other nodes' connection budget, not only your own")
 	cmd.Flags().Int(optionNameLogSinkBuffer, log.DefaultSinkBuffer, "log lines that may wait to be written before further lines are dropped; 0 writes synchronously, which lets a stalled log reader block the node")
@@ -409,8 +453,21 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().String(optionNameChequebookMinBalance, "110000000000000000", "minimum chequebook token balance required for verification, in token small units (default 11 BZZ)")
 	cmd.Flags().Bool(optionNameFullNode, false, "cause the node to start in full mode")
 	cmd.Flags().Int(optionNameLightNodeLimit, 100, "light node limit")
+	cmd.Flags().Int(optionNameP2PMaxConnectionsPerIP, 200, "open connections accepted from one IPv4 address or one IPv6 /56 subnet; 0 uses the default of 200. Raising it lets one address hold more of this node's connections, handshakes and light slots; lowering it can refuse users who share one address behind a carrier NAT, who must then use other nodes")
+	cmd.Flags().Float64(optionNameP2PConnectionRatePerIP, 10, "new connections per second accepted from one IPv4 address or one IPv6 /56 subnet; 0 uses the default of 10. Raising it lets one address open connections faster and spend more of this node's handshakes; lowering it slows the reconnects of peers that share one address behind a carrier NAT, who then wait or try other nodes")
+	cmd.Flags().Int(optionNameP2PConnectionBurstPerIP, 40, "new connections accepted at once from one IPv4 address or one IPv6 /56 subnet above the per-second rate; 0 uses the default of 40. Raising it lets one address open more connections at once; lowering it can refuse the reconnects of a restarting peer, or of users behind a shared carrier NAT, who then wait or try other nodes")
+	cmd.Flags().Float64(optionNameP2PInboundConnectionRate, 30, "new inbound connections per second the node accepts in total, checked after the per-IP limits and before the security handshake, in each of two buckets: full peers that completed a handshake with this node, and every other address; 0 uses the default of 30, -1 turns the limit off, other negative values are refused; off on a bootnode unless set. Raising it lets more connection setups through under a flood, which costs this node CPU and takes it from its reserve samples; lowering it makes new light clients wait or go to other nodes, can make new full peers drop this node from their address books after 4 refused dials, and can make other nodes, and this node itself, judge it unreachable")
+	cmd.Flags().Int(optionNameP2PInboundConnectionBurst, 200, "new inbound connections the node accepts at once above p2p-inbound-connection-rate, per bucket; 0 uses the default of 200, -1 turns the limit off, other negative values are refused. Raising it lets a larger flood through before the rate applies; lowering it can refuse the peers that reconnect at once after a restart, who then wait or go to other nodes")
+	cmd.Flags().Bool(optionNameP2PInboundStreamLimits, false, "apply the inbound stream limits per peer and per protocol group set by the p2p-inbound-stream* settings; off by default until they are measured on real nodes. With it on, a peer or protocol group that reaches its limit has new inbound streams refused (stream reset 0x1002), which keeps one peer or protocol from taking the node-wide stream cap; a refused neighbour cannot sync from or retrieve through this node while it is at the limit, and an upstream neighbour may retry at once in a loop that costs both nodes CPU")
+	cmd.Flags().Int(optionNameP2PInboundStreamsPerPeer, 0, "inbound streams one peer may hold at once across all protocols, when p2p-inbound-stream-limits is on; 0 uses the default of 256, -1 turns this limit off, other negative values are refused. Raising it lets one peer take more of this node's stream cap; lowering it can refuse a legitimate neighbour, which then cannot sync from or retrieve through this node, and an upstream neighbour may retry in a tight loop that costs both nodes CPU")
+	cmd.Flags().Int(optionNameP2PInboundStreamReservePull, 0, "inbound streams kept free for pull-sync, which other protocols and un-negotiated streams cannot use, when p2p-inbound-stream-limits is on; 0 uses the default of 2000, -1 turns this reserve off, other negative values are refused. Raising it leaves less of the node-wide cap for retrieval, push-sync and new connections from other peers; lowering it lets those take more of the room neighbours need to sync from this node")
+	cmd.Flags().Int(optionNameP2PInboundStreamReserveOther, 0, "inbound streams kept free for every protocol other than pull-sync, when p2p-inbound-stream-limits is on; 0 uses the default of 1000, -1 turns this reserve off, other negative values are refused. Raising it leaves less room for neighbours to sync from this node; lowering it lets pull-sync take room that retrieval, push-sync and new connections need")
+	cmd.Flags().Int(optionNameP2PInboundStreamsTransient, 0, "inbound streams the node holds at once before their protocol is negotiated, when p2p-inbound-stream-limits is on; 0 uses the default of 1024, -1 turns this limit off (refused while a reserve is on), other negative values are refused. Raising it leaves less room in the cap for negotiated streams; lowering it can refuse streams of peers that open many at once, such as a neighbour reconnecting after a restart")
+	cmd.Flags().Int(optionNameP2PInboundStreamsUnnegPeer, 0, "inbound streams one peer may hold at once before their protocol is negotiated, when p2p-inbound-stream-limits is on; 0 uses the default of 64, -1 turns this limit off, other negative values are refused. Raising it lets one peer hold more silent streams that count against the node-wide limit; lowering it can refuse a neighbour that opens its pull-sync streams at once on connect (about 52 at radius 6)")
+	cmd.Flags().Int(optionNameUltraLightNodeLimit, 0, "light-node slots that ultra-light peers (light peers without a chequebook) may take; 0 means the same as light-node-limit, and a larger value is reduced to it. Raising it lets clients that cannot pay take more of the node's free bandwidth and handshakes; lowering it refuses such clients sooner and sends them to other nodes, while paying light peers keep their slots")
 	cmd.Flags().String(optionNamePostageContractAddress, "", "postage stamp contract address")
 	cmd.Flags().Uint64(optionNamePostageContractStartBlock, 0, "postage stamp contract start block number")
+	cmd.Flags().Uint64(optionNamePostageSyncBlockRange, listener.DefaultBlockPage, "largest number of blocks one eth_getLogs request asks for while syncing postage contract events; the page halves after a failed request and grows back to this size; 0 uses the default of 5000. Raising it means fewer requests during a catch-up but larger responses that an RPC provider may refuse; lowering it means more requests and a slower catch-up")
 	cmd.Flags().String(optionNamePriceOracleAddress, "", "price oracle contract address")
 	cmd.Flags().String(optionNameRedistributionAddress, "", "redistribution contract address")
 	cmd.Flags().String(optionNameStakingAddress, "", "staking contract address")
@@ -418,6 +475,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Uint64(optionNameBlockTime, 5, "chain block time in seconds; if set, used as is; if unset, the network default is used until the node has measured the chain's block time")
 	cmd.Flags().Uint64(optionNameBlockSyncInterval, 10, "block number cache sync interval in blocks")
 	cmd.Flags().Uint64(optionNamePostageConfirmationDepth, listener.DefaultConfirmationDepth, "blocks behind the chain head that postage events must be before they are applied, from 1 to 64; raising it delays seeing stamp events and pauses postage syncing once by the difference, lowering it risks applying events from blocks that are rolled back")
+	cmd.Flags().Duration(optionNamePostageStallShutdown, 0, "stop the node once its batch store has been stale this long, counted from when it became stale (10 minutes after the last postage page applied); 0 never stops: a stale node stays up, serves content, holds chunks of batches it has not seen yet and sits out storage lottery rounds until it catches up; a duration stops it with exit status 75, which takes a node off the network and adds restart load to a host that may already be overloaded")
 	cmd.Flags().Duration(optionWarmUpTime, time.Minute*5, "maximum node warmup duration; proceeds when stable or after this time")
 	cmd.Flags().Bool(optionNameMainNet, true, "triggers connect to main net bootnodes.")
 	cmd.Flags().Bool(optionNameRetrievalCaching, true, "enable forwarded content caching")
@@ -432,6 +490,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice(optionNameStaticNodes, []string{}, "protect nodes from getting kicked out on bootnode")
 	cmd.Flags().Bool(optionNameAllowPrivateCIDRs, false, "allow to advertise private CIDRs to the public network")
 	cmd.Flags().Bool(optionNameStorageIncentivesEnable, true, "enable storage incentives feature")
+	cmd.Flags().Bool(optionNameStopWaitForReveal, true, "on a stop, wait for a pending storage-lottery reveal until it is mined or the round's reveal phase ends (up to about 200 s at 5-second blocks); a second signal ends the wait. Off, a stop right after a commit misses the reveal and the stake is frozen for twice as long as for a wrong reveal")
 	cmd.Flags().Uint64(optionNameStateStoreCacheCapacity, 100_000, "lru memory caching capacity in number of statestore entries")
 	cmd.Flags().String(optionNameTargetNeighborhood, "", "neighborhood to target in binary format (ex: 111111001) for mining the initial overlay")
 	cmd.Flags().String(optionNameNeighborhoodSuggester, "https://api.swarmscan.io/v1/network/neighborhoods/suggestion", "suggester for target neighborhood")
@@ -443,7 +502,7 @@ func (c *command) setAllFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(optionRedistributionSyncRateThreshold, 0, "pull-sync rate in chunks per second below which the node counts itself synced enough to enter the redistribution draw. Default 0 keeps the strict behaviour of requiring a fully settled sync rate. A positive value is scaled by 2^reserve-capacity-doubling; raising it lets a doubled node participate while still syncing, at the risk of committing an incomplete sample and being frozen. See the reserve-capacity-doubling operator guide.")
 	cmd.Flags().Bool(optionSkipPostageSnapshot, false, "skip postage snapshot")
 	cmd.Flags().Uint64(optionNameMinimumGasTipCap, 0, "minimum gas tip cap in wei for transactions, 0 means use suggested gas tip cap")
-	cmd.Flags().Uint64(optionNameGasLimitFallback, 500_000, "gas limit fallback when estimation fails for contract transactions")
+	cmd.Flags().Uint64(optionNameGasLimitFallback, 900_000, "gas limit fallback when estimation fails for contract transactions")
 	cmd.Flags().Bool(optionNameP2PWSSEnable, false, "Enable Secure WebSocket P2P connections")
 	cmd.Flags().String(optionP2PWSSAddr, ":1635", "p2p wss address")
 	cmd.Flags().String(optionNATWSSAddr, "", "WSS NAT exposed address")

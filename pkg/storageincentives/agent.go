@@ -12,26 +12,29 @@ import (
 	"io"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"resenje.org/singleflight"
+
 	"github.com/ethersphere/bee/v2/pkg/crypto"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/postage"
 	"github.com/ethersphere/bee/v2/pkg/postage/postagecontract"
 	"github.com/ethersphere/bee/v2/pkg/safe"
-	"github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20"
-	"github.com/ethersphere/bee/v2/pkg/storage"
 	"github.com/ethersphere/bee/v2/pkg/storageincentives/redistribution"
 	"github.com/ethersphere/bee/v2/pkg/storageincentives/staking"
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
-	"resenje.org/singleflight"
 )
 
 const loggerName = "storageincentives"
+
+// errSkipCommit: the round is not committed (stopping, or committed before).
+var errSkipCommit = errors.New("commit skipped")
 
 const (
 	DefaultBlocksPerRound = 152
@@ -42,6 +45,11 @@ const (
 
 	// average tx gas used by transactions issued from agent
 	avgTxGas = 250_000
+
+	// playCheckAttempts is how many times handleSample asks the contract
+	// whether the node plays the coming round when the answer is an error
+	// that may pass a block later (#773).
+	playCheckAttempts = 6
 )
 
 type ChainBackend interface {
@@ -59,6 +67,7 @@ type Agent struct {
 	logger                 log.Logger
 	metrics                metrics
 	backend                ChainBackend
+	blockTime              func() time.Duration
 	blocksPerRound         uint64
 	contract               redistribution.Contract
 	batchExpirer           postagecontract.PostageBatchExpirer
@@ -70,14 +79,16 @@ type Agent struct {
 	quit                   chan struct{}
 	wg                     sync.WaitGroup
 	state                  *RedistributionState
+	revealer               *Revealer
 	chainStateGetter       postage.ChainStateGetter
 	commitLock             sync.Mutex
 	health                 Health
 	sampleFlight           singleflight.Group[string, sampleResult]
+	disabled               atomic.Bool
 }
 
+// New starts the agent on the node's shared Revealer and its state.
 func New(overlay swarm.Address,
-	ethAddress common.Address,
 	backend ChainBackend,
 	contract redistribution.Contract,
 	batchExpirer postagecontract.PostageBatchExpirer,
@@ -87,10 +98,8 @@ func New(overlay swarm.Address,
 	blockTime func() time.Duration,
 	blocksPerRound,
 	blocksPerPhase uint64,
-	stateStore storage.StateStorer,
+	revealer *Revealer,
 	chainStateGetter postage.ChainStateGetter,
-	erc20Service erc20.Service,
-	tranService transaction.Service,
 	health Health,
 	logger log.Logger,
 	reserveProofMode string,
@@ -99,6 +108,7 @@ func New(overlay swarm.Address,
 		overlay:                overlay,
 		metrics:                newMetrics(),
 		backend:                backend,
+		blockTime:              blockTime,
 		logger:                 logger.WithName(loggerName).Register(),
 		contract:               contract,
 		batchExpirer:           batchExpirer,
@@ -110,14 +120,11 @@ func New(overlay swarm.Address,
 		redistributionStatuser: redistributionStatuser,
 		health:                 health,
 		chainStateGetter:       chainStateGetter,
+		revealer:               revealer,
+		state:                  revealer.State(),
 	}
-
-	state, err := NewRedistributionState(logger, ethAddress, stateStore, erc20Service, tranService)
-	if err != nil {
-		return nil, err
-	}
-
-	a.state = state
+	a.setStopCounts()
+	a.metrics.Enabled.Set(1)
 
 	a.wg.Add(1)
 	go a.start(blockTime, a.blocksPerRound, blocksPerPhase)
@@ -133,6 +140,15 @@ func New(overlay swarm.Address,
 // Next, in the claim phase, we check if we've won, and the cycle repeats. The cycle must occur in the length of one round.
 // blockTime is read each time it is needed, so a change in the chain's block
 // time is followed without a restart (#540).
+// lotteryAttemptTimeout bounds each RPC endpoint attempt of a commit, reveal or
+// claim call. Those calls are marked persistent (#783): an endpoint that
+// accepts a request and never answers is left after this long and the next
+// one is asked, going round the endpoints until the phase ends, and a sent
+// transaction is copied to every endpoint. The sample phase is not marked; its
+// context also bounds the reserve sample. 10 s matches the failover backend's
+// floor for a shared deadline.
+const lotteryAttemptTimeout = 10 * time.Second
+
 func (a *Agent) start(blockTime func() time.Duration, blocksPerRound, blocksPerPhase uint64) {
 	defer a.wg.Done()
 
@@ -146,6 +162,7 @@ func (a *Agent) start(blockTime func() time.Duration, blocksPerRound, blocksPerP
 	}
 
 	phaseEvents.On(commit, func(ctx context.Context) {
+		ctx = transaction.WithPersistentCalls(ctx, lotteryAttemptTimeout)
 		phaseEvents.Cancel(claim)
 
 		round, _ := a.state.currentRoundAndPhase()
@@ -154,12 +171,14 @@ func (a *Agent) start(blockTime func() time.Duration, blocksPerRound, blocksPerP
 	})
 
 	phaseEvents.On(reveal, func(ctx context.Context) {
+		ctx = transaction.WithPersistentCalls(ctx, lotteryAttemptTimeout)
 		phaseEvents.Cancel(commit, sample)
 		round, _ := a.state.currentRoundAndPhase()
 		logErr(reveal, round, a.handleReveal(ctx, round))
 	})
 
 	phaseEvents.On(claim, func(ctx context.Context) {
+		ctx = transaction.WithPersistentCalls(ctx, lotteryAttemptTimeout)
 		phaseEvents.Cancel(reveal)
 		phaseEvents.Publish(sample)
 
@@ -226,6 +245,7 @@ func (a *Agent) start(blockTime func() time.Duration, blocksPerRound, blocksPerP
 		a.logger.Info("entered new phase", "phase", currentPhase.String(), "round", round, "block", block)
 
 		a.state.SetCurrentEvent(currentPhase, round)
+		a.setStopCounts()
 		a.state.SetFullySynced(a.fullSyncedFunc())
 		a.state.SetHealthy(a.health.IsHealthy())
 		safe.Go(a.logger, "storageincentives-purge-stale-round-data", func() {
@@ -274,6 +294,11 @@ func (a *Agent) handleCommit(ctx context.Context, round uint64) error {
 	a.commitLock.Lock()
 	defer a.commitLock.Unlock()
 
+	if !a.IsEnabled() {
+		a.logger.Info("skipping commit because redistribution is disabled", "round", round)
+		return nil
+	}
+
 	if _, exists := a.state.CommitKey(round); exists {
 		// already committed on this round, phase is skipped
 		return nil
@@ -308,6 +333,9 @@ func (a *Agent) handleCommit(ctx context.Context, round uint64) error {
 	}
 
 	err = a.commit(ctx, sample, round)
+	if errors.Is(err, errSkipCommit) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -326,38 +354,30 @@ func roundsDiffer(contractRound, nodeRound uint64) bool {
 	return nodeRound-contractRound > 1
 }
 
+// handleReveal reveals through the shared Revealer, retrying every block
+// until the reveal is mined or ctx ends at the claim phase.
 func (a *Agent) handleReveal(ctx context.Context, round uint64) error {
-	// reveal requires the commitKey from the same round
-	commitKey, exists := a.state.CommitKey(round)
-	if !exists {
+	if _, exists := a.state.CommitKey(round); !exists {
 		// In absence of commitKey, phase is skipped
 		return nil
 	}
 
-	// reveal requires sample from previous round
-	sample, exists := a.state.SampleData(round - 1)
-	if !exists {
-		// Sample must have been saved so far
-		return fmt.Errorf("sample not found in reveal phase")
-	}
-
 	a.metrics.RevealPhase.Inc()
 
-	rsh := sample.ReserveSampleHash.Bytes()
-	txHash, err := a.contract.Reveal(ctx, sample.StorageRadius, rsh, commitKey)
-	if err != nil {
+	if !a.revealer.revealUntil(ctx, round) {
 		a.metrics.ErrReveal.Inc()
-		return err
+		if _, exists := a.state.CommitKey(round); exists {
+			return fmt.Errorf("reveal of round %d not mined", round)
+		}
 	}
-	a.state.AddFee(ctx, txHash)
-
-	a.state.SetHasRevealed(round)
 
 	return nil
 }
 
 func (a *Agent) handleClaim(ctx context.Context, round uint64) error {
-	hasRevealed := a.state.HasRevealed(round)
+	// A listed reveal mined after the reveal phase's last status read
+	// still counts, so a won claim is not skipped (#730).
+	hasRevealed := a.state.HasRevealed(round) || a.revealer.listedRevealMined(ctx, round)
 	if !hasRevealed {
 		// When there was no reveal in same round, phase is skipped
 		return nil
@@ -429,16 +449,67 @@ func (a *Agent) handleClaim(ctx context.Context, round uint64) error {
 	return nil
 }
 
+// isPlaying asks the contract whether the node plays the coming round. An
+// error that may pass a block later (redistribution.PlayCheckRetryable) is
+// asked again after one block time, up to playCheckAttempts calls, instead of
+// skipping the round on the first failure (#773). When every attempt fails,
+// or the phase ends first, the round is skipped with one warning and counted
+// as a play check error. A false answer is the contract's answer and is never
+// asked again; any other error is returned as before.
+func (a *Agent) isPlaying(ctx context.Context, depth uint8) (bool, error) {
+	for attempt := 1; ; attempt++ {
+		playing, err := a.contract.IsPlaying(ctx, depth)
+		if err == nil {
+			if attempt > 1 {
+				a.metrics.PlayCheckRecovered.Inc()
+			}
+			return playing, nil
+		}
+		if !redistribution.PlayCheckRetryable(err) {
+			return false, err
+		}
+		giveUp := attempt >= playCheckAttempts
+		if !giveUp {
+			a.metrics.PlayCheckRetries.Inc()
+			a.logger.Debug("play check failed, asking again after one block", "attempt", attempt, "error", err)
+			timer := time.NewTimer(a.blockTime())
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				giveUp = true
+			case <-timer.C:
+			}
+		}
+		if giveUp {
+			a.metrics.ErrCheckIsPlaying.Inc()
+			a.logger.Warning("play check failed after retries, skipping the round", "attempts", attempt, "error", err)
+			return false, nil
+		}
+	}
+}
+
 func (a *Agent) handleSample(ctx context.Context, round uint64) (bool, error) {
-	// minimum proximity between the anchor and the stored chunks
-	committedDepth := a.store.CommittedDepth()
+	// minimum proximity between the anchor and the stored chunks. The depth
+	// is derived from the same read as the radius increase count, so the
+	// check after the sample compares against exactly this state (#658).
+	readRadius, readIncreases := a.store.RadiusState()
+	committedDepth := readRadius + a.store.CapacityDoubling()
 
 	if a.state.IsFrozen() {
 		a.logger.Info("skipping round because node is frozen")
 		return false, nil
 	}
 
-	isPlaying, err := a.contract.IsPlaying(ctx, committedDepth)
+	// A node switched off with PATCH /redistributionstate does not enter new
+	// rounds, so it does not sample either: a sample it could never commit
+	// would only cost reads and pause eviction for nothing. A round already
+	// committed still reveals and claims.
+	if !a.IsEnabled() {
+		a.logger.Info("skipping sample because redistribution is disabled", "round", round)
+		return false, nil
+	}
+
+	isPlaying, err := a.isPlaying(ctx, committedDepth)
 	if err != nil {
 		a.metrics.ErrCheckIsPlaying.Inc()
 		return false, err
@@ -450,6 +521,16 @@ func (a *Agent) handleSample(ctx context.Context, round uint64) (bool, error) {
 	a.state.SetLastSelectedRound(round + 1)
 	a.metrics.NeighborhoodSelected.Inc()
 	a.logger.Info("neighbourhood chosen", "round", round)
+
+	// A node that has been evicting for a while sits out the round: a
+	// sample would compete with the eviction and miss its deadline, and
+	// during a network-wide event neighbours evict at different paces
+	// (#649). Read live, not cached per phase: one atomic read.
+	if d := a.store.EvictingFor(); d >= storer.EvictingMinAge {
+		a.logger.Info("skipping round because node is evicting", "round", round, "evicting_for", d.Round(time.Second))
+		a.metrics.SkippedWhileEvicting.Inc()
+		return false, nil
+	}
 
 	if !a.state.IsFullySynced() {
 		a.logger.Info("skipping round because node is not fully synced")
@@ -478,11 +559,33 @@ func (a *Agent) handleSample(ctx context.Context, round uint64) (bool, error) {
 	dur := time.Since(now)
 	a.metrics.SampleDuration.Set(dur.Seconds())
 
+	// A radius increase since the depth was read can change the sampled
+	// content (unreserve deletes in the bin the range starts at, or the
+	// range is clipped away), so the round is not played. The count, not
+	// the radius, is compared, so an increase followed by a decrease is
+	// caught. A decrease cannot reach the sampled range, so the round is
+	// played (#658).
+	if radius, increases := a.store.RadiusState(); increases != readIncreases {
+		a.logger.Info("skipping round because the storage radius increased since the round's depth was read", "round", round, "sample_depth", committedDepth, "committed_depth", radius+a.store.CapacityDoubling())
+		a.metrics.SkippedRadiusIncrease.Inc()
+		return false, nil
+	} else if radius < readRadius {
+		a.logger.Info("radius decreased since the round's depth was read; playing at the depth read", "round", round, "sample_depth", committedDepth, "committed_depth", radius+a.store.CapacityDoubling())
+		a.metrics.PlayedAfterDecrease.Inc()
+	}
+
 	a.logger.Info("produced sample", "hash", sample.ReserveSampleHash, "radius", committedDepth, "round", round)
 
 	a.state.SetSampleData(round, sample, dur)
 
 	return true, nil
+}
+
+// sampleFlightKey keys the sample singleflight by anchor, depth and kind:
+// a lottery sample and an /rchash call with the round's salt must not
+// merge, because they pause eviction differently (wasp #659).
+func sampleFlightKey(ctx context.Context, anchor []byte, depth uint8) string {
+	return fmt.Sprintf("%x_%d_%t", anchor, depth, storer.IsLotterySample(ctx))
 }
 
 type sampleResult struct {
@@ -491,9 +594,11 @@ type sampleResult struct {
 }
 
 // reserveSampleAndHash runs getPreviousRoundTime, ReserveSample, and sampleHash
-// as a singleflight keyed by anchor and depth to deduplicate concurrent calls.
+// as a singleflight keyed by anchor, depth and kind to deduplicate concurrent
+// calls. The kind keeps a lottery sample from merging with an /rchash call
+// that uses the round's salt: they pause eviction differently (wasp #659).
 func (a *Agent) reserveSampleAndHash(ctx context.Context, anchor []byte, depth uint8) (sampleResult, error) {
-	key := fmt.Sprintf("%x_%d", anchor, depth)
+	key := sampleFlightKey(ctx, anchor, depth)
 
 	res, _, err := a.sampleFlight.Do(ctx, key, func(ctx context.Context) (sampleResult, error) {
 		timeLimiter, err := a.getPreviousRoundTime(ctx)
@@ -533,7 +638,9 @@ func (a *Agent) makeSample(ctx context.Context, committedDepth uint8) (SampleDat
 		return SampleData{}, err
 	}
 
-	res, err := a.reserveSampleAndHash(ctx, salt, committedDepth)
+	// The lottery's sample pauses eviction for its whole duration; other
+	// samples, such as /rchash, share a bounded budget (wasp #659).
+	res, err := a.reserveSampleAndHash(storer.WithLotterySample(ctx), salt, committedDepth)
 	if err != nil {
 		return SampleData{}, err
 	}
@@ -582,14 +689,25 @@ func (a *Agent) commit(ctx context.Context, sample SampleData, round uint64) err
 		return err
 	}
 
-	txHash, err := a.contract.Commit(ctx, obfuscatedHash, round)
+	// The key is stored, with a synced write, before the commit is sent:
+	// a mined commit without its key can never be revealed.
+	if err := a.revealer.beginCommit(round, key); err != nil {
+		if errors.Is(err, errCommitRefused) || errors.Is(err, errAlreadyCommitted) {
+			a.logger.Info("not committing", "round", round, "reason", err)
+			return errSkipCommit
+		}
+		return err
+	}
+
+	txHash, err := a.contract.Commit(ctx, obfuscatedHash, round, func(txHash common.Hash) error {
+		return a.state.SetCommitTx(round, txHash)
+	})
+	a.revealer.endCommit(round, err)
 	if err != nil {
 		a.metrics.ErrCommit.Inc()
 		return err
 	}
 	a.state.AddFee(ctx, txHash)
-
-	a.state.SetCommitKey(round, key)
 
 	return nil
 }
@@ -624,6 +742,44 @@ func (a *Agent) wrapCommit(storageRadius uint8, sample []byte, key []byte) ([]by
 // Status returns the node status
 func (a *Agent) Status() (*Status, error) {
 	return a.state.Status()
+}
+
+// RevealPending reports whether a storage-lottery reveal is pending, and if
+// so the last block of its reveal phase: a restart after that block cannot
+// miss it.
+func (a *Agent) RevealPending() (pending bool, safeToRestartAfterBlock uint64) {
+	_, deadline, ok := a.revealer.Pending()
+	if !ok {
+		return false, 0
+	}
+	return true, deadline - 1
+}
+
+// setStopCounts sets the gauges of the persisted stop counts.
+func (a *Agent) setStopCounts() {
+	status, err := a.state.Status()
+	if err != nil {
+		return
+	}
+	a.metrics.StopWaitedForReveal.Set(float64(status.StopWaitedForReveal))
+	a.metrics.RevealMissedOnStop.Set(float64(status.RevealMissedOnStop))
+	a.metrics.RevealAfterRestart.Set(float64(status.RevealAfterRestart))
+}
+
+// SetEnabled controls whether the node may enter new redistribution rounds.
+// Disabling does not abort an in-flight commit or skip reveal/claim of a round
+// that already has a commit key.
+func (a *Agent) SetEnabled(enabled bool) {
+	a.disabled.Store(!enabled)
+	if enabled {
+		a.metrics.Enabled.Set(1)
+	} else {
+		a.metrics.Enabled.Set(0)
+	}
+}
+
+func (a *Agent) IsEnabled() bool {
+	return !a.disabled.Load()
 }
 
 type SampleWithProofs struct {
