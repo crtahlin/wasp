@@ -42,6 +42,9 @@ type metrics struct {
 	// RoundMismatch counts commits skipped because the round the node computed
 	// disagreed with the contract's (#540).
 	RoundMismatch prometheus.Counter
+	// SkippedBlockedNonce counts commits and claims not signed because a
+	// nonce of the node is blocked (#819), by phase.
+	SkippedBlockedNonce *prometheus.CounterVec
 
 	// Counts persisted in the state store across restarts (#725): a stop
 	// knows its outcome only after /metrics is gone.
@@ -78,6 +81,12 @@ func newMetrics() metrics {
 			Name:      "insufficient_funds_to_play",
 			Help:      "Count of games skipped due to insufficient balance to participate.",
 		}),
+		SkippedBlockedNonce: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "skipped_blocked_nonce_total",
+			Help:      "Commits and claims not signed because a pending transaction of the node is blocked and would hold them past their phase (wasp #819), by phase.",
+		}, []string{"phase"}),
 		SkippedWhileEvicting: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
@@ -219,5 +228,33 @@ func newMetrics() metrics {
 
 // TODO: register metric
 func (a *Agent) Metrics() []prometheus.Collector {
-	return m.PrometheusCollectorsFromFields(a.metrics)
+	collectors := m.PrometheusCollectorsFromFields(a.metrics)
+	if a.revealer != nil {
+		collectors = append(collectors, a.revealer.Metrics()...)
+	}
+	return collectors
+}
+
+// revealerMetrics are the Revealer's own collectors, registered with the
+// agent's.
+type revealerMetrics struct {
+	// RevealOwedBehindBlockedNonce is 1 while a reveal is owed and a
+	// blocked transaction of the node has a lower nonce (wasp #819).
+	RevealOwedBehindBlockedNonce prometheus.Gauge
+}
+
+func newRevealerMetrics() revealerMetrics {
+	return revealerMetrics{
+		RevealOwedBehindBlockedNonce: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: m.Namespace,
+			Subsystem: "storageincentives",
+			Name:      "reveal_owed_behind_blocked_nonce",
+			Help:      "1 while a reveal is owed and a blocked pending transaction with a lower nonce holds it back; a missed reveal freezes the stake (wasp #819).",
+		}),
+	}
+}
+
+// Metrics returns the Revealer's collectors.
+func (r *Revealer) Metrics() []prometheus.Collector {
+	return m.PrometheusCollectorsFromFields(r.metrics)
 }

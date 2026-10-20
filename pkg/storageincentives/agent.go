@@ -17,8 +17,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"resenje.org/singleflight"
-
 	"github.com/ethersphere/bee/v2/pkg/crypto"
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/postage"
@@ -29,6 +27,7 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/storer"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
+	"resenje.org/singleflight"
 )
 
 const loggerName = "storageincentives"
@@ -85,6 +84,11 @@ type Agent struct {
 	health                 Health
 	sampleFlight           singleflight.Group[string, sampleResult]
 	disabled               atomic.Bool
+
+	// blockedSkipLogged is the last round whose skip because of a blocked
+	// nonce was logged, by phase.
+	blockedSkipMu     sync.Mutex
+	blockedSkipLogged map[PhaseType]uint64
 }
 
 // New starts the agent on the node's shared Revealer and its state.
@@ -332,6 +336,10 @@ func (a *Agent) handleCommit(ctx context.Context, round uint64) error {
 		return nil
 	}
 
+	if a.skipBehindBlockedNonce(commit, round) {
+		return nil
+	}
+
 	err = a.commit(ctx, sample, round)
 	if errors.Is(err, errSkipCommit) {
 		return nil
@@ -343,6 +351,45 @@ func (a *Agent) handleCommit(ctx context.Context, round uint64) error {
 	a.state.SetLastPlayedRound(round)
 
 	return nil
+}
+
+// skipBehindBlockedNonce reports whether a commit or claim must not be
+// signed because a nonce of the node is blocked (#819). Such a transaction
+// could only be mined after the blocked nonce is freed, past its phase, and
+// would revert and still cost gas. A skipped phase is logged once per round
+// and counted. The reveal never asks: a missed reveal freezes the stake.
+func (a *Agent) skipBehindBlockedNonce(phase PhaseType, round uint64) bool {
+	txService := a.transactionService()
+	if txService == nil {
+		return false
+	}
+	nonce, reason, blocked := txService.BlockedNonce()
+	if !blocked {
+		return false
+	}
+	a.blockedSkipMu.Lock()
+	if a.blockedSkipLogged == nil {
+		a.blockedSkipLogged = make(map[PhaseType]uint64)
+	}
+	last, logged := a.blockedSkipLogged[phase]
+	first := !logged || last != round
+	a.blockedSkipLogged[phase] = round
+	a.blockedSkipMu.Unlock()
+	if first {
+		a.metrics.SkippedBlockedNonce.WithLabelValues(phase.String()).Inc()
+		a.logger.Error(nil, fmt.Sprintf("skipping round %d: nonce %d blocked (%s)", round, nonce, reason),
+			"phase", phase.String(), "round", round, "nonce", nonce, "reason", reason)
+	}
+	return true
+}
+
+// transactionService is the Revealer's transaction service, the one the
+// node signs its lottery transactions with.
+func (a *Agent) transactionService() transaction.Service {
+	if a.revealer == nil {
+		return nil
+	}
+	return a.revealer.txService
 }
 
 // roundsDiffer reports whether the contract's round and the node's differ by
@@ -399,6 +446,11 @@ func (a *Agent) handleClaim(ctx context.Context, round uint64) error {
 
 	a.state.SetLastWonRound(round)
 	a.metrics.Winner.Inc()
+
+	// before the batch expiry, which signs transactions too
+	if a.skipBehindBlockedNonce(claim, round) {
+		return nil
+	}
 
 	// In case when there are too many expired batches, Claim trx could runs out of gas.
 	// To prevent this, node should first expire batches before Claiming a reward.
