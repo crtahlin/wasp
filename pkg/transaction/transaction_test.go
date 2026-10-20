@@ -493,6 +493,7 @@ func TestTransactionSend(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		testutil.CleanupCloser(t, transactionService)
 
 		txHash, err := transactionService.Send(context.Background(), request, 0)
 		if err != nil {
@@ -560,6 +561,7 @@ func TestTransactionSend(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		testutil.CleanupCloser(t, transactionService)
 
 		txHash, err := transactionService.Send(context.Background(), request, 0)
 		if err != nil {
@@ -1140,6 +1142,9 @@ func TestTransactionWaitForReceipt(t *testing.T) {
 	}
 }
 
+// TestTransactionResend: a record stored without its signed bytes (by an
+// older build) is rebuilt from its stored fields, fee cap and tip included,
+// to its original hash and sent unchanged; no fee is suggested (#819).
 func TestTransactionResend(t *testing.T) {
 	t.Parallel()
 
@@ -1150,7 +1155,6 @@ func TestTransactionResend(t *testing.T) {
 	nonce := uint64(10)
 	data := []byte{1, 2, 3, 4}
 	gasTip := big.NewInt(100)
-	gasFee := big.NewInt(1100)
 	gasLimit := uint64(100000)
 	value := big.NewInt(0)
 	gasFeeCap := new(big.Int).Add(new(big.Int).Mul(baseFee, big.NewInt(2)), minimumTip)
@@ -1170,12 +1174,14 @@ func TestTransactionResend(t *testing.T) {
 	})
 
 	err := store.Put(transaction.StoredTransactionKey(signedTx.Hash()), transaction.StoredTransaction{
-		Nonce:    nonce,
-		To:       &recipient,
-		Data:     data,
-		GasPrice: gasFee,
-		GasLimit: gasLimit,
-		Value:    value,
+		Nonce:     nonce,
+		To:        &recipient,
+		Data:      data,
+		GasPrice:  gasFeeCap,
+		GasLimit:  gasLimit,
+		GasTipCap: gasTip,
+		GasFeeCap: gasFeeCap,
+		Value:     value,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1185,11 +1191,15 @@ func TestTransactionResend(t *testing.T) {
 		backendmock.New(
 			backendmock.WithSendTransactionFunc(func(ctx context.Context, tx *types.Transaction) error {
 				if tx != signedTx {
-					t.Fatal("not sending signed transaction")
+					t.Error("not sending signed transaction")
 				}
 				return nil
 			}),
+			backendmock.WithNonceAtFunc(func(context.Context, common.Address, *big.Int) (uint64, error) {
+				return nonce, nil
+			}),
 			backendmock.WithSuggestedFeeAndTipFunc(func(ctx context.Context, gasPrice *big.Int, boostPercent int) (*big.Int, *big.Int, error) {
+				t.Error("a resend must not ask for a suggested fee")
 				return gasFeeCap, gasTip, nil
 			}),
 		),
@@ -1198,15 +1208,19 @@ func TestTransactionResend(t *testing.T) {
 		chainID,
 		monitormock.New(),
 		0,
+		transaction.WithoutWatchdog(),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	testutil.CleanupCloser(t, transactionService)
 
-	err = transactionService.ResendTransaction(context.Background(), signedTx.Hash())
+	res, err := transactionService.ResendTransaction(context.Background(), signedTx.Hash())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(res.Answers) != 1 || res.Answers[0].Kind() != transaction.AnswerAccepted {
+		t.Fatalf("answers %+v, want one accepted", res.Answers)
 	}
 }
 

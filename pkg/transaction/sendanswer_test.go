@@ -15,12 +15,12 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/transaction"
 )
 
-type rpcAnswer struct{ msg string }
+type rpcAnswerError struct{ msg string }
 
-func (a rpcAnswer) Error() string  { return a.msg }
-func (a rpcAnswer) ErrorCode() int { return -32000 }
+func (a rpcAnswerError) Error() string  { return a.msg }
+func (a rpcAnswerError) ErrorCode() int { return -32000 }
 
-var _ rpc.Error = rpcAnswer{}
+var _ rpc.Error = rpcAnswerError{}
 
 // TestClassifySendAnswer keeps the answers each kind is matched on as
 // fixtures (spec part 2). The go-ethereum texts are the full messages of
@@ -34,30 +34,30 @@ func TestClassifySendAnswer(t *testing.T) {
 		want transaction.AnswerKind
 	}{
 		{nil, transaction.AnswerAccepted},
-		{rpcAnswer{"already known"}, transaction.AnswerAccepted},
-		{rpcAnswer{"known transaction: 7c1f"}, transaction.AnswerAccepted},
-		{rpcAnswer{"AlreadyKnown"}, transaction.AnswerAccepted},
-		{rpcAnswer{"nonce too low: address 0x0, tx: 7 state: 8"}, transaction.AnswerNonceUsed},
-		{rpcAnswer{"OldNonce"}, transaction.AnswerNonceUsed},
-		{rpcAnswer{"replacement transaction underpriced"}, transaction.AnswerHeldOther},
-		{rpcAnswer{"ReplacementNotAllowed"}, transaction.AnswerHeldOther},
-		{rpcAnswer{"transaction underpriced: tip needed 1, tip permitted 0"}, transaction.AnswerFeeTooLow},
-		{rpcAnswer{"FeeTooLow"}, transaction.AnswerFeeTooLow},
-		{rpcAnswer{"max fee per gas less than block base fee: address 0x0, maxFeePerGas: 1, baseFee: 7"}, transaction.AnswerFeeTooLow},
-		{rpcAnswer{"fee cap less than block base fee"}, transaction.AnswerFeeTooLow},
-		{rpcAnswer{"insufficient funds for gas * price + value: balance 0, tx cost 21000"}, transaction.AnswerDefinite},
-		{rpcAnswer{"intrinsic gas too low: gas 0, minimum needed 21000"}, transaction.AnswerDefinite},
-		{rpcAnswer{"gas limit reached"}, transaction.AnswerDefinite},
-		{rpcAnswer{"exceeds block gas limit"}, transaction.AnswerDefinite},
-		{rpcAnswer{"InsufficientFunds"}, transaction.AnswerDefinite},
-		{rpcAnswer{"GasLimitTooLow"}, transaction.AnswerDefinite},
-		{rpcAnswer{"txpool is full"}, transaction.AnswerOther},
+		{rpcAnswerError{"already known"}, transaction.AnswerAccepted},
+		{rpcAnswerError{"known transaction: 7c1f"}, transaction.AnswerAccepted},
+		{rpcAnswerError{"AlreadyKnown"}, transaction.AnswerAccepted},
+		{rpcAnswerError{"nonce too low: address 0x0, tx: 7 state: 8"}, transaction.AnswerNonceUsed},
+		{rpcAnswerError{"OldNonce"}, transaction.AnswerNonceUsed},
+		{rpcAnswerError{"replacement transaction underpriced"}, transaction.AnswerHeldOther},
+		{rpcAnswerError{"ReplacementNotAllowed"}, transaction.AnswerHeldOther},
+		{rpcAnswerError{"transaction underpriced: tip needed 1, tip permitted 0"}, transaction.AnswerFeeTooLow},
+		{rpcAnswerError{"FeeTooLow"}, transaction.AnswerFeeTooLow},
+		{rpcAnswerError{"max fee per gas less than block base fee: address 0x0, maxFeePerGas: 1, baseFee: 7"}, transaction.AnswerFeeTooLow},
+		{rpcAnswerError{"fee cap less than block base fee"}, transaction.AnswerFeeTooLow},
+		{rpcAnswerError{"insufficient funds for gas * price + value: balance 0, tx cost 21000"}, transaction.AnswerDefinite},
+		{rpcAnswerError{"intrinsic gas too low: gas 0, minimum needed 21000"}, transaction.AnswerDefinite},
+		{rpcAnswerError{"gas limit reached"}, transaction.AnswerDefinite},
+		{rpcAnswerError{"exceeds block gas limit"}, transaction.AnswerDefinite},
+		{rpcAnswerError{"InsufficientFunds"}, transaction.AnswerDefinite},
+		{rpcAnswerError{"GasLimitTooLow"}, transaction.AnswerDefinite},
+		{rpcAnswerError{"txpool is full"}, transaction.AnswerOther},
 		{rpc.HTTPError{StatusCode: http.StatusBadRequest, Status: "400 Bad Request"}, transaction.AnswerOther},
 		{rpc.HTTPError{StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests"}, transaction.AnswerUnreachable},
 		{rpc.HTTPError{StatusCode: http.StatusInternalServerError, Status: "500 Internal Server Error"}, transaction.AnswerUnreachable},
 		{context.DeadlineExceeded, transaction.AnswerUnreachable},
 		{errors.New("connection refused"), transaction.AnswerUnreachable},
-		{fmt.Errorf("%w: %w", transaction.ErrEndpointUnreachable, rpcAnswer{"already known"}), transaction.AnswerUnreachable},
+		{fmt.Errorf("%w: %w", transaction.ErrEndpointUnreachable, rpcAnswerError{"already known"}), transaction.AnswerUnreachable},
 	} {
 		if got := transaction.ClassifySendAnswer(tc.err); got != tc.want {
 			t.Errorf("%v: got %v, want %v", tc.err, got, tc.want)

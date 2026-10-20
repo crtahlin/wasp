@@ -1,7 +1,7 @@
 openapi: 3.0.3
 
 info:
-  version: 8.4.0
+  version: 8.5.0
   title: Wasp API
   description: "API endpoints for interacting with the Swarm network, supporting file operations, messaging, and node management. Wasp is an unofficial experimental distribution of Bee; it is wire-compatible with stock Bee but its HTTP API may diverge where a defect is fixed. Divergences are listed under each affected endpoint."
 
@@ -2353,7 +2353,10 @@ paths:
         default:
           description: Default response
     post:
-      summary: Rebroadcast a transaction
+      summary: Send a stored transaction again
+      description: >-
+        Sends the stored signed bytes of the transaction again, unchanged, to every configured
+        endpoint. The transaction is never signed again with a new fee.
       parameters:
         - in: path
           name: hash
@@ -2365,11 +2368,21 @@ paths:
         - Transaction
       responses:
         "200":
-          description: Hash of the transaction
+          description: >-
+            The transaction was mined (`state` is `mined`, with `blockNumber`), or it was sent again
+            and `answers` lists each endpoint's answer, also when every endpoint refused it.
           content:
             application/json:
               schema:
-                $ref: "SwarmCommon.yaml#/components/schemas/TransactionResponse"
+                $ref: "SwarmCommon.yaml#/components/schemas/TransactionResendResponse"
+        "400":
+          $ref: "SwarmCommon.yaml#/components/responses/400"
+        "409":
+          description: Another transaction used the nonce; nothing was sent.
+          content:
+            application/json:
+              schema:
+                $ref: "SwarmCommon.yaml#/components/schemas/TransactionNonceUsedResponse"
         "404":
           $ref: "SwarmCommon.yaml#/components/responses/404"
         "500":

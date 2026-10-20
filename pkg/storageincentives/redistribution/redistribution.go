@@ -12,7 +12,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/ethersphere/bee/v2/pkg/log"
 	"github.com/ethersphere/bee/v2/pkg/sctx"
 	"github.com/ethersphere/bee/v2/pkg/swarm"
@@ -199,6 +198,9 @@ func (c *contract) Reveal(ctx context.Context, storageDepth uint8, reserveCommit
 		MinBaseFeeMultiple:   RevealBaseFeeMultiple,
 		Value:                big.NewInt(0),
 		Description:          "reveal transaction",
+		// the revealer replaces its reveals itself (#793); the
+		// transaction watchdog sends them again but never replaces them
+		SelfReplacing: true,
 	}
 	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, failOnAmbiguous, beforeBroadcast)
 	if err != nil {

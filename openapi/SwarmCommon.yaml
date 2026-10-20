@@ -1053,6 +1053,59 @@ components:
         value:
           $ref: "#/components/schemas/BigInt"
           description: Amount of native token transferred with the transaction.
+        state:
+          type: string
+          enum: [pending, overdue, blocked, mined, cancelled_for_reveal]
+          description: >-
+            State of a pending transaction. `overdue`: signed more than 12 blocks ago and not mined;
+            `blocked`: every endpoint refused it with a final answer, or its fee raise limit is reached,
+            and it holds every later transaction until it is cancelled; `mined`: its receipt has arrived;
+            `cancelled_for_reveal`: the node cancelled it to protect a storage-lottery reveal.
+        blockedReason:
+          type: string
+          description: The endpoint answer, or the limit, that blocked the transaction.
+
+    TransactionEndpointAnswer:
+      type: object
+      properties:
+        endpoint:
+          type: string
+          description: Name of the configured endpoint.
+        result:
+          type: string
+          enum: [accepted, already known, refused]
+        error:
+          type: string
+          description: The endpoint's answer when it did not accept the transaction.
+
+    TransactionResendResponse:
+      type: object
+      properties:
+        transactionHash:
+          $ref: "#/components/schemas/TransactionHash"
+        state:
+          type: string
+          description: "`mined`, or the transaction's pending state after the send."
+        blockNumber:
+          type: integer
+          description: Block the transaction was mined in, when mined.
+        answers:
+          type: array
+          items:
+            $ref: "#/components/schemas/TransactionEndpointAnswer"
+
+    TransactionNonceUsedResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+        transactionHash:
+          $ref: "#/components/schemas/TransactionHash"
+        usedBy:
+          $ref: "#/components/schemas/TransactionHash"
+          description: Hash of the stored transaction that used the nonce; absent when the node did not store it.
 
     WalletResponse:
       type: object

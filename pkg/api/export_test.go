@@ -106,6 +106,9 @@ type (
 	TransactionInfo                   = transactionInfo
 	TransactionPendingList            = transactionPendingList
 	TransactionHashResponse           = transactionHashResponse
+	TransactionResendResponse         = transactionResendResponse
+	TransactionNonceUsedResponse      = transactionNonceUsedResponse
+	EndpointAnswer                    = endpointAnswer
 	TagResponse                       = tagResponse
 	ReserveStateResponse              = reserveStateResponse
 	ChainStateResponse                = chainStateResponse
@@ -144,7 +147,8 @@ var (
 	ErrUnknownTransaction    = errUnknownTransaction
 	ErrCantGetTransaction    = errCantGetTransaction
 	ErrCantResendTransaction = errCantResendTransaction
-	ErrAlreadyImported       = errAlreadyImported
+	ErrNonceUsedByOther      = errNonceUsedByOther
+	ErrNonceUsedByUnknown    = errNonceUsedByUnknown
 )
 
 type (

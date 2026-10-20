@@ -232,13 +232,15 @@ func TestMonitorWatchTransaction(t *testing.T) {
 			t.Fatal("timed out")
 		}
 
+		// The receipt that confirms the nonce goes to every watch on it;
+		// the transaction service decides what it means for txHash2 (#819).
 		select {
-		case <-receiptC2:
-			t.Fatal("got receipt")
-		case err := <-errC2:
-			if !errors.Is(err, transaction.ErrTransactionCancelled) {
-				t.Fatalf("got wrong error. wanted %v, got %v", transaction.ErrTransactionCancelled, err)
+		case receipt := <-receiptC2:
+			if receipt.TxHash != txHash {
+				t.Fatalf("got receipt of %s, want the nonce's confirming receipt of %s", receipt.TxHash, txHash)
 			}
+		case err := <-errC2:
+			t.Fatalf("got error %v, want the nonce's confirming receipt", err)
 		case <-time.After(testTimeout):
 			t.Fatal("timed out")
 		}

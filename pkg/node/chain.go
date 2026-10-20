@@ -181,7 +181,7 @@ func InitChain(
 
 	transactionMonitor := transaction.NewMonitor(logger, backend, overlayEthAddress, pollingInterval, cancellationDepth)
 
-	transactionService, err := transaction.NewService(logger, overlayEthAddress, backend, signer, stateStore, backendChainID, transactionMonitor, fallbackGasLimit)
+	transactionService, err := transaction.NewService(logger, overlayEthAddress, backend, signer, stateStore, backendChainID, transactionMonitor, fallbackGasLimit, transaction.WithBlockTime(pollingInterval))
 	if err != nil {
 		return nil, common.Address{}, 0, nil, nil, fmt.Errorf("transaction service: %w", err)
 	}

@@ -802,6 +802,9 @@ func NewBee(
 		}
 
 		redistributionContract = redistribution.New(swarmAddress, overlayEthAddress, logger, transactionService, redistributionContractAddress, abiutil.MustParseABI(chainCfg.RedistributionABI), contractGasLimit)
+		// a transaction to this contract is a lottery transaction, never
+		// cancelled automatically (#819)
+		transactionService.SetLotteryContract(redistributionContractAddress)
 
 		// the token service comes after the chain sync wait; the agent
 		// sets it on the state
@@ -1881,6 +1884,11 @@ func NewBee(
 		// must not be registered again elsewhere (#779).
 		if swapBackendMetrics, ok := chainBackend.(metrics.Collector); ok {
 			apiService.MustRegisterMetrics(swapBackendMetrics.Metrics()...)
+		}
+		// The transaction service's watchdog metrics (#819), registered
+		// once, here.
+		if txMetrics, ok := transactionService.(metrics.Collector); ok {
+			apiService.MustRegisterMetrics(txMetrics.Metrics()...)
 		}
 
 		if l, ok := logger.(metrics.Collector); ok {
