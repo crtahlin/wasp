@@ -1,6 +1,6 @@
 # Latency-aware peer selection for retrieval
 
-Status: proposal, 2026-11-18. Nothing here is implemented. Each work item below is meant to become one issue, then follow the usual order: issue, merged spec, code with tests, review, merge. The wire surface is not touched (rule 6): every change is in how this node chooses among peers it is already connected to, and which peers it keeps.
+Status: proposal, 2026-11-18. Nothing here is implemented. Issues: [#841](https://github.com/crtahlin/wasp/issues/841) (selection, W1) and [#842](https://github.com/crtahlin/wasp/issues/842) (pruning, W2). The usual order follows: merged spec, code with tests, review, merge. Measurement setup, metrics and success criteria are for the implementer and the spec; section W3 only records why the European benches cannot show the effect. The wire surface is not touched (rule 6): every change is in how this node chooses among peers it is already connected to, and which peers it keeps.
 
 ## Why
 
@@ -16,6 +16,10 @@ Terms used below:
 - **Latency EWMA** is the smoothed response time of a peer that kademlia's metrics collector already records (`im.PeerLatency`, `kademlia.go:1611`) and shows in the topology API as `latencyEWMA`. Today nothing reads it to make a decision.
 - A peer is **healthy** when the `salud` service decides so. Every cycle `salud` requests a status snapshot from every connected full peer and measures how long the reply takes. A peer is unhealthy when any of these holds (`pkg/salud/salud.go:221-236`): its committed depth is more than 2 below the network radius; its reply took longer than the 40th percentile of all replies (`DefaultDurPercentile = 0.4`, so the slowest 60% of peers are unhealthy by this rule alone); it reports fewer connected peers than the 80th-percentile threshold; or its batch commitment differs from the majority. A failed status request also marks the peer unhealthy.
 - A peer is **reachable** when libp2p's reachability check says it can be dialled from the public internet (`ReachabilityStatusPublic`). A peer behind NAT or a firewall is "private": it can only connect outward. It still serves and forwards chunks on the connection it opened to us.
+
+## What salud already does with latency
+
+The `salud` service already filters peers by response time, so latency is not new to the client. Every cycle (10 s after start, then doubling up to every 5 minutes) it requests a status snapshot from every connected full peer and marks the slowest 60% unhealthy by the duration rule alone, besides the depth, connection-count and batch-commitment rules listed under the terms above. Retrieval prefers healthy peers, so a remote node already sends most first attempts to the faster 40% of its peers. The final choice within that set is still by address distance, which is why Table 1's last row below is slow: the European storer and the Mumbai neighbour are both healthy, and the European one is closer by address. The spec must state how the new rule and the salud rule interact, for example whether a healthy set that is all regional turns the preference into "regional only".
 
 ## What the stock client does
 
@@ -76,17 +80,9 @@ This is the part that lets regional peers accumulate: today a Mumbai peer that h
 
 Same setting as W1, or a second one if measurement shows the two parts should be switched separately. Rule 8 says measure first; the measurement in W3 runs the four combinations.
 
-### W3. Measurement
+### W3. Measurement: left to the implementer
 
-Bench-1 and bench-2 share one European host and cannot show the effect. The measurement needs one requester with peers at two latency levels. Setup, to be decided by the operator: a wasp node on a small VPS in Mumbai, with the six stock mumbai-1 nodes as its low-latency peers (they can be named in `static-nodes` for the first run so that the connection half is held constant, and left out for the second run to test W2).
-
-Measure, for each of stock, W1 only, W1 and W2, and both off (mutation check):
-
-- share of retrieval requests sent to peers with latency EWMA under 20 ms, over one hour of random fetches, from a new counter `retrieval_requests_by_latency_bucket`;
-- first byte and throughput for the cold and warm cases of Tables 1 and 2, repeated with the same references;
-- the warm case fetched through a *different* regional node than the one that cached it, which is the case that is 2.2 s today.
-
-Success: the "different regional node" case moves from the cold figure to near the warm figure for content that any regional peer has fetched, and the cold case does not get worse by more than one intra-region round trip.
+How to measure, on what setup, and what counts as success are for the implementer and the spec (rule 8: measure first, expose second). One constraint is known now: bench-1 and bench-2 share one European host, so they cannot show the effect; the measurement needs a requester with peers at two latency levels, for example a wasp node in a region with stock full nodes of the same region among its peers. The case to look at is the one that is 2.2 s today: content fetched through a regional node different from the one that cached it. The option set to `false` must reproduce the stock figures.
 
 ### W4. Risks to check in the spec
 
