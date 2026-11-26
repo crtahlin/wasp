@@ -512,3 +512,127 @@ func TestFundsCheckUsesHistoryTip(t *testing.T) {
 		})
 	}
 }
+
+// pendingCommit makes the fake contract's commit pending on chain until
+// the step's context ends, and records its hash.
+func pendingCommit(f *revealFixture, first *common.Hash, mu *sync.Mutex) {
+	f.contract.commitResult = func(ctx context.Context, h common.Hash) error {
+		mu.Lock()
+		*first = h
+		mu.Unlock()
+		f.txs.set(h, transaction.TxPending)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
+// The end paths of a commit's loop, with the error each returns and whether
+// the commit key is kept. A cancelled newest transaction keeps the key:
+// another transaction of the round may be the one mined, and the revealer
+// decides. A revert removes it, as does a phase that ends before anything
+// was sent.
+func TestCommitLoopEnds(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		// at runs after the given number of blocks from the send
+		at      uint64
+		set     func(f *revealFixture, first common.Hash)
+		pre     bool // every send fails before its broadcast
+		want    error
+		notWant error
+		keepKey bool
+	}{
+		{
+			name: "newest cancelled", at: 1,
+			set:  func(f *revealFixture, first common.Hash) { f.txs.set(first, transaction.TxCancelled) },
+			want: transaction.ErrTransactionCancelled, notWant: transaction.ErrTransactionReverted, keepKey: true,
+		},
+		{
+			name: "older reverted, newest cancelled", at: revealReplaceAfterBlocks + 1,
+			set: func(f *revealFixture, first common.Hash) {
+				f.txs.set(first, transaction.TxReverted)
+				f.txs.mu.Lock()
+				repl := f.txs.replaced[0]
+				f.txs.mu.Unlock()
+				f.txs.set(repl, transaction.TxCancelled)
+			},
+			want: transaction.ErrTransactionReverted, keepKey: false,
+		},
+		{
+			name: "newest reverted at a later step", at: 4,
+			set:  func(f *revealFixture, first common.Hash) { f.txs.set(first, transaction.TxReverted) },
+			want: transaction.ErrTransactionReverted, keepKey: false,
+		},
+		{
+			name: "nothing sent in the phase", pre: true,
+			want: transaction.ErrNotBroadcast, keepKey: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				f := ptFixture(t, ptCommitStart)
+				var mu sync.Mutex
+				var first common.Hash
+				pendingCommit(f, &first, &mu)
+				if tc.pre {
+					f.contract.commitPre = func(ctx context.Context, _ int) error {
+						<-ctx.Done()
+						return ctx.Err()
+					}
+				} else {
+					go func() {
+						time.Sleep(time.Duration(tc.at)*testBlockTime + testBlockTime/2)
+						mu.Lock()
+						h := first
+						mu.Unlock()
+						tc.set(f, h)
+					}()
+				}
+				sample, _ := f.state().SampleData(0)
+
+				err := f.agent.commit(roundCtx(t), sample, 1)
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("commit: %v, want %v", err, tc.want)
+				}
+				if tc.notWant != nil && errors.Is(err, tc.notWant) {
+					t.Fatalf("commit: %v, must not be %v", err, tc.notWant)
+				}
+				if _, ok := f.state().CommitKey(1); ok != tc.keepKey {
+					t.Fatalf("commit key kept %v, want %v", ok, tc.keepKey)
+				}
+				if commits, _ := f.contract.counts(); tc.pre && commits != 0 {
+					t.Fatalf("%d commits sent", commits)
+				}
+			})
+		})
+	}
+}
+
+// A commit mined after the last step of the phase looked at it is still
+// found when the phase ends.
+func TestCommitMinedInLastBlock(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		f := ptFixture(t, ptCommitStart)
+		var mu sync.Mutex
+		var first common.Hash
+		pendingCommit(f, &first, &mu)
+		go func() {
+			// half a block after the step at the phase's last block
+			time.Sleep(time.Duration(ptRevealStart-1-ptCommitStart)*testBlockTime + testBlockTime/2)
+			mu.Lock()
+			h := first
+			mu.Unlock()
+			f.txs.set(h, transaction.TxMined)
+		}()
+		sample, _ := f.state().SampleData(0)
+
+		if err := f.agent.commit(roundCtx(t), sample, 1); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	})
+}

@@ -210,6 +210,9 @@ func TestTipFromHistoryAtReplacement(t *testing.T) {
 	}
 	atLeastPercent(t, "replacement tip", tx.GasTipCap(), stored.GasTipCap, 10)
 	atLeastPercent(t, "replacement fee cap", tx.GasFeeCap(), stored.GasFeeCap, 10)
+	if want := new(big.Int).Add(big.NewInt(2*historyTestBaseFee), tx.GasTipCap()); tx.GasFeeCap().Cmp(want) < 0 {
+		t.Fatalf("replacement fee cap %s, want at least twice the base fee plus the tip, %s", tx.GasFeeCap(), want)
+	}
 	if r, err := svc.StoredTransaction(replacement); err != nil || !r.TipFromHistory {
 		t.Fatalf("replacement does not keep TipFromHistory: %v", err)
 	}
