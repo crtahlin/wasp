@@ -128,6 +128,7 @@ type fakeTxs struct {
 	nonces      map[common.Hash]uint64 // stored nonce per hash; default 0
 	storedErr   error                  // StoredTransaction fails
 	lookupErr   error
+	lookupErrs  map[common.Hash]error // lookup errors of single hashes
 	rebroadcast []common.Hash
 	replaced    []common.Hash
 	next        byte
@@ -160,6 +161,9 @@ func (f *fakeTxs) service() transaction.Service {
 			defer f.mu.Unlock()
 			if f.lookupErr != nil {
 				return 0, f.lookupErr
+			}
+			if err := f.lookupErrs[h]; err != nil {
+				return 0, err
 			}
 			st, ok := f.states[h]
 			if !ok {

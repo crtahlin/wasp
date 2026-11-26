@@ -190,8 +190,7 @@ func (p *phaseTx) step(ctx context.Context, block uint64) (bool, error) {
 	}
 
 	// any sent transaction mined: done, whichever it is
-	mined, reverted := p.scan(ctx)
-	if mined != (common.Hash{}) {
+	if mined, _, _ := p.scan(ctx); mined != (common.Hash{}) {
 		p.finish(mined, nil)
 		return true, nil
 	}
@@ -231,7 +230,18 @@ func (p *phaseTx) step(ctx context.Context, block uint64) (bool, error) {
 		if !p.synced(ctx) {
 			return false, nil
 		}
-		// every send shares one nonce: a reverted one of them used it
+		// every send shares one nonce: look at the others again, as one
+		// can have been mined since the scan above, and decide only when
+		// every lookup answered
+		mined, reverted, failed := p.scan(ctx)
+		switch {
+		case mined != (common.Hash{}):
+			p.finish(mined, nil)
+			return true, nil
+		case failed:
+			return false, nil
+		}
+		// a reverted one of them used the nonce
 		if reverted != (common.Hash{}) {
 			p.finish(reverted, fmt.Errorf("%w: %s", transaction.ErrTransactionReverted, reverted))
 			return true, nil
@@ -243,21 +253,23 @@ func (p *phaseTx) step(ctx context.Context, block uint64) (bool, error) {
 }
 
 // scan looks every sent transaction up and returns one that is mined and
-// one that reverted, each zero when there is none.
-func (p *phaseTx) scan(ctx context.Context) (mined, reverted common.Hash) {
+// one that reverted, each zero when there is none, and whether a lookup
+// failed.
+func (p *phaseTx) scan(ctx context.Context) (mined, reverted common.Hash, failed bool) {
 	for _, txHash := range p.txs {
 		st, err := p.txService.TransactionStatus(ctx, txHash)
 		if err != nil {
+			failed = true
 			continue
 		}
 		switch st {
 		case transaction.TxMined:
-			return txHash, reverted
+			return txHash, reverted, failed
 		case transaction.TxReverted:
 			reverted = txHash
 		}
 	}
-	return common.Hash{}, reverted
+	return common.Hash{}, reverted, failed
 }
 
 func (p *phaseTx) synced(ctx context.Context) bool {
@@ -323,7 +335,7 @@ func (r *Revealer) sendInPhase(ctx context.Context, name string, round, end uint
 	}.run(ctx)
 	if !tx.done && len(tx.txs) > 0 && ctx.Err() == nil {
 		// mined in the phase's last blocks, after the last step looked
-		if mined, _ := tx.scan(ctx); mined != (common.Hash{}) {
+		if mined, _, _ := tx.scan(ctx); mined != (common.Hash{}) {
 			tx.finish(mined, nil)
 		}
 	}

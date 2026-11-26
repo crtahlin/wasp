@@ -676,3 +676,39 @@ func TestLostCommitRebroadcast(t *testing.T) {
 		}
 	})
 }
+
+// The newest commit reads as cancelled while the lookup of the older one
+// fails: the loop does not end as cancelled but looks again, and finds the
+// older commit mined once its lookup answers.
+func TestCancelledCommitRechecksOlder(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		f := ptFixture(t, ptCommitStart)
+		var mu sync.Mutex
+		var first common.Hash
+		pendingCommit(f, &first, &mu)
+		f.txs.onReplace = func(n common.Hash) {
+			mu.Lock()
+			h := first
+			mu.Unlock()
+			go func() {
+				time.Sleep(testBlockTime / 2)
+				f.txs.mu.Lock()
+				f.txs.lookupErrs = map[common.Hash]error{h: errors.New("lookup failed")}
+				f.txs.states[n] = transaction.TxCancelled
+				f.txs.states[h] = transaction.TxMined
+				f.txs.mu.Unlock()
+				time.Sleep(3 * testBlockTime) // the lookup answers again
+				f.txs.mu.Lock()
+				f.txs.lookupErrs = nil
+				f.txs.mu.Unlock()
+			}()
+		}
+		sample, _ := f.state().SampleData(0)
+
+		if err := f.agent.commit(roundCtx(t), sample, 1); err != nil {
+			t.Fatalf("commit: %v, want the older commit found mined", err)
+		}
+	})
+}
