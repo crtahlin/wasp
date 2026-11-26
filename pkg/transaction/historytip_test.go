@@ -210,11 +210,32 @@ func TestTipFromHistoryAtReplacement(t *testing.T) {
 	}
 	atLeastPercent(t, "replacement tip", tx.GasTipCap(), stored.GasTipCap, 10)
 	atLeastPercent(t, "replacement fee cap", tx.GasFeeCap(), stored.GasFeeCap, 10)
+	if want := transaction.Bumped(stored.GasFeeCap); tx.GasFeeCap().Cmp(want) < 0 {
+		t.Fatalf("replacement fee cap %s, want at least the stored cap plus 12 %%, %s", tx.GasFeeCap(), want)
+	}
 	if want := new(big.Int).Add(big.NewInt(2*historyTestBaseFee), tx.GasTipCap()); tx.GasFeeCap().Cmp(want) < 0 {
 		t.Fatalf("replacement fee cap %s, want at least twice the base fee plus the tip, %s", tx.GasFeeCap(), want)
 	}
 	if r, err := svc.StoredTransaction(replacement); err != nil || !r.TipFromHistory {
 		t.Fatalf("replacement does not keep TipFromHistory: %v", err)
+	}
+
+	// the history falls: the next replacement still raises both fees by
+	// ReplacementBumpPercent over the stored ones
+	stored, err = svc.StoredTransaction(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.setRewards(big.NewInt(1))
+	if _, err := svc.ReplaceTransaction(context.Background(), replacement, nil); err != nil {
+		t.Fatal(err)
+	}
+	tx = c.last(t)
+	if want := transaction.Bumped(stored.GasTipCap); tx.GasTipCap().Cmp(want) < 0 {
+		t.Fatalf("second replacement tip %s, want at least the stored tip plus 12 %%, %s", tx.GasTipCap(), want)
+	}
+	if want := transaction.Bumped(stored.GasFeeCap); tx.GasFeeCap().Cmp(want) < 0 {
+		t.Fatalf("second replacement fee cap %s, want at least the stored cap plus 12 %%, %s", tx.GasFeeCap(), want)
 	}
 }
 

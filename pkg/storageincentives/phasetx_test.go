@@ -636,3 +636,43 @@ func TestCommitMinedInLastBlock(t *testing.T) {
 		}
 	})
 }
+
+// A sent commit that a synced backend does not know is sent again
+// unchanged at the next step, not replaced, while it is younger than
+// revealReplaceAfterBlocks and its fee cap is not at risk.
+func TestLostCommitRebroadcast(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		f := ptFixture(t, ptCommitStart)
+		var mu sync.Mutex
+		var first common.Hash
+		f.contract.commitResult = func(ctx context.Context, h common.Hash) error {
+			mu.Lock()
+			first = h
+			mu.Unlock()
+			<-ctx.Done() // the endpoint dropped it: the chain does not know it
+			return ctx.Err()
+		}
+		go func() {
+			time.Sleep(revealStepBlocks*testBlockTime + testBlockTime/2)
+			mu.Lock()
+			h := first
+			mu.Unlock()
+			f.txs.set(h, transaction.TxMined)
+		}()
+		sample, _ := f.state().SampleData(0)
+
+		if err := f.agent.commit(roundCtx(t), sample, 1); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		f.txs.mu.Lock()
+		defer f.txs.mu.Unlock()
+		if len(f.txs.rebroadcast) == 0 || f.txs.rebroadcast[0] != first {
+			t.Fatalf("rebroadcasts %v, want the lost commit %s", f.txs.rebroadcast, first)
+		}
+		if len(f.txs.replaced) != 0 {
+			t.Fatalf("%d replacements of a commit younger than %d blocks", len(f.txs.replaced), revealReplaceAfterBlocks)
+		}
+	})
+}
