@@ -41,6 +41,8 @@ type fakeChain struct {
 	headLag   uint64        // how many blocks the latest header lags block()
 	failBlock bool          // BlockNumber fails
 	baseFee   *big.Int
+	// baseFeeAt, if set, gives the base fee of each block instead
+	baseFeeAt func(block uint64) *big.Int
 	// nonceAt answers NonceAt for the block asked; nil means nonce 0
 	nonceAt     func(block uint64) (uint64, error)
 	nonceBlocks []uint64 // blocks NonceAt was asked for
@@ -70,10 +72,14 @@ func (c *fakeChain) HeaderByNumber(context.Context, *big.Int) (*types.Header, er
 	number := c.block()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	baseFee := c.baseFee
+	if c.baseFeeAt != nil {
+		baseFee = c.baseFeeAt(number)
+	}
 	return &types.Header{
 		Number:  new(big.Int).SetUint64(number - min(c.headLag, number)),
 		Time:    uint64(time.Now().Add(-c.lag).Unix()),
-		BaseFee: c.baseFee,
+		BaseFee: baseFee,
 	}, nil
 }
 
@@ -291,6 +297,9 @@ type revealFixture struct {
 	contract *fakeContract
 	revealer *Revealer
 	agent    *Agent
+	// blocksPerRound and blocksPerPhase, when set before restart,
+	// replace testBlocksPerRound and testBlocksPerPhase
+	blocksPerRound, blocksPerPhase uint64
 }
 
 func newRevealFixture(t *testing.T, store storage.StateStorer, chain *fakeChain, txs *fakeTxs) *revealFixture {
@@ -309,7 +318,11 @@ func (f *revealFixture) restart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.revealer = NewRevealer(state, f.contract, txService, f.chain, func() time.Duration { return testBlockTime }, testBlocksPerRound, testBlocksPerPhase, log.Noop)
+	perRound, perPhase := uint64(testBlocksPerRound), uint64(testBlocksPerPhase)
+	if f.blocksPerRound != 0 {
+		perRound, perPhase = f.blocksPerRound, f.blocksPerPhase
+	}
+	f.revealer = NewRevealer(state, f.contract, txService, f.chain, func() time.Duration { return testBlockTime }, perRound, perPhase, log.Noop)
 	f.agent = &Agent{
 		logger:   log.Noop,
 		metrics:  newMetrics(),
@@ -414,25 +427,29 @@ func TestCommitErrorsAndKey(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newRevealFixture(t, mock.NewStateStore(), newFakeChain(13), newFakeTxs())
-			const round = 1
-			f.setSample(round)
-			f.state().SetCurrentBlock(13)
-			f.contract.commitResult = func(context.Context, common.Hash) error { return tc.err }
-			sample, _ := f.state().SampleData(round - 1)
+			// a commit that may be on its way is looked at until the
+			// commit phase ends (#796): the bubble's clock runs that
+			synctest.Test(t, func(t *testing.T) {
+				f := newRevealFixture(t, mock.NewStateStore(), newFakeChain(13), newFakeTxs())
+				const round = 1
+				f.setSample(round)
+				f.state().SetCurrentBlock(13)
+				f.contract.commitResult = func(context.Context, common.Hash) error { return tc.err }
+				sample, _ := f.state().SampleData(round - 1)
 
-			_ = f.agent.commit(context.Background(), sample, round)
+				_ = f.agent.commit(context.Background(), sample, round)
 
-			_, hasKey := f.state().CommitKey(round)
-			if hasKey != tc.keepKey {
-				t.Fatalf("key kept %v, want %v", hasKey, tc.keepKey)
-			}
-			if tc.keepKey && f.state().CommitTx(round) == (common.Hash{}) {
-				t.Fatal("commit hash not kept")
-			}
-			if _, _, pending := f.revealer.Pending(); pending != tc.keepKey {
-				t.Fatalf("pending %v, want %v", pending, tc.keepKey)
-			}
+				_, hasKey := f.state().CommitKey(round)
+				if hasKey != tc.keepKey {
+					t.Fatalf("key kept %v, want %v", hasKey, tc.keepKey)
+				}
+				if tc.keepKey && f.state().CommitTx(round) == (common.Hash{}) {
+					t.Fatal("commit hash not kept")
+				}
+				if _, _, pending := f.revealer.Pending(); pending != tc.keepKey {
+					t.Fatalf("pending %v, want %v", pending, tc.keepKey)
+				}
+			})
 		})
 	}
 }
@@ -442,21 +459,23 @@ func TestCommitErrorsAndKey(t *testing.T) {
 func TestNoSecondCommit(t *testing.T) {
 	t.Parallel()
 
-	f := newRevealFixture(t, mock.NewStateStore(), newFakeChain(13), newFakeTxs())
-	const round = 1
-	f.setSample(round)
-	f.contract.commitResult = func(context.Context, common.Hash) error { return errors.New("connection reset") }
-	sample, _ := f.state().SampleData(round - 1)
-	_ = f.agent.commit(context.Background(), sample, round)
+	synctest.Test(t, func(t *testing.T) {
+		f := newRevealFixture(t, mock.NewStateStore(), newFakeChain(13), newFakeTxs())
+		const round = 1
+		f.setSample(round)
+		f.contract.commitResult = func(context.Context, common.Hash) error { return errors.New("connection reset") }
+		sample, _ := f.state().SampleData(round - 1)
+		_ = f.agent.commit(context.Background(), sample, round)
 
-	f.restart(t)
-	f.contract.commitResult = nil
-	if err := f.agent.handleCommit(context.Background(), round); err != nil {
-		t.Fatal(err)
-	}
-	if commits, _ := f.contract.counts(); commits != 1 {
-		t.Fatalf("%d commits, want 1", commits)
-	}
+		f.restart(t)
+		f.contract.commitResult = nil
+		if err := f.agent.handleCommit(context.Background(), round); err != nil {
+			t.Fatal(err)
+		}
+		if commits, _ := f.contract.counts(); commits != 1 {
+			t.Fatalf("%d commits, want 1", commits)
+		}
+	})
 }
 
 // commitAndAdvance stores a key with a mined commit for round 1 and moves

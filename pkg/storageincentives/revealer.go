@@ -338,55 +338,24 @@ func (r *Revealer) revealUntil(ctx context.Context, round uint64) bool {
 	// the reveal is mined, the claim phase started or the wait ended:
 	// nothing is owed behind a blocked nonce any more (#819)
 	defer r.clearOwed()
-	for {
-		if r.state.HasRevealed(round) {
-			return true
-		}
-		if !r.hasCommit(round) {
-			// the commit's key is gone (not broadcast, reverted, never
-			// landed) and no commit is in progress: nothing to reveal
-			return false
-		}
-
-		block, err := r.backend.BlockNumber(ctx)
-		switch {
-		case err != nil:
-			r.logger.Debug("reveal: reading block number", "error", err)
-		case block >= r.claimStart(round):
-			return r.state.HasRevealed(round)
-		case block >= r.revealStart(round):
-			// A step, receipt wait included, ends after revealStepBlocks
-			// or at the claim phase, whichever is first, so a pending
-			// reveal is looked at again, and replaced with raised fees
-			// when needed, while the reveal phase is open (#793).
-			until := min(r.claimStart(round), block+revealStepBlocks)
-			stepCtx, cancel := context.WithTimeout(ctx, time.Duration(until-block)*r.blockTime())
-			done, err := r.Reveal(stepCtx, round)
-			bounded := until < r.claimStart(round) && ctx.Err() == nil && errors.Is(stepCtx.Err(), context.DeadlineExceeded)
-			cancel()
-			switch {
-			case err != nil && bounded && errors.Is(err, context.DeadlineExceeded):
-				r.logger.Debug("reveal not mined within the step; checking it again", "round", round)
-			case err != nil:
-				r.logger.Error(err, "reveal failed, retrying at the next block", "round", round)
-			}
-			if done {
-				return r.state.HasRevealed(round)
-			}
+	phaseSteps{
+		backend:   r.backend,
+		blockTime: r.blockTime,
+		logger:    r.logger,
+		name:      "reveal",
+		round:     round,
+		start:     r.revealStart(round),
+		end:       r.claimStart(round),
+		// the commit's key is gone (not broadcast, reverted, never
+		// landed) and no commit is in progress: nothing to reveal
+		stop: func() bool { return r.state.HasRevealed(round) || !r.hasCommit(round) },
+		step: func(ctx context.Context, _ uint64) (bool, error) { return r.Reveal(ctx, round) },
+		after: func(ctx context.Context) {
 			r.guardOwedReveal(ctx, round)
 			r.warnIfLate(ctx, round)
-			if bounded {
-				// the step used its blocks waiting; look again at once
-				continue
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return r.state.HasRevealed(round)
-		case <-time.After(r.blockTime()):
-		}
-	}
+		},
+	}.run(ctx)
+	return r.state.HasRevealed(round)
 }
 
 // Reveal takes one step towards the round's reveal, at most one at a time
@@ -628,21 +597,10 @@ func (r *Revealer) commitNonceUsed(ctx context.Context, round uint64, commitTx c
 	return nonceUnused
 }
 
-// feeAtRisk reports whether the stored fee cap of the transaction is below
-// the base fee that revealFeeHeadroomBlocks full blocks can reach from the
-// latest block's: the latest base fee times (9/8)^revealFeeHeadroomBlocks,
-// rounded up. Such a reveal can be overtaken by the base fee before the
-// next step looks at it, so it is replaced now (#793).
+// feeAtRisk reports whether the stored fee cap of the reveal is below the
+// base fee that revealFeeHeadroomBlocks full blocks can reach (#793).
 func (r *Revealer) feeAtRisk(ctx context.Context, txHash common.Hash) bool {
-	stored, err := r.txService.StoredTransaction(txHash)
-	if err != nil || stored.GasFeeCap == nil {
-		return false
-	}
-	header, err := r.backend.HeaderByNumber(ctx, nil)
-	if err != nil || header.BaseFee == nil {
-		return false
-	}
-	return stored.GasFeeCap.Cmp(baseFeeAfterFullBlocks(header.BaseFee, revealFeeHeadroomBlocks)) < 0
+	return feeAtRisk(ctx, r.txService, r.backend, txHash)
 }
 
 // baseFeeAfterFullBlocks is the highest base fee n full blocks can reach

@@ -254,7 +254,7 @@ func TestRedistribution(t *testing.T) {
 			0,
 		)
 
-		_, err = contract.Claim(ctx, proofs)
+		_, err = contract.Claim(ctx, proofs, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -296,7 +296,7 @@ func TestRedistribution(t *testing.T) {
 			0,
 		)
 
-		_, err = contract.Claim(ctx, proofs)
+		_, err = contract.Claim(ctx, proofs, nil)
 		if !errors.Is(err, transaction.ErrTransactionReverted) {
 			t.Fatal(err)
 		}

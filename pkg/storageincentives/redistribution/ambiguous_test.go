@@ -63,7 +63,7 @@ func TestClaimWaitsOnAnAmbiguousSend(t *testing.T) {
 	c := ambiguousContract(t, &waits, func(context.Context) (*types.Receipt, error) {
 		return &types.Receipt{Status: 1}, nil
 	})
-	if _, err := c.Claim(gasCtx(), randChunkInclusionProofs(t)); err != nil {
+	if _, err := c.Claim(gasCtx(), randChunkInclusionProofs(t), nil); err != nil {
 		t.Fatalf("claim: %v, want nil because the transaction was mined", err)
 	}
 	if waits.Load() != 1 {
@@ -95,7 +95,7 @@ func TestClaimOnAnAmbiguousSendEndsWithItsContext(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(gasCtx(), 50*time.Millisecond)
 	defer cancel()
-	_, err := c.Claim(ctx, randChunkInclusionProofs(t))
+	_, err := c.Claim(ctx, randChunkInclusionProofs(t), nil)
 	if !errors.Is(err, errSendReset) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("claim: %v, want both the send error and the deadline", err)
 	}
@@ -142,7 +142,7 @@ func TestClaimDoesNotWaitWhenNotBroadcast(t *testing.T) {
 		redistributionContractABI,
 		0,
 	)
-	if _, err := c.Claim(gasCtx(), randChunkInclusionProofs(t)); !errors.Is(err, transaction.ErrNotBroadcast) {
+	if _, err := c.Claim(gasCtx(), randChunkInclusionProofs(t), nil); !errors.Is(err, transaction.ErrNotBroadcast) {
 		t.Fatalf("claim: %v, want ErrNotBroadcast", err)
 	}
 	if waits.Load() != 0 {
@@ -158,7 +158,7 @@ func TestClaimOnAnAmbiguousSendReportsARevert(t *testing.T) {
 	c := ambiguousContract(t, &waits, func(context.Context) (*types.Receipt, error) {
 		return &types.Receipt{Status: 0}, nil
 	})
-	if _, err := c.Claim(gasCtx(), randChunkInclusionProofs(t)); !errors.Is(err, transaction.ErrTransactionReverted) {
+	if _, err := c.Claim(gasCtx(), randChunkInclusionProofs(t), nil); !errors.Is(err, transaction.ErrTransactionReverted) {
 		t.Fatalf("claim: %v, want ErrTransactionReverted", err)
 	}
 }

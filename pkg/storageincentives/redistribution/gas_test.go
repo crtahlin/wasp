@@ -24,8 +24,9 @@ import (
 // TestLotteryGasLimits checks the gas settings of the three lottery calls
 // after the merge of Bee v2.8.3: every call estimates with at least 800,000
 // gas (Bee v2.8.3 raised it from 500,000), a configured gas limit above the
-// estimate still wins, and only the reveal carries wasp's fee floor of four
-// times the base fee (#793).
+// estimate still wins, and all three carry wasp's fee floor of four times
+// the base fee (#793), the tip from recent blocks and replacement by their
+// sender (#796, #846).
 func TestLotteryGasLimits(t *testing.T) {
 	t.Parallel()
 
@@ -63,7 +64,7 @@ func TestLotteryGasLimits(t *testing.T) {
 	if _, err := contract.Reveal(ctx, 8, common.Hex2Bytes("hash"), common.Hex2Bytes("nonce"), nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := contract.Claim(ctx, redistribution.ChunkInclusionProofs{}); err != nil {
+	if _, err := contract.Claim(ctx, redistribution.ChunkInclusionProofs{}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,9 +72,9 @@ func TestLotteryGasLimits(t *testing.T) {
 		description string
 		feeMultiple uint64
 	}{
-		{"commit transaction", 0},
+		{"commit transaction", redistribution.RevealBaseFeeMultiple},
 		{"reveal transaction", redistribution.RevealBaseFeeMultiple},
-		{"claim win transaction", 0},
+		{"claim win transaction", redistribution.RevealBaseFeeMultiple},
 	} {
 		r, ok := sent[tc.description]
 		if !ok {
@@ -87,6 +88,12 @@ func TestLotteryGasLimits(t *testing.T) {
 		}
 		if r.MinBaseFeeMultiple != tc.feeMultiple {
 			t.Errorf("%s: fee floor multiple %d, want %d", tc.description, r.MinBaseFeeMultiple, tc.feeMultiple)
+		}
+		if !r.TipFromHistory {
+			t.Errorf("%s: not priced from the fee history", tc.description)
+		}
+		if !r.SelfReplacing {
+			t.Errorf("%s: not marked as replaced by its sender", tc.description)
 		}
 	}
 }

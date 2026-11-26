@@ -13,6 +13,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethersphere/bee/v2/pkg/log"
@@ -596,6 +597,11 @@ func (m *mockchainBackend) SuggestedFeeAndTip(ctx context.Context, gasPrice *big
 	return big.NewInt(4), big.NewInt(5), nil
 }
 
+// FeeHistory fails: the history tip falls back to the suggestion.
+func (*mockchainBackend) FeeHistory(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
+	return nil, errors.New("no fee history")
+}
+
 type contractCall int
 
 func (c contractCall) String() string {
@@ -696,7 +702,7 @@ func (m *mockContract) IsWinner(context.Context) (bool, error) {
 	return m.isWinner, nil
 }
 
-func (m *mockContract) Claim(context.Context, redistribution.ChunkInclusionProofs) (common.Hash, error) {
+func (m *mockContract) Claim(context.Context, redistribution.ChunkInclusionProofs, transaction.BeforeBroadcastFunc) (common.Hash, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	m.callsList = append(m.callsList, claimCall)
