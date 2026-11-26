@@ -44,6 +44,16 @@ const (
 
 var lotteryABI = abiutil.MustParseABI(chaincfg.Testnet.RedistributionABI)
 
+// roundCtx bounds a test's commit, reveal or claim to the rest of the
+// round, so a send that never returns fails the test with a message
+// instead of a hang.
+func roundCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), ptRoundEnd*testBlockTime)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 type signedAt struct {
 	tx    *types.Transaction
 	block uint64
@@ -230,7 +240,7 @@ func TestCommitReplacedWithinPhase(t *testing.T) {
 		h.state.SetSampleData(round-1, SampleData{ReserveSampleHash: swarm.NewAddress(make([]byte, swarm.HashSize)), StorageRadius: 1}, 0)
 		sample, _ := h.state.SampleData(round - 1)
 
-		err := h.agent.commit(context.Background(), sample, round)
+		err := h.agent.commit(roundCtx(t), sample, round)
 		returnedAt := h.chain.chain.block()
 		if err != nil {
 			t.Fatalf("commit: %v", err)
@@ -260,7 +270,7 @@ func TestClaimReplacedWithinPhase(t *testing.T) {
 			}
 		}
 
-		txHash, err := h.agent.claim(context.Background(), 1, redistribution.ChunkInclusionProofs{})
+		txHash, err := h.agent.claim(roundCtx(t), 1, redistribution.ChunkInclusionProofs{})
 		returnedAt := h.chain.chain.block()
 		if err != nil {
 			t.Fatalf("claim: %v", err)
@@ -329,7 +339,7 @@ func TestCommitReplacedBeforeFeeCapPassed(t *testing.T) {
 		}
 		sample, _ := f.state().SampleData(0)
 
-		if err := f.agent.commit(context.Background(), sample, 1); err != nil {
+		if err := f.agent.commit(roundCtx(t), sample, 1); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
 		mu.Lock()
@@ -373,7 +383,7 @@ func TestOlderCommitMined(t *testing.T) {
 		}
 		sample, _ := f.state().SampleData(0)
 
-		if err := f.agent.commit(context.Background(), sample, 1); err != nil {
+		if err := f.agent.commit(roundCtx(t), sample, 1); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
 		mu.Lock()
@@ -388,7 +398,7 @@ func TestOlderCommitMined(t *testing.T) {
 
 		f.txs.set(repl, transaction.TxCancelled)
 		f.chain.setNonceAt(func(uint64) (uint64, error) { return 1, nil })
-		if !f.revealer.revealUntil(context.Background(), 1) {
+		if !f.revealer.revealUntil(roundCtx(t), 1) {
 			t.Fatal("not revealed after the older commit was mined")
 		}
 		if _, reveals := f.contract.counts(); reveals != 1 {
