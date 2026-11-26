@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math/big"
 	"slices"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethersphere/bee/v2/pkg/log"
@@ -28,6 +29,11 @@ const (
 	// historyTipMarginPercent is added to the median of the per-block
 	// values.
 	historyTipMarginPercent = 10
+	// historyTipTimeout bounds the history read, which is not persistent
+	// even for a lottery call: an endpoint that does not answer
+	// eth_feeHistory then leaves the suggested tip, and time to sign and
+	// send, instead of using up the lottery's step.
+	historyTipTimeout = 5 * time.Second
 )
 
 // maxHistoryTip caps what the history can add to a tip: 100 gwei. It never
@@ -73,6 +79,8 @@ func raiseTipFromHistory(ctx context.Context, backend FeeHistoryBackend, logger 
 // block's historyTipPercentile tip, plus historyTipMarginPercent, rounded
 // up. Every block counts, full or not.
 func historyTip(ctx context.Context, backend FeeHistoryBackend) (*big.Int, error) {
+	ctx, cancel := context.WithTimeout(context.WithValue(ctx, persistentCallsKey{}, time.Duration(0)), historyTipTimeout)
+	defer cancel()
 	history, err := backend.FeeHistory(ctx, historyTipBlocks, nil, []float64{historyTipPercentile})
 	if err != nil {
 		return nil, err

@@ -10,6 +10,8 @@ import (
 	"math/big"
 	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -32,6 +34,8 @@ type historyChain struct {
 	tip        *big.Int   // the suggested tip
 	rewards    []*big.Int // the 10th-percentile tip of each block
 	historyErr error
+	hang       bool // FeeHistory waits until its context ends
+	historyCtx context.Context
 	calls      int // FeeHistory calls
 	signed     []*types.Transaction
 }
@@ -82,7 +86,15 @@ func newHistoryService(t *testing.T, c *historyChain) transaction.Service {
 				fee := new(big.Int).Add(big.NewInt(2*historyTestBaseFee), c.tip)
 				return fee, new(big.Int).Set(c.tip), nil
 			}),
-			backendmock.WithFeeHistoryFunc(func(_ context.Context, blocks uint64, _ *big.Int, percentiles []float64) (*ethereum.FeeHistory, error) {
+			backendmock.WithFeeHistoryFunc(func(ctx context.Context, blocks uint64, _ *big.Int, percentiles []float64) (*ethereum.FeeHistory, error) {
+				c.mu.Lock()
+				c.historyCtx = ctx
+				hang := c.hang
+				c.mu.Unlock()
+				if hang {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
 				c.mu.Lock()
 				defer c.mu.Unlock()
 				c.calls++
@@ -351,4 +363,35 @@ func TestHistoryTipMedian(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An eth_feeHistory that never answers does not hold a lottery send up: the
+// history read is not persistent and ends after a few seconds, and the send
+// goes ahead with the suggested tip.
+func TestTipFromHistoryHangs(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		c := &historyChain{tip: big.NewInt(7), hang: true}
+		svc := newHistoryService(t, c)
+
+		ctx, cancel := context.WithTimeout(transaction.WithPersistentCalls(context.Background(), 10*time.Second), 15*time.Second)
+		defer cancel()
+		start := time.Now()
+		if _, err := svc.Send(ctx, historyRequest(true), 0); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		if took := time.Since(start); took > 10*time.Second {
+			t.Fatalf("send took %s waiting for the fee history", took)
+		}
+		if tip := c.last(t).GasTipCap(); tip.Cmp(big.NewInt(7)) != 0 {
+			t.Fatalf("tip %s, want the suggested 7 wei", tip)
+		}
+		c.mu.Lock()
+		hctx := c.historyCtx
+		c.mu.Unlock()
+		if _, persistent := transaction.PersistentCalls(hctx); persistent {
+			t.Fatal("the fee history read is persistent")
+		}
+	})
 }
