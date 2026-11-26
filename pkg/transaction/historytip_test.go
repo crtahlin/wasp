@@ -288,3 +288,43 @@ func TestTipFromHistoryCeiling(t *testing.T) {
 		t.Fatalf("replacement tip %s, want the stored tip plus 12 %%, %s", tip, want)
 	}
 }
+
+// The history tip is the median of the per-block values, the mean of the
+// two middle ones for an even count, plus 10 % rounded up; blocks without a
+// reward are skipped, and no rewards at all is an error.
+func TestHistoryTipMedian(t *testing.T) {
+	t.Parallel()
+
+	b := func(v int64) []*big.Int { return []*big.Int{big.NewInt(v)} }
+	for _, tc := range []struct {
+		name    string
+		rewards [][]*big.Int
+		want    int64 // 0: an error
+	}{
+		{"odd count with an outlier", [][]*big.Int{b(1), b(5), b(1_000_000), b(2), b(3)}, 4},    // 3 + 10 % = 3.3
+		{"even count", [][]*big.Int{b(10), b(1_000), b(20), b(30)}, 28},                         // 25 + 10 % = 27.5
+		{"blocks without a reward", [][]*big.Int{nil, {}, {nil}, b(7), b(9), b(1_000_000)}, 10}, // 9 + 10 % = 9.9
+		{"exact margin", [][]*big.Int{b(100)}, 110},
+		{"no rewards", [][]*big.Int{nil, {}}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			backend := backendmock.New(backendmock.WithFeeHistoryFunc(func(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
+				return &ethereum.FeeHistory{OldestBlock: big.NewInt(1), Reward: tc.rewards}, nil
+			}))
+			got, err := transaction.HistoryTip(context.Background(), backend)
+			if tc.want == 0 {
+				if err == nil {
+					t.Fatalf("got %s, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Cmp(big.NewInt(tc.want)) != 0 {
+				t.Fatalf("history tip %s, want %d", got, tc.want)
+			}
+		})
+	}
+}

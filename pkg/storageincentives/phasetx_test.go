@@ -354,8 +354,9 @@ func TestCommitReplacedBeforeFeeCapPassed(t *testing.T) {
 }
 
 // The first commit is mined after its replacement was sent: the commit
-// returns done, the stored commit is the replacement, which then reads as
-// cancelled with its nonce used, and the revealer reveals (#796 test 8).
+// returns done soon after, with no further replacement, the stored commit
+// is the replacement, which then reads as cancelled with its nonce used,
+// and the revealer reveals (#796 test 8).
 func TestOlderCommitMined(t *testing.T) {
 	t.Parallel()
 
@@ -363,6 +364,7 @@ func TestOlderCommitMined(t *testing.T) {
 		f := ptFixture(t, ptCommitStart)
 		var mu sync.Mutex
 		var first, replacement common.Hash
+		var minedAt uint64
 		f.contract.commitResult = func(ctx context.Context, h common.Hash) error {
 			mu.Lock()
 			first = h
@@ -378,6 +380,9 @@ func TestOlderCommitMined(t *testing.T) {
 			mu.Unlock()
 			go func() {
 				time.Sleep(testBlockTime)
+				mu.Lock()
+				minedAt = f.chain.block()
+				mu.Unlock()
 				f.txs.set(h, transaction.TxMined)
 			}()
 		}
@@ -386,9 +391,19 @@ func TestOlderCommitMined(t *testing.T) {
 		if err := f.agent.commit(roundCtx(t), sample, 1); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
+		returnedAt := f.chain.block()
 		mu.Lock()
-		repl := replacement
+		repl, mined := replacement, minedAt
 		mu.Unlock()
+		if returnedAt > mined+1 {
+			t.Fatalf("commit returned at block %d, the older commit was mined at block %d", returnedAt, mined)
+		}
+		f.txs.mu.Lock()
+		replacements := len(f.txs.replaced)
+		f.txs.mu.Unlock()
+		if replacements != 1 {
+			t.Fatalf("%d replacements, want 1: none after the older commit was mined", replacements)
+		}
 		if repl == (common.Hash{}) {
 			t.Fatal("no replacement sent")
 		}
@@ -403,6 +418,38 @@ func TestOlderCommitMined(t *testing.T) {
 		}
 		if _, reveals := f.contract.counts(); reveals != 1 {
 			t.Fatalf("%d reveals, want 1", reveals)
+		}
+	})
+}
+
+// A first send that does not reach its broadcast within its step, here
+// because the reads before the signing outlast the step, is sent again at
+// the next step, and the round is still committed in its phase.
+func TestCommitFirstSendRetried(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		f := ptFixture(t, ptCommitStart)
+		f.contract.commitPre = func(ctx context.Context, n int) error {
+			if n == 1 {
+				<-ctx.Done() // a silent endpoint
+				return ctx.Err()
+			}
+			return nil
+		}
+		sample, _ := f.state().SampleData(0)
+
+		if err := f.agent.commit(roundCtx(t), sample, 1); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if returnedAt := f.chain.block(); returnedAt >= ptRevealStart {
+			t.Fatalf("commit returned at block %d, after the commit phase", returnedAt)
+		}
+		if commits, _ := f.contract.counts(); commits != 1 {
+			t.Fatalf("%d commits sent, want 1", commits)
+		}
+		if _, ok := f.state().CommitKey(1); !ok {
+			t.Fatal("commit key removed")
 		}
 	})
 }

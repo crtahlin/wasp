@@ -172,9 +172,15 @@ func (p *phaseTx) step(ctx context.Context, block uint64) (bool, error) {
 		case err == nil:
 			p.finish(txHash, nil)
 			return true, nil
-		case len(p.txs) == 0,
-			errors.Is(err, transaction.ErrNotBroadcast),
-			errors.Is(err, transaction.ErrTransactionReverted):
+		case errors.Is(err, transaction.ErrTransactionReverted):
+			p.finish(txHash, err)
+			return true, nil
+		case len(p.txs) == 0:
+			// nothing was broadcast, for example because the reads
+			// before the signing outlasted the step: send again at the
+			// next step while the phase is open, as the reveal does
+			return false, err
+		case errors.Is(err, transaction.ErrNotBroadcast):
 			p.finish(txHash, err)
 			return true, nil
 		}

@@ -217,10 +217,21 @@ type fakeContract struct {
 	reveals      int
 	revealKeys   [][]byte
 	commitResult func(ctx context.Context, h common.Hash) error
+	commitPre    func(ctx context.Context, n int) error // fails attempt n before the hook
+	commitTries  int
 	revealResult func(ctx context.Context, h common.Hash) error
 }
 
 func (c *fakeContract) Commit(ctx context.Context, _ []byte, _ uint64, hook transaction.BeforeBroadcastFunc) (common.Hash, error) {
+	c.mu.Lock()
+	c.commitTries++
+	n, pre := c.commitTries, c.commitPre
+	c.mu.Unlock()
+	if pre != nil {
+		if err := pre(ctx, n); err != nil {
+			return common.Hash{}, fmt.Errorf("commit: %w: %w", transaction.ErrNotBroadcast, err)
+		}
+	}
 	h := c.txs.newHash()
 	if err := hook(h); err != nil {
 		return common.Hash{}, fmt.Errorf("commit: %w: %w", transaction.ErrNotBroadcast, err)
