@@ -2,6 +2,18 @@
 
 Issue: [#282](https://github.com/crtahlin/wasp/issues/282).
 
+**Status, 2026-11-26.** Written on 2026-09-14, before the content-providers
+work of [#290](https://github.com/crtahlin/wasp/issues/290) was measured. One
+estimate below has since been contradicted by measurement: that raising the
+free rate and the payment threshold together lets one connection carry a large
+share of a stream, so a stream needs about 8 or 9 connections. In
+[`content-providers/results.md`](../content-providers/results.md) a provider
+delivered 3 to 5% of a 16 MiB file, and about 21% at the largest payment
+threshold a node accepts. Per-peer accounting limits one connection far more
+than this analysis assumed, so read the 8-or-9 figure in the finding and in
+section 3 as an unmeasured upper bound, not a result. The code checks in
+section 1 and the estimates at stock limits do not depend on that measurement.
+
 **Finding: the premise that popular content ends up in many light-node caches holds,
 and holds most strongly for live streams. But at stock limits, what overloads full
 nodes during a live event is not where the popular chunks are stored. It is how
