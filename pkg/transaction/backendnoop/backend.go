@@ -63,6 +63,10 @@ func (b *Backend) EstimateGas(ctx context.Context, msg ethereum.CallMsg) (uint64
 	return 0, postagecontract.ErrChainDisabled
 }
 
+func (b *Backend) FeeHistory(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
+	return nil, postagecontract.ErrChainDisabled
+}
+
 func (b *Backend) SendTransaction(context.Context, *types.Transaction) error {
 	return postagecontract.ErrChainDisabled
 }

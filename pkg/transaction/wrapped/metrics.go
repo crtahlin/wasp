@@ -24,6 +24,7 @@ type metrics struct {
 	CodeAtCalls                   prometheus.Counter
 	SuggestGasTipCapCalls         prometheus.Counter
 	EstimateGasCalls              prometheus.Counter
+	FeeHistoryCalls               prometheus.Counter
 	SendTransactionCalls          prometheus.Counter
 	FilterLogsCalls               prometheus.Counter
 	ChainIDCalls                  prometheus.Counter
@@ -111,6 +112,12 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "calls_estimate_gasprice",
 			Help:      "Count of eth_estimateGas rpc calls",
+		}),
+		FeeHistoryCalls: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "calls_fee_history",
+			Help:      "Count of eth_feeHistory rpc calls",
 		}),
 		SendTransactionCalls: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
