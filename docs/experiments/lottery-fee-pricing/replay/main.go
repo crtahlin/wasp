@@ -509,6 +509,10 @@ type mainService struct {
 	transaction.Service
 }
 
+// asMain is the request as main builds it. On main only the reveal
+// request (redistribution.go, Description "reveal transaction") sets
+// MinBaseFeeMultiple and SelfReplacing; the commit and the claim set
+// neither, and none sets TipFromHistory, which main does not have.
 func asMain(r *transaction.TxRequest) *transaction.TxRequest {
 	m := *r
 	m.TipFromHistory = false

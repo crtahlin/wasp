@@ -118,6 +118,9 @@ func newHistoryService(t *testing.T, c *historyChain) transaction.Service {
 				c.mu.Lock()
 				c.historyCtx = ctx
 				hang := c.hang
+				if hang {
+					c.calls++
+				}
 				c.mu.Unlock()
 				if hang {
 					<-ctx.Done()
@@ -395,7 +398,8 @@ func TestHistoryTipMedian(t *testing.T) {
 
 // An eth_feeHistory that never answers does not hold a lottery send up: the
 // history read is not persistent and ends after a few seconds, and the send
-// goes ahead with the suggested tip.
+// goes ahead with the suggested tip. The timed-out read counts for its
+// block: a second read in the same block does not wait again.
 func TestTipFromHistoryHangs(t *testing.T) {
 	t.Parallel()
 
@@ -420,6 +424,19 @@ func TestTipFromHistoryHangs(t *testing.T) {
 		c.mu.Unlock()
 		if _, persistent := transaction.PersistentCalls(hctx); persistent {
 			t.Fatal("the fee history read is persistent")
+		}
+
+		// the balance check in the same block does not wait for the
+		// endpoint again: the timed-out read counts for the block
+		start = time.Now()
+		if tip := svc.RaiseTipFromHistory(ctx, big.NewInt(7)); tip.Cmp(big.NewInt(7)) != 0 {
+			t.Fatalf("raised tip %s, want the given 7 wei", tip)
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("a second read in the same block took %s waiting for the fee history again", took)
+		}
+		if calls := c.historyCalls(); calls != 1 {
+			t.Fatalf("%d fee history reads in one block with an endpoint that does not answer, want 1", calls)
 		}
 	})
 }

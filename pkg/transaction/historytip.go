@@ -75,10 +75,12 @@ func newFeeHistoryCache() *feeHistoryCache {
 
 // get returns the fee history of the latest historyTipBlocks blocks at the
 // historyTipPercentile, read at most once per block number. The block
-// number and the read share historyTipTimeout. When the block number
-// cannot be read, the history is read without the cache.
-func (c *feeHistoryCache) get(ctx context.Context, backend FeeHistoryBackend) (*ethereum.FeeHistory, error) {
-	ctx, cancel := context.WithTimeout(context.WithValue(ctx, persistentCallsKey{}, time.Duration(0)), historyTipTimeout)
+// number and the read share historyTipTimeout, and a read that used it up
+// is kept as an error for the rest of the block, so an endpoint that does
+// not answer costs one wait per block. When the block number cannot be
+// read, the history is read without the cache.
+func (c *feeHistoryCache) get(parent context.Context, backend FeeHistoryBackend) (*ethereum.FeeHistory, error) {
+	ctx, cancel := context.WithTimeout(context.WithValue(parent, persistentCallsKey{}, time.Duration(0)), historyTipTimeout)
 	defer cancel()
 
 	block, err := backend.BlockNumber(ctx)
@@ -97,8 +99,8 @@ func (c *feeHistoryCache) get(ctx context.Context, backend FeeHistoryBackend) (*
 		return c.history, c.err
 	}
 	history, err := readFeeHistory(ctx, backend)
-	if ctx.Err() == nil {
-		// an answer cut short by the caller's context is not the
+	if parent.Err() == nil {
+		// an answer cut short by the caller's own context is not the
 		// endpoint's, and is not kept for the other callers
 		c.read, c.block, c.history, c.err = true, block, history, err
 	}
