@@ -17,6 +17,8 @@ var Bumped = bumped
 
 var NewerThan = newerThan
 
+var HistoryTip = historyTip
+
 // NewServiceWithoutWatchdog builds a service whose watchdog does not run
 // on its own; a test runs its checks with CheckPending.
 func WithoutWatchdog() Option {

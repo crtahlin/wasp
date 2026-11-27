@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethersphere/bee/v2/pkg/log"
@@ -74,7 +75,7 @@ type winnerContract struct {
 
 func (c *winnerContract) IsWinner(context.Context) (bool, error) { return true, nil }
 
-func (c *winnerContract) Claim(context.Context, redistribution.ChunkInclusionProofs) (common.Hash, error) {
+func (c *winnerContract) Claim(context.Context, redistribution.ChunkInclusionProofs, transaction.BeforeBroadcastFunc) (common.Hash, error) {
 	c.claims.Add(1)
 	return common.Hash{0xc1}, nil
 }
@@ -206,6 +207,11 @@ func (c *guardChain) SuggestedFeeAndTip(context.Context, *big.Int, int) (*big.In
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return new(big.Int).Set(c.feeCap), new(big.Int).Set(c.tip), nil
+}
+
+// FeeHistory fails: the history tip falls back to the suggestion.
+func (*guardChain) FeeHistory(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
+	return nil, errors.New("no fee history")
 }
 
 // guardTxs is the transaction service the reveal guard sees.

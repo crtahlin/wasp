@@ -402,6 +402,12 @@ func (e *chainEndpoint) EstimateGas(_ context.Context, msg ethereum.CallMsg) (ui
 	return 50_000, nil
 }
 
+// FeeHistory is not simulated: a lottery transaction then keeps the
+// suggested tip, as with an endpoint without eth_feeHistory.
+func (e *chainEndpoint) FeeHistory(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
+	return nil, errSimulated
+}
+
 func (e *chainEndpoint) SuggestGasTipCap(context.Context) (*big.Int, error) {
 	return big.NewInt(1_000_000_000), nil
 }

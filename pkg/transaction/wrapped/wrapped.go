@@ -272,6 +272,17 @@ func (b *wrappedBackend) EstimateGas(ctx context.Context, msg ethereum.CallMsg) 
 	return gas, nil
 }
 
+func (b *wrappedBackend) FeeHistory(ctx context.Context, blockCount uint64, lastBlock *big.Int, rewardPercentiles []float64) (*ethereum.FeeHistory, error) {
+	b.metrics.TotalRPCCalls.Inc()
+	b.metrics.FeeHistoryCalls.Inc()
+	history, err := b.backend.FeeHistory(ctx, blockCount, lastBlock, rewardPercentiles)
+	if err != nil {
+		b.metrics.TotalRPCErrors.Inc()
+		return nil, err
+	}
+	return history, nil
+}
+
 func (b *wrappedBackend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
 	b.metrics.TotalRPCCalls.Inc()
 	b.metrics.SendTransactionCalls.Inc()

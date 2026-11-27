@@ -149,6 +149,11 @@ type TxRequest struct {
 	// pending-transaction watchdog sends its bytes again but never
 	// replaces it (#819).
 	SelfReplacing bool
+	// TipFromHistory, when GasPrice is nil, raises the tip to what recent
+	// blocks included (the history tip), for the send and for every
+	// replacement; a replacement's tip also follows the last few blocks
+	// (the recent tip). Only lottery transactions set it (#796, #846).
+	TipFromHistory bool
 }
 
 type StoredTransaction struct {
@@ -170,6 +175,9 @@ type StoredTransaction struct {
 	Replaces common.Hash
 	// SelfReplacing is TxRequest.SelfReplacing, kept by its replacements.
 	SelfReplacing bool
+	// TipFromHistory is TxRequest.TipFromHistory, kept by its
+	// replacements, so a replacement is priced as the original was.
+	TipFromHistory bool
 	// CancelReason is set on a cancellation the node sent itself:
 	// CancelReasonReveal for one that protects a reveal.
 	CancelReason string
@@ -219,6 +227,12 @@ type Service interface {
 	// nonce and raised fees, stores it, calls beforeBroadcast (if not nil)
 	// with the new hash and sends it. Errors are as for SendWithHook.
 	ReplaceTransaction(ctx context.Context, txHash common.Hash, beforeBroadcast BeforeBroadcastFunc) (common.Hash, error)
+	// RaiseTipFromHistory returns the higher of tip and the tip priced
+	// from what recent blocks included, as a lottery transaction's first
+	// send is priced, or tip when the fee history is unavailable. The fee
+	// history is read at most once per block, shared with the sends and
+	// replacements (#796).
+	RaiseTipFromHistory(ctx context.Context, tip *big.Int) *big.Int
 	// TransactionStatus looks the transaction up on chain. It does not
 	// check whether the backend is synced; a caller acting on TxNotFound
 	// checks that with IsSynced.
@@ -311,6 +325,8 @@ type transactionService struct {
 	watchdog        watchdogState
 	watchdogKick    chan struct{}
 	noWatchdog      bool
+	// history is the fee history read, at most once per block (#796).
+	history *feeHistoryCache
 }
 
 // Option configures a transaction service.
@@ -358,6 +374,7 @@ func NewService(logger log.Logger, overlayEthAddress common.Address, backend Bac
 		metrics:          newMetrics(),
 		watchdog:         newWatchdogState(),
 		watchdogKick:     make(chan struct{}, 1),
+		history:          newFeeHistoryCache(),
 	}
 	t.blockTime = ObservedBlockTime(backend, DefaultBlockTime)
 	for _, opt := range opts {
@@ -415,20 +432,22 @@ func (t *transactionService) SendWithHook(ctx context.Context, request *TxReques
 	}
 
 	return t.storeAndBroadcast(ctx, signedTx, storeMeta{
-		boost:         boostPercent,
-		description:   request.Description,
-		selfReplacing: request.SelfReplacing,
+		boost:          boostPercent,
+		description:    request.Description,
+		selfReplacing:  request.SelfReplacing,
+		tipFromHistory: request.TipFromHistory,
 	}, beforeBroadcast)
 }
 
 // storeMeta is what storeTransaction keeps with a signed transaction
 // besides its own fields.
 type storeMeta struct {
-	boost         int
-	description   string
-	replaces      common.Hash
-	selfReplacing bool
-	cancelReason  string
+	boost          int
+	description    string
+	replaces       common.Hash
+	selfReplacing  bool
+	tipFromHistory bool
+	cancelReason   string
 }
 
 // storeTransaction stores the signed transaction, its bytes included, and
@@ -440,21 +459,22 @@ func (t *transactionService) storeTransaction(signedTx *types.Transaction, meta 
 		return err
 	}
 	err = t.store.Put(storedTransactionKey(signedTx.Hash()), StoredTransaction{
-		To:            signedTx.To(),
-		Data:          signedTx.Data(),
-		GasPrice:      signedTx.GasPrice(),
-		GasLimit:      signedTx.Gas(),
-		GasTipBoost:   meta.boost,
-		GasTipCap:     signedTx.GasTipCap(),
-		GasFeeCap:     signedTx.GasFeeCap(),
-		Value:         signedTx.Value(),
-		Nonce:         signedTx.Nonce(),
-		Created:       t.now().Unix(),
-		Description:   meta.description,
-		Raw:           raw,
-		Replaces:      meta.replaces,
-		SelfReplacing: meta.selfReplacing,
-		CancelReason:  meta.cancelReason,
+		To:             signedTx.To(),
+		Data:           signedTx.Data(),
+		GasPrice:       signedTx.GasPrice(),
+		GasLimit:       signedTx.Gas(),
+		GasTipBoost:    meta.boost,
+		GasTipCap:      signedTx.GasTipCap(),
+		GasFeeCap:      signedTx.GasFeeCap(),
+		Value:          signedTx.Value(),
+		Nonce:          signedTx.Nonce(),
+		Created:        t.now().Unix(),
+		Description:    meta.description,
+		Raw:            raw,
+		Replaces:       meta.replaces,
+		SelfReplacing:  meta.selfReplacing,
+		TipFromHistory: meta.tipFromHistory,
+		CancelReason:   meta.cancelReason,
 	})
 	if err != nil {
 		return err
@@ -624,7 +644,12 @@ func (t *transactionService) prepareTransaction(ctx context.Context, request *Tx
 		notice that gas price does not exceed 20 as defined by max fee.
 	*/
 
-	gasFeeCap, gasTipCap, err := t.backend.SuggestedFeeAndTip(ctx, request.GasPrice, boostPercent)
+	var gasFeeCap, gasTipCap *big.Int
+	if request.GasPrice == nil && request.TipFromHistory {
+		gasFeeCap, gasTipCap, err = t.suggestedFeeAndHistoryTip(ctx, boostPercent)
+	} else {
+		gasFeeCap, gasTipCap, err = t.backend.SuggestedFeeAndTip(ctx, request.GasPrice, boostPercent)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -782,9 +807,18 @@ func (t *transactionService) ReplaceTransaction(ctx context.Context, txHash comm
 		return common.Hash{}, notBroadcast(err)
 	}
 
-	gasFeeCap, gasTipCap, err := t.backend.SuggestedFeeAndTip(ctx, sctx.GetGasPrice(ctx), stored.GasTipBoost)
+	gasPrice := sctx.GetGasPrice(ctx)
+	gasFeeCap, gasTipCap, err := t.backend.SuggestedFeeAndTip(ctx, gasPrice, stored.GasTipBoost)
 	if err != nil {
 		return common.Hash{}, notBroadcast(err)
+	}
+	if stored.TipFromHistory && gasPrice == nil {
+		// the history, and the recent tip, can only raise the tip above
+		// the suggestion and the bumped stored tip, never lower it below
+		// them
+		tip := t.raiseTipFromHistory(ctx, bigMax(gasTipCap, bumped(stored.GasTipCap)), true)
+		gasFeeCap = addToFeeCap(gasFeeCap, gasTipCap, tip)
+		gasTipCap = tip
 	}
 	gasFeeCap = bigMax(gasFeeCap, bumped(stored.GasFeeCap))
 	gasTipCap = bigMax(gasTipCap, bumped(stored.GasTipCap))
@@ -805,10 +839,11 @@ func (t *transactionService) ReplaceTransaction(ctx context.Context, txHash comm
 	}
 
 	return t.storeAndBroadcast(ctx, signedTx, storeMeta{
-		boost:         stored.GasTipBoost,
-		description:   replacementDescription(stored.Description),
-		replaces:      txHash,
-		selfReplacing: stored.SelfReplacing,
+		boost:          stored.GasTipBoost,
+		description:    replacementDescription(stored.Description),
+		replaces:       txHash,
+		selfReplacing:  stored.SelfReplacing,
+		tipFromHistory: stored.TipFromHistory,
 	}, beforeBroadcast)
 }
 

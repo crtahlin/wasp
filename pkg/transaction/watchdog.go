@@ -276,7 +276,8 @@ func (t *transactionService) resendOverdue(ctx context.Context, e pendingEntry, 
 		return
 	case feeTooLow || belowBaseFee:
 		if e.stored.SelfReplacing {
-			// the revealer replaces its own reveals (#793)
+			// the storage incentives replace their own commits,
+			// reveals and claims (#793, #796)
 			return
 		}
 		reason := "fee_too_low"

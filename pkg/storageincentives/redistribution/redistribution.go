@@ -21,11 +21,12 @@ import (
 const (
 	loggerName      = "redistributionContract"
 	BoostTipPercent = 50
-	// RevealBaseFeeMultiple is the reveal's fee cap in multiples of the
-	// latest base fee (plus the tip), against twice for other transactions:
-	// a reveal that is not included in its phase freezes the stake, and a
-	// cap of four times stays above a base fee rising through about 11 full
-	// blocks. The fee paid is unchanged (#793).
+	// RevealBaseFeeMultiple is the fee cap of a commit, reveal or claim in
+	// multiples of the latest base fee (plus the tip), against twice for
+	// other transactions: a lottery transaction that is not included in
+	// its phase loses the round or freezes the stake, and a cap of four
+	// times stays above a base fee rising through about 11 full blocks.
+	// The fee paid is unchanged (#793, #796).
 	RevealBaseFeeMultiple = 4
 )
 
@@ -33,10 +34,10 @@ type Contract interface {
 	ReserveSalt(context.Context) ([]byte, error)
 	IsPlaying(context.Context, uint8) (bool, error)
 	IsWinner(context.Context) (bool, error)
-	Claim(context.Context, ChunkInclusionProofs) (common.Hash, error)
-	// Commit and Reveal call beforeBroadcast (if not nil) with the signed
-	// hash after the transaction is stored and before it is sent; see
-	// transaction.Service.SendWithHook.
+	// Claim, Commit and Reveal call beforeBroadcast (if not nil) with the
+	// signed hash after the transaction is stored and before it is sent;
+	// see transaction.Service.SendWithHook.
+	Claim(ctx context.Context, proofs ChunkInclusionProofs, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error)
 	Commit(ctx context.Context, obfusHash []byte, round uint64, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error)
 	Reveal(ctx context.Context, storageDepth uint8, reserveCommitmentHash []byte, randomNonce []byte, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error)
 	// CurrentRound returns the round the contract is in. The node computes
@@ -138,7 +139,7 @@ func (c *contract) CurrentRound(ctx context.Context) (uint64, error) {
 }
 
 // Claim sends a transaction to blockchain if a win is claimed.
-func (c *contract) Claim(ctx context.Context, proofs ChunkInclusionProofs) (common.Hash, error) {
+func (c *contract) Claim(ctx context.Context, proofs ChunkInclusionProofs, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error) {
 	callData, err := c.incentivesContractABI.Pack("claim", proofs.A, proofs.B, proofs.C)
 	if err != nil {
 		return common.Hash{}, err
@@ -152,7 +153,8 @@ func (c *contract) Claim(ctx context.Context, proofs ChunkInclusionProofs) (comm
 		Value:                big.NewInt(0),
 		Description:          "claim win transaction",
 	}
-	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, waitOnAmbiguous, nil)
+	lotteryPricing(request)
+	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, waitOnAmbiguous, beforeBroadcast)
 	if err != nil {
 		return txHash, fmt.Errorf("claim: %w", err)
 	}
@@ -175,6 +177,7 @@ func (c *contract) Commit(ctx context.Context, obfusHash []byte, round uint64, b
 		Value:                big.NewInt(0),
 		Description:          "commit transaction",
 	}
+	lotteryPricing(request)
 	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, waitOnAmbiguous, beforeBroadcast)
 	if err != nil {
 		return txHash, fmt.Errorf("commit: obfusHash %v: %w", common.BytesToHash(obfusHash), err)
@@ -195,19 +198,27 @@ func (c *contract) Reveal(ctx context.Context, storageDepth uint8, reserveCommit
 		GasPrice:             sctx.GetGasPrice(ctx),
 		GasLimit:             max(sctx.GetGasLimit(ctx), c.gasLimit),
 		MinEstimatedGasLimit: 800_000,
-		MinBaseFeeMultiple:   RevealBaseFeeMultiple,
 		Value:                big.NewInt(0),
 		Description:          "reveal transaction",
-		// the revealer replaces its reveals itself (#793); the
-		// transaction watchdog sends them again but never replaces them
-		SelfReplacing: true,
 	}
+	lotteryPricing(request)
 	txHash, err := c.sendAndWait(ctx, request, BoostTipPercent, failOnAmbiguous, beforeBroadcast)
 	if err != nil {
 		return txHash, fmt.Errorf("reveal: storageDepth %d reserveCommitmentHash %v RandomNonce %v: %w", storageDepth, common.BytesToHash(reserveCommitmentHash), common.BytesToHash(RandomNonce), err)
 	}
 
 	return txHash, nil
+}
+
+// lotteryPricing sets how a commit, reveal or claim is priced and replaced:
+// the tip from what recent blocks included (#796, #846), a fee cap of
+// RevealBaseFeeMultiple times the base fee (#793), and replacements left to
+// the sender, which replaces each of them within its phase; the transaction
+// watchdog sends them again but never replaces them.
+func lotteryPricing(request *transaction.TxRequest) {
+	request.TipFromHistory = true
+	request.MinBaseFeeMultiple = RevealBaseFeeMultiple
+	request.SelfReplacing = true
 }
 
 // ReserveSalt provides the current round anchor by transacting on the blockchain.

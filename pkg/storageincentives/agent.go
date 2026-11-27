@@ -481,7 +481,7 @@ func (a *Agent) handleClaim(ctx context.Context, round uint64) error {
 		return fmt.Errorf("making inclusion proofs: %w", err)
 	}
 
-	txHash, err := a.contract.Claim(ctx, proofs)
+	txHash, err := a.claim(ctx, round, proofs)
 	if err != nil {
 		a.metrics.ErrClaim.Inc()
 		return fmt.Errorf("claiming win: %w", err)
@@ -499,6 +499,17 @@ func (a *Agent) handleClaim(ctx context.Context, round uint64) error {
 	a.state.AddFee(ctx, txHash)
 
 	return nil
+}
+
+// claim sends the round's claim and replaces it with raised fees within the
+// claim phase, like the reveal, until one of its transactions is mined
+// (#796).
+func (a *Agent) claim(ctx context.Context, round uint64, proofs redistribution.ChunkInclusionProofs) (common.Hash, error) {
+	r := a.revealer
+	return r.sendInPhase(ctx, "claim", round, (round+1)*r.blocksPerRound,
+		func(ctx context.Context, hook transaction.BeforeBroadcastFunc) (common.Hash, error) {
+			return a.contract.Claim(ctx, proofs, hook)
+		}, nil)
 }
 
 // isPlaying asks the contract whether the node plays the coming round. An
@@ -751,9 +762,18 @@ func (a *Agent) commit(ctx context.Context, sample SampleData, round uint64) err
 		return err
 	}
 
-	txHash, err := a.contract.Commit(ctx, obfuscatedHash, round, func(txHash common.Hash) error {
-		return a.state.SetCommitTx(round, txHash)
-	})
+	// The commit is replaced with raised fees within the commit phase,
+	// like the reveal (#796). The hash of the first send and of every
+	// replacement is stored before it is broadcast, so the revealer looks
+	// at the newest commit.
+	r := a.revealer
+	txHash, err := r.sendInPhase(ctx, "commit", round, r.revealStart(round),
+		func(ctx context.Context, hook transaction.BeforeBroadcastFunc) (common.Hash, error) {
+			return a.contract.Commit(ctx, obfuscatedHash, round, hook)
+		},
+		func(txHash common.Hash) error {
+			return a.state.SetCommitTx(round, txHash)
+		})
 	a.revealer.endCommit(round, err)
 	if err != nil {
 		a.metrics.ErrCommit.Inc()
@@ -872,9 +892,16 @@ func (a *Agent) HasEnoughFundsToPlay(ctx context.Context) (*big.Int, bool, error
 		return nil, false, err
 	}
 
-	price, _, err := a.backend.SuggestedFeeAndTip(ctx, nil, redistribution.BoostTipPercent)
+	price, tip, err := a.backend.SuggestedFeeAndTip(ctx, nil, redistribution.BoostTipPercent)
 	if err != nil {
 		return nil, false, err
+	}
+	// priced as the lottery transactions are, with the tip from recent
+	// blocks, so a node that can commit can also afford its reveal; the
+	// transaction service reads the fee history once per block for this
+	// check and its sends (#796)
+	if raised := a.revealer.txService.RaiseTipFromHistory(ctx, tip); raised.Cmp(tip) > 0 {
+		price = new(big.Int).Add(price, new(big.Int).Sub(raised, tip))
 	}
 
 	avgTxFee := new(big.Int).Mul(big.NewInt(avgTxGas), price)

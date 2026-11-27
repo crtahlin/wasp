@@ -105,6 +105,10 @@ func (m *simulatedBackend) EstimateGas(ctx context.Context, msg ethereum.CallMsg
 	return 0, ErrNotImplemented
 }
 
+func (m *simulatedBackend) FeeHistory(ctx context.Context, blockCount uint64, lastBlock *big.Int, rewardPercentiles []float64) (*ethereum.FeeHistory, error) {
+	return nil, ErrNotImplemented
+}
+
 func (m *simulatedBackend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
 	return ErrNotImplemented
 }

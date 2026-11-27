@@ -37,6 +37,7 @@ type transactionServiceMock struct {
 	rebroadcast          func(ctx context.Context, txHash common.Hash) error
 	replace              func(ctx context.Context, txHash common.Hash, beforeBroadcast transaction.BeforeBroadcastFunc) (common.Hash, error)
 	transactionStatus    func(ctx context.Context, txHash common.Hash) (transaction.TxState, error)
+	raiseTipFromHistory  func(ctx context.Context, tip *big.Int) *big.Int
 }
 
 // SendWithHook calls the function set with WithSendWithHookFunc. Without
@@ -76,6 +77,16 @@ func (m *transactionServiceMock) TransactionStatus(ctx context.Context, txHash c
 		return m.transactionStatus(ctx, txHash)
 	}
 	return 0, errors.New("not implemented")
+}
+
+// RaiseTipFromHistory calls the function set with
+// WithRaiseTipFromHistoryFunc. Without one it returns tip, as the service
+// does without a fee history.
+func (m *transactionServiceMock) RaiseTipFromHistory(ctx context.Context, tip *big.Int) *big.Int {
+	if m.raiseTipFromHistory != nil {
+		return m.raiseTipFromHistory(ctx, tip)
+	}
+	return tip
 }
 
 func (m *transactionServiceMock) Send(ctx context.Context, request *transaction.TxRequest, boostPercent int) (txHash common.Hash, err error) {
@@ -302,6 +313,12 @@ func WithReplaceTransactionFunc(f func(ctx context.Context, txHash common.Hash, 
 func WithTransactionStatusFunc(f func(ctx context.Context, txHash common.Hash) (transaction.TxState, error)) Option {
 	return optionFunc(func(s *transactionServiceMock) {
 		s.transactionStatus = f
+	})
+}
+
+func WithRaiseTipFromHistoryFunc(f func(ctx context.Context, tip *big.Int) *big.Int) Option {
+	return optionFunc(func(s *transactionServiceMock) {
+		s.raiseTipFromHistory = f
 	})
 }
 

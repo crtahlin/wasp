@@ -339,6 +339,12 @@ func (b *Backend) EstimateGas(ctx context.Context, m ethereum.CallMsg) (uint64, 
 	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (uint64, error) { return be.EstimateGas(ctx, m) })
 }
 
+func (b *Backend) FeeHistory(ctx context.Context, blockCount uint64, lastBlock *big.Int, rewardPercentiles []float64) (*ethereum.FeeHistory, error) {
+	return call(ctx, b, func(ctx context.Context, be transaction.Backend) (*ethereum.FeeHistory, error) {
+		return be.FeeHistory(ctx, blockCount, lastBlock, rewardPercentiles)
+	})
+}
+
 func (b *Backend) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
 	return call(ctx, b, func(ctx context.Context, be transaction.Backend) ([]types.Log, error) { return be.FilterLogs(ctx, q) })
 }
