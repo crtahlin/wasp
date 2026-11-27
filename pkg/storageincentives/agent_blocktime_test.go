@@ -6,14 +6,12 @@ package storageincentives_test
 
 import (
 	"context"
-	"errors"
 	"math/big"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethersphere/bee/v2/pkg/storer"
@@ -42,11 +40,6 @@ func (b *countingBackend) BalanceAt(context.Context, common.Address, *big.Int) (
 
 func (b *countingBackend) SuggestedFeeAndTip(context.Context, *big.Int, int) (*big.Int, *big.Int, error) {
 	return big.NewInt(4), big.NewInt(5), nil
-}
-
-// FeeHistory fails: the history tip falls back to the suggestion.
-func (*countingBackend) FeeHistory(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
-	return nil, errors.New("no fee history")
 }
 
 // TestAgentPhaseCheckFollowsBlockTime: the agent checks the phase every five

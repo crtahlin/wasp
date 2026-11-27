@@ -25,7 +25,6 @@ import (
 	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/ethersphere/bee/v2/pkg/transaction"
 	"github.com/ethersphere/bee/v2/pkg/transaction/backendmock"
-	transactionmock "github.com/ethersphere/bee/v2/pkg/transaction/mock"
 	"github.com/ethersphere/bee/v2/pkg/transaction/monitormock"
 	"github.com/ethersphere/bee/v2/pkg/util/abiutil"
 	"github.com/ethersphere/bee/v2/pkg/util/testutil"
@@ -61,14 +60,16 @@ type signedAt struct {
 
 // lotteryChain is the chain behind a real transaction service: the
 // endpoint suggests a 1 wei tip, eth_feeHistory reports historyTip for
-// every block, and a transaction is mined only when mineOnSign says so.
+// every block (an error when it is nil), and a transaction is mined only
+// when mineOnSign says so.
 type lotteryChain struct {
 	chain *fakeChain
 
-	mu         sync.Mutex
-	historyTip *big.Int
-	signed     []signedAt
-	mined      map[common.Hash]bool
+	mu           sync.Mutex
+	historyTip   *big.Int
+	historyCalls int // eth_feeHistory calls
+	signed       []signedAt
+	mined        map[common.Hash]bool
 	// mineOnSign, if set, is asked for the n-th signed transaction
 	// (from 1) and mines it at once when it answers true.
 	mineOnSign func(n int) bool
@@ -133,6 +134,10 @@ func (c *lotteryChain) backend() transaction.Backend {
 		backendmock.WithFeeHistoryFunc(func(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
+			c.historyCalls++
+			if c.historyTip == nil {
+				return nil, errors.New("method not found")
+			}
 			h := &ethereum.FeeHistory{OldestBlock: big.NewInt(1)}
 			for range 20 {
 				h.Reward = append(h.Reward, []*big.Int{new(big.Int).Set(c.historyTip)})
@@ -140,6 +145,9 @@ func (c *lotteryChain) backend() transaction.Backend {
 			return h, nil
 		}),
 		backendmock.WithSendTransactionFunc(func(context.Context, *types.Transaction) error { return nil }),
+		backendmock.WithBalanceAt(func(context.Context, common.Address, *big.Int) (*big.Int, error) {
+			return big.NewInt(1_000_000_000), nil
+		}),
 		backendmock.WithTransactionReceiptFunc(func(_ context.Context, h common.Hash) (*types.Receipt, error) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -191,7 +199,7 @@ func newLotteryHarness(t *testing.T, block uint64) *lotteryHarness {
 	return &lotteryHarness{
 		chain: c,
 		state: state,
-		agent: &Agent{logger: log.Noop, metrics: newMetrics(), contract: contract, revealer: revealer, state: state, overlay: swarm.RandAddress(t)},
+		agent: &Agent{logger: log.Noop, metrics: newMetrics(), backend: c.backend(), contract: contract, revealer: revealer, state: state, overlay: swarm.RandAddress(t)},
 	}
 }
 
@@ -454,32 +462,6 @@ func TestCommitFirstSendRetried(t *testing.T) {
 	})
 }
 
-// fundsBackend has a balance that covers minTxCountToCover transactions at
-// the endpoint's 1 wei tip but not at the history tip.
-type fundsBackend struct {
-	ChainBackend
-	history error // FeeHistory fails with it when set
-}
-
-func (b *fundsBackend) BalanceAt(context.Context, common.Address, *big.Int) (*big.Int, error) {
-	return big.NewInt(1_000_000_000), nil
-}
-
-func (b *fundsBackend) SuggestedFeeAndTip(context.Context, *big.Int, int) (*big.Int, *big.Int, error) {
-	return big.NewInt(2*100 + 1), big.NewInt(1), nil
-}
-
-func (b *fundsBackend) FeeHistory(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
-	if b.history != nil {
-		return nil, b.history
-	}
-	h := &ethereum.FeeHistory{OldestBlock: big.NewInt(1)}
-	for range 20 {
-		h.Reward = append(h.Reward, []*big.Int{big.NewInt(2_000_000)})
-	}
-	return h, nil
-}
-
 // The balance check prices with the history tip: a balance that covers 15
 // transactions at a 1 wei tip but not at the history tip does not play
 // (#796 test 9). Without a history it plays, as before.
@@ -487,30 +469,91 @@ func TestFundsCheckUsesHistoryTip(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name    string
-		history error
-		play    bool
+		name       string
+		historyTip *big.Int
+		play       bool
 	}{
-		{"history tip", nil, false},
-		{"no history", errors.New("method not found"), true},
+		// 15 x 250,000 gas x (2 x 1 wei + 2,200,000 wei) is above the
+		// balance of 1,000,000,000 wei
+		{"history tip", big.NewInt(2_000_000), false},
+		// without a history the tip is the suggested 1 wei: 15 x
+		// 250,000 x (2 + 1) is below the balance
+		{"no history", nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			state, err := NewRedistributionState(log.Noop, common.Address{}, mock.NewStateStore(), erc20mock.New(), transactionmock.New())
-			if err != nil {
-				t.Fatal(err)
-			}
-			a := &Agent{logger: log.Noop, backend: &fundsBackend{history: tc.history}, state: state}
+			synctest.Test(t, func(t *testing.T) {
+				h := newLotteryHarness(t, ptCommitStart)
+				h.chain.setHistoryTip(tc.historyTip)
 
-			minBalance, play, err := a.HasEnoughFundsToPlay(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if play != tc.play {
-				t.Fatalf("plays %v with a balance of 1000000000 against a minimum of %s, want %v", play, minBalance, tc.play)
-			}
+				minBalance, play, err := h.agent.HasEnoughFundsToPlay(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if play != tc.play {
+					t.Fatalf("plays %v with a balance of 1000000000 against a minimum of %s, want %v", play, minBalance, tc.play)
+				}
+			})
 		})
 	}
+}
+
+// The fee history is read at most once per block: twenty balance checks
+// and two lottery sends in one block, all at once, make one eth_feeHistory
+// call, and the first read after a new block makes a new one (#796 test
+// 10). Running them at once lets the race detector see the shared read.
+func TestFeeHistoryReadOncePerBlock(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		h := newLotteryHarness(t, ptCommitStart)
+		svc := h.agent.revealer.txService
+		calls := func() int {
+			h.chain.mu.Lock()
+			defer h.chain.mu.Unlock()
+			return h.chain.historyCalls
+		}
+		to := common.HexToAddress("0xffff")
+		send := func() {
+			if _, err := svc.Send(context.Background(), &transaction.TxRequest{
+				To: &to, GasLimit: 100_000, Value: big.NewInt(0), TipFromHistory: true,
+			}, 0); err != nil {
+				t.Error(err)
+			}
+		}
+
+		block := h.chain.chain.block()
+		var wg sync.WaitGroup
+		for range 20 {
+			wg.Go(func() {
+				if _, _, err := h.agent.HasEnoughFundsToPlay(context.Background()); err != nil {
+					t.Error(err)
+				}
+			})
+		}
+		wg.Go(send)
+		wg.Go(send)
+		wg.Wait()
+		if now := h.chain.chain.block(); now != block {
+			t.Fatalf("the checks and sends ran from block %d to %d, want one block", block, now)
+		}
+		if n := calls(); n != 1 {
+			t.Fatalf("%d eth_feeHistory calls for 20 balance checks and 2 sends in one block, want 1", n)
+		}
+		for _, s := range h.chain.signedTxs() {
+			if s.tx.GasTipCap().Cmp(big.NewInt(2_200_000)) < 0 {
+				t.Fatalf("send tip %s, want the history tip of at least 2200000", s.tx.GasTipCap())
+			}
+		}
+
+		time.Sleep(testBlockTime)
+		if _, _, err := h.agent.HasEnoughFundsToPlay(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if n := calls(); n != 2 {
+			t.Fatalf("%d eth_feeHistory calls after a new block, want 2", n)
+		}
+	})
 }
 
 // pendingCommit makes the fake contract's commit pending on chain until

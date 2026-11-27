@@ -150,8 +150,9 @@ type TxRequest struct {
 	// replaces it (#819).
 	SelfReplacing bool
 	// TipFromHistory, when GasPrice is nil, raises the tip to what recent
-	// blocks included (SuggestedFeeAndHistoryTip), for the send and for
-	// every replacement. Only lottery transactions set it (#796, #846).
+	// blocks included (the history tip), for the send and for every
+	// replacement; a replacement's tip also follows the last few blocks
+	// (the recent tip). Only lottery transactions set it (#796, #846).
 	TipFromHistory bool
 }
 
@@ -226,6 +227,12 @@ type Service interface {
 	// nonce and raised fees, stores it, calls beforeBroadcast (if not nil)
 	// with the new hash and sends it. Errors are as for SendWithHook.
 	ReplaceTransaction(ctx context.Context, txHash common.Hash, beforeBroadcast BeforeBroadcastFunc) (common.Hash, error)
+	// RaiseTipFromHistory returns the higher of tip and the tip priced
+	// from what recent blocks included, as a lottery transaction's first
+	// send is priced, or tip when the fee history is unavailable. The fee
+	// history is read at most once per block, shared with the sends and
+	// replacements (#796).
+	RaiseTipFromHistory(ctx context.Context, tip *big.Int) *big.Int
 	// TransactionStatus looks the transaction up on chain. It does not
 	// check whether the backend is synced; a caller acting on TxNotFound
 	// checks that with IsSynced.
@@ -318,6 +325,8 @@ type transactionService struct {
 	watchdog        watchdogState
 	watchdogKick    chan struct{}
 	noWatchdog      bool
+	// history is the fee history read, at most once per block (#796).
+	history *feeHistoryCache
 }
 
 // Option configures a transaction service.
@@ -365,6 +374,7 @@ func NewService(logger log.Logger, overlayEthAddress common.Address, backend Bac
 		metrics:          newMetrics(),
 		watchdog:         newWatchdogState(),
 		watchdogKick:     make(chan struct{}, 1),
+		history:          newFeeHistoryCache(),
 	}
 	t.blockTime = ObservedBlockTime(backend, DefaultBlockTime)
 	for _, opt := range opts {
@@ -636,7 +646,7 @@ func (t *transactionService) prepareTransaction(ctx context.Context, request *Tx
 
 	var gasFeeCap, gasTipCap *big.Int
 	if request.GasPrice == nil && request.TipFromHistory {
-		gasFeeCap, gasTipCap, err = SuggestedFeeAndHistoryTip(ctx, t.backend, t.logger, boostPercent)
+		gasFeeCap, gasTipCap, err = t.suggestedFeeAndHistoryTip(ctx, boostPercent)
 	} else {
 		gasFeeCap, gasTipCap, err = t.backend.SuggestedFeeAndTip(ctx, request.GasPrice, boostPercent)
 	}
@@ -803,9 +813,10 @@ func (t *transactionService) ReplaceTransaction(ctx context.Context, txHash comm
 		return common.Hash{}, notBroadcast(err)
 	}
 	if stored.TipFromHistory && gasPrice == nil {
-		// the history can only raise the tip above the suggestion and
-		// the bumped stored tip, never lower it below them
-		tip := raiseTipFromHistory(ctx, t.backend, t.logger, bigMax(gasTipCap, bumped(stored.GasTipCap)))
+		// the history, and the recent tip, can only raise the tip above
+		// the suggestion and the bumped stored tip, never lower it below
+		// them
+		tip := t.raiseTipFromHistory(ctx, bigMax(gasTipCap, bumped(stored.GasTipCap)), true)
 		gasFeeCap = addToFeeCap(gasFeeCap, gasTipCap, tip)
 		gasTipCap = tip
 	}

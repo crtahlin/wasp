@@ -13,7 +13,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethersphere/bee/v2/pkg/log"
@@ -595,11 +594,6 @@ func (m *mockchainBackend) BalanceAt(ctx context.Context, address common.Address
 
 func (m *mockchainBackend) SuggestedFeeAndTip(ctx context.Context, gasPrice *big.Int, boostPercent int) (*big.Int, *big.Int, error) {
 	return big.NewInt(4), big.NewInt(5), nil
-}
-
-// FeeHistory fails: the history tip falls back to the suggestion.
-func (*mockchainBackend) FeeHistory(context.Context, uint64, *big.Int, []float64) (*ethereum.FeeHistory, error) {
-	return nil, errors.New("no fee history")
 }
 
 type contractCall int

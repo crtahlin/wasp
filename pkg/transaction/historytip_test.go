@@ -28,11 +28,13 @@ import (
 const historyTestBaseFee = 100
 
 // historyChain is a backend whose suggested tip and fee history the test
-// sets, and which records every signed transaction.
+// sets, and which records every signed transaction. A new fee history
+// comes with a new block, since the service reads it once per block.
 type historyChain struct {
 	mu         sync.Mutex
+	block      uint64
 	tip        *big.Int   // the suggested tip
-	rewards    []*big.Int // the 10th-percentile tip of each block
+	rewards    []*big.Int // the 10th-percentile tip of each block, oldest first
 	historyErr error
 	hang       bool // FeeHistory waits until its context ends
 	historyCtx context.Context
@@ -49,19 +51,40 @@ func (c *historyChain) setTip(v *big.Int) {
 // setRewards gives each of 20 blocks the same 10th-percentile tip; nil
 // gives blocks without rewards.
 func (c *historyChain) setRewards(v *big.Int) {
+	rewards := make([]*big.Int, 20)
+	for i := range rewards {
+		rewards[i] = v
+	}
+	c.setRewardList(rewards)
+}
+
+// setRewardList gives the blocks of the history these 10th-percentile
+// tips, oldest first, in a new block.
+func (c *historyChain) setRewardList(rewards []*big.Int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.historyErr = nil
-	c.rewards = nil
-	for range 20 {
-		c.rewards = append(c.rewards, v)
-	}
+	c.rewards = rewards
+	c.block++
 }
 
 func (c *historyChain) setHistoryErr(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.historyErr = err
+	c.block++
+}
+
+func (c *historyChain) nextBlock() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.block++
+}
+
+func (c *historyChain) historyCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
 }
 
 func (c *historyChain) last(t *testing.T) *types.Transaction {
@@ -78,6 +101,11 @@ func newHistoryService(t *testing.T, c *historyChain) transaction.Service {
 	t.Helper()
 	svc, err := transaction.NewService(log.Noop, common.HexToAddress("0xddff"),
 		backendmock.New(
+			backendmock.WithBlockNumberFunc(func(context.Context) (uint64, error) {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				return c.block, nil
+			}),
 			backendmock.WithSendTransactionFunc(func(context.Context, *types.Transaction) error { return nil }),
 			backendmock.WithPendingNonceAtFunc(func(context.Context, common.Address) (uint64, error) { return 1, nil }),
 			backendmock.WithSuggestedFeeAndTipFunc(func(_ context.Context, _ *big.Int, _ int) (*big.Int, *big.Int, error) {
@@ -276,16 +304,16 @@ func TestTipFromHistoryUnavailable(t *testing.T) {
 			if tip := c.last(t).GasTipCap(); tip.Cmp(big.NewInt(7)) != 0 {
 				t.Fatalf("tip %s, want the suggested 7 wei", tip)
 			}
+			// the replacement comes in a later block, so it reads the
+			// history again
+			c.nextBlock()
 			if _, err := svc.ReplaceTransaction(context.Background(), original, nil); err != nil {
 				t.Fatalf("replace: %v", err)
 			}
 			if tip := c.last(t).GasTipCap(); tip.Cmp(big.NewInt(8)) != 0 {
 				t.Fatalf("replacement tip %s, want the bumped stored 8 wei", tip)
 			}
-			c.mu.Lock()
-			calls := c.calls
-			c.mu.Unlock()
-			if calls != 2 {
+			if calls := c.historyCalls(); calls != 2 {
 				t.Fatalf("%d fee history reads, want 2", calls)
 			}
 		})
@@ -394,4 +422,44 @@ func TestTipFromHistoryHangs(t *testing.T) {
 			t.Fatal("the fee history read is persistent")
 		}
 	})
+}
+
+// A replacement's tip is also at least the recent tip, the median of the
+// last recentTipBlocks blocks' 10th-percentile tips plus 10 %, so it
+// follows a sudden rise that the median of 20 blocks lags; the first send
+// keeps the 20-block median (#796 test 11).
+func TestRecentTipAtReplacement(t *testing.T) {
+	t.Parallel()
+
+	gwei := big.NewInt(1_000_000_000)
+	rewards := make([]*big.Int, 20)
+	for i := range rewards {
+		rewards[i] = big.NewInt(2)
+	}
+	for i := 17; i < 20; i++ {
+		rewards[i] = gwei
+	}
+	c := &historyChain{tip: big.NewInt(1)}
+	c.setRewardList(rewards)
+	svc := newHistoryService(t, c)
+
+	original, err := svc.Send(context.Background(), historyRequest(true), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the median of 17 blocks at 2 wei and 3 at 1 gwei is 2 wei; plus
+	// 10 %, rounded up, 3 wei
+	if tip := c.last(t).GasTipCap(); tip.Cmp(big.NewInt(3)) != 0 {
+		t.Fatalf("first tip %s, want the 20-block median plus 10 %%, 3 wei", tip)
+	}
+
+	if _, err := svc.ReplaceTransaction(context.Background(), original, nil); err != nil {
+		t.Fatal(err)
+	}
+	if tip, want := c.last(t).GasTipCap(), big.NewInt(1_100_000_000); tip.Cmp(want) < 0 {
+		t.Fatalf("replacement tip %s, want the median of the last 3 blocks plus 10 %%, at least %s", tip, want)
+	}
+	if calls := c.historyCalls(); calls != 1 {
+		t.Fatalf("%d fee history reads for a send and a replacement in one block, want 1", calls)
+	}
 }

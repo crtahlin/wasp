@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethersphere/bee/v2/pkg/crypto"
@@ -57,7 +56,6 @@ type ChainBackend interface {
 	HeaderByNumber(context.Context, *big.Int) (*types.Header, error)
 	BalanceAt(ctx context.Context, address common.Address, block *big.Int) (*big.Int, error)
 	SuggestedFeeAndTip(ctx context.Context, gasPrice *big.Int, boostPercent int) (*big.Int, *big.Int, error)
-	FeeHistory(ctx context.Context, blockCount uint64, lastBlock *big.Int, rewardPercentiles []float64) (*ethereum.FeeHistory, error)
 }
 
 type Health interface {
@@ -894,11 +892,16 @@ func (a *Agent) HasEnoughFundsToPlay(ctx context.Context) (*big.Int, bool, error
 		return nil, false, err
 	}
 
-	// priced as the lottery transactions are, with the tip from recent
-	// blocks, so a node that can commit can also afford its reveal (#796)
-	price, _, err := transaction.SuggestedFeeAndHistoryTip(ctx, a.backend, a.logger, redistribution.BoostTipPercent)
+	price, tip, err := a.backend.SuggestedFeeAndTip(ctx, nil, redistribution.BoostTipPercent)
 	if err != nil {
 		return nil, false, err
+	}
+	// priced as the lottery transactions are, with the tip from recent
+	// blocks, so a node that can commit can also afford its reveal; the
+	// transaction service reads the fee history once per block for this
+	// check and its sends (#796)
+	if raised := a.revealer.txService.RaiseTipFromHistory(ctx, tip); raised.Cmp(tip) > 0 {
+		price = new(big.Int).Add(price, new(big.Int).Sub(raised, tip))
 	}
 
 	avgTxFee := new(big.Int).Mul(big.NewInt(avgTxGas), price)
