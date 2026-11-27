@@ -160,12 +160,22 @@ the original. When it is set and `GasPrice` is nil, `prepareTransaction` and
    the 20 per-block values (all blocks, full or not), and add
    `historyTipMarginPercent` (10 %);
 3. for a replacement, the stored tip plus `ReplacementBumpPercent` (as today,
-   so go-ethereum's 10 % rule for replacements still holds).
+   so go-ethereum's 10 % rule for replacements still holds);
+4. for a replacement, also the **recent tip**: the median of the 10th-percentile
+   tips of the last `recentTipBlocks` (3) blocks, plus the same margin (added
+   2026-11-27, see Measurement).
 
 The result is capped at `maxHistoryTip` (100 gwei), but never below today's
 tip or the bumped stored tip, so the cap can only lower what the history adds.
 The fee cap stays as today (the multiple of the base fee plus the tip, and the
 bumped stored cap for a replacement).
+
+The history is read at most once per block: the answer is kept with the
+block number it was read at and reused until a new block is seen (added
+2026-11-27). Without that, every `GET /redistributionstate` costs one
+`eth_feeHistory` call, because the balance check behind it (part 4) prices
+with the history tip; a dashboard that polls the node would multiply the
+node's RPC calls.
 
 When `eth_feeHistory` fails or returns no rewards (an endpoint without the
 method, a thin history), the tip is today's, and the failure is logged at
@@ -249,6 +259,13 @@ well, through the same helper as part 1.
    sent: the loop returns done, and the revealer reveals.
 9. **Balance check.** A balance that covers 15 transactions at a 1 wei tip but
    not at the history tip: the node does not play the round.
+10. **One history read per block.** Twenty balance checks and two sends within
+    one block make one `eth_feeHistory` call; the first read after a new
+    block makes a new one.
+11. **Recent tip at a replacement.** The last 20 blocks' 10th-percentile tips
+    are 2 wei except the last 3, which are 1 gwei: the replacement's tip is
+    at least 1.1 gwei, while the first send's tip stays at the 20-block
+    median.
 
 Each test is mutation-checked: remove the history tip, the replacement, the
 hook or the balance price, and the matching test must fail with a message,
@@ -267,17 +284,36 @@ commit, reveal and claim calls.
 - **Replay, done (this spec).** The tables above, from 30 days of public
   `eth_feeHistory` data. The method is described in Problem and is enough to
   repeat it; any public Gnosis endpoint serves the data.
-- **Unit:** tests 1 to 9, mutation-checked.
-- **bench-1 test-network node (Sepolia, staked), before the merge.** Put a
-  proxy between the node and its endpoints that answers
-  `eth_maxPriorityFeePerGas` with 1 wei and `eth_feeHistory` with
-  10th-percentile tips of 1 gwei. Until the node has played at least three
-  rounds, check on chain that the commit, the reveal and (when won) the
-  claim carry a tip of at least 1.1 gwei, and that a commit held back by the
-  proxy (dropped sends for 6 blocks) is replaced and mined within the commit
-  phase. Sepolia
-  blocks are not full, so this checks the node's pricing and replacement, not
-  inclusion under congestion.
+- **Unit:** tests 1 to 11, mutation-checked.
+- **Code-level replay, before the merge.** A Go harness drives the real
+  pricing and replacement code of this change (the transaction service and
+  the phase loop) against a simulated chain fed with the recorded Gnosis fee
+  history and the inclusion model above, for every phase of every round, for
+  this build and for `main`. It replaces the Python reimplementation as the
+  evidence that the code, not a model of it, behaves as the tables say.
+- **Private chain on bench-1, before the merge.** The real contracts
+  (`ethersphere/bee-localchain`, the contract version of the ABI module
+  v0.9.4) on a local chain with 1 s blocks, where the test nodes are the only
+  stakers: each is selected in every round and wins it, so every round of
+  2.5 minutes exercises commit, reveal and claim. Three local nodes: two of
+  this build, one of `main` as the control. A congestion generator replays
+  recorded Gnosis blocks into the chain (filler transactions from funded test
+  accounts at the recorded tips and block fullness): the commit phase of round
+  325461, round 325251, the claim phase of round 325190, the bench-2 probe's
+  spike at block 49488638, a stretch in which blocks have room but nothing
+  below 4 to 10 M wei is included, and calm rounds. Pass: this build misses
+  no commit, reveal or claim in any episode; the `main` node misses where
+  production did. If the `main` node does not miss, the generator does not
+  reproduce the episode, and that is fixed before any result is used. This
+  measures pricing, replacement and inclusion through the real contracts; it
+  does not show how Gnosis validators choose transactions, which the bench-2
+  probe does.
+
+  It replaces the Sepolia node check planned first: that node is selected in
+  about 5.7 % of rounds (18 of 317 over 7 days), and an 11-hour run on
+  2026-11-26 was not selected once, so it measured nothing about the lottery.
+  It did show that the balance check reads the history (part 4) and led to
+  the per-block read in part 1.
 - **bench-2 host, Gnosis, before the merge.** Inclusion under real
   congestion, which the replay only models: from a separate probe wallet
   funded with a little xDAI (never a node's own, whose nonces the node owns),
@@ -285,9 +321,21 @@ commit, reveal and claim calls.
   self-transfer every 10 blocks priced by part 1 for at least 48 hours, and
   record the blocks to inclusion and the full-block share at each send.
   Positive: every probe included within 6 blocks. Negative: a probe that
-  waits longer during full blocks, which would mean the model's threshold is
-  too low and the percentile must rise. One bench at a time; the two benches
+  waits longer during full blocks. One bench at a time; the two benches
   share a host. Cost: at most a few cents of xDAI.
+
+  **First 24 hours (2026-11-26 to 27):** 757 probes, 751 included within 2
+  blocks. One waited 12 blocks: it was sent at block 49488638, when the
+  10th-percentile tip of the previous 20 blocks was 1 to 39,000 wei; from
+  the next block the included tips jumped to 0.1 to 1 gwei for about 10
+  blocks. The median of 20 blocks lags such a jump, so the replacement after
+  6 blocks was priced at 76 wei and the probe waited the jump out. The
+  replay reproduces it (13 blocks against 12 measured). Raising the
+  percentile would raise every tip to cover a rare jump; pricing the
+  replacement from the last 3 blocks as well (part 1, item 4) outbids it
+  instead. In the replay that cuts the wait to 7 blocks with no new misses
+  over 3,486 rounds (2026-10-27 to 2026-11-27); the highest tip rises from
+  1.16 to 5.67 gwei (about 0.001 xDAI on a claim).
 - **Production, after the merge.** Over the fleet, count lottery transactions
   not mined in their phase (#847 makes them visible in the log), commits and
   claims that needed a replacement, and `StakeFrozen` events, against the
@@ -330,6 +378,7 @@ it matters (rule 8).
 |---|---|---|---|
 | `historyTipBlocks` | 20 blocks | a slower reaction to a change in what blocks include; one larger `eth_feeHistory` answer per send | a tip that follows a single block's outlier more closely (5 blocks still gave no misses in the replay) |
 | `historyTipPercentile` | 10th | a higher tip in every round, paid also when blocks have room | a tip that a full block more often leaves out |
+| `recentTipBlocks` | 3 blocks | a replacement that follows a sudden rise more slowly | a replacement that follows one block's outlier; 1 block gave the same result as 3 in the replay |
 | `historyTipMarginPercent` | 10 % | a slightly higher tip | none measured: 0 % also gave no misses |
 | `maxHistoryTip` | 100 gwei | a larger worst-case tip if the history is wrong (100 gwei on a 450,000-gas claim is about 0.045 xDAI) | a ceiling below what congested blocks include; the highest tip the proposed policy paid in the replay was 1.16 gwei |
 | `revealStepBlocks`, `revealReplaceAfterBlocks`, `revealFeeHeadroomBlocks` | 3, 6, 3 blocks | as in the #795 spec, now for commit and claim too | as in the #795 spec |
