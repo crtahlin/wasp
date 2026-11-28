@@ -42,6 +42,12 @@ type metrics struct {
 	// RoundMismatch counts commits skipped because the round the node computed
 	// disagreed with the contract's (#540).
 	RoundMismatch prometheus.Counter
+	// CommitRoundWaits counts reads of the contract's round repeated
+	// because the contract still reported the previous round, and
+	// CommitRoundCaughtUp the waits that ended with the contract on the
+	// node's round (#838).
+	CommitRoundWaits    prometheus.Counter
+	CommitRoundCaughtUp prometheus.Counter
 	// SkippedBlockedNonce counts commits and claims not signed because a
 	// nonce of the node is blocked (#819), by phase.
 	SkippedBlockedNonce *prometheus.CounterVec
@@ -168,6 +174,18 @@ func newMetrics() metrics {
 			Subsystem: subsystem,
 			Name:      "round_mismatch_total",
 			Help:      "Number of commits skipped because the node's round disagreed with the contract's.",
+		}),
+		CommitRoundWaits: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "commit_round_waits",
+			Help:      "Reads of the contract's round repeated before a commit because the contract still reported the previous round (wasp #838).",
+		}),
+		CommitRoundCaughtUp: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "commit_round_caught_up",
+			Help:      "Commit waits that ended with the contract on the node's round.",
 		}),
 		ErrCommit: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,

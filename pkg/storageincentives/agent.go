@@ -49,6 +49,11 @@ const (
 	// whether the node plays the coming round when the answer is an error
 	// that may pass a block later (#773).
 	playCheckAttempts = 6
+
+	// commitRoundAttempts is how many times handleCommit reads the
+	// contract's round while the contract still reports the previous one
+	// (#838).
+	commitRoundAttempts = 6
 )
 
 type ChainBackend interface {
@@ -321,12 +326,22 @@ func (a *Agent) handleCommit(ctx context.Context, round uint64) error {
 	// gas; not committing costs nothing. A failed call is not a disagreement:
 	// the node plays as it always has.
 	//
-	// A difference of one round is tolerated. The node's block number is an
-	// estimate that can run a block ahead of the chain, so at the first block
-	// of a round the contract, asked at the latest block, still reports the
-	// previous round, and the commit would succeed once mined. A changed
-	// round length makes the two differ by far more than one.
-	contractRound, err := a.contract.CurrentRound(ctx)
+	// A difference of one round is not a disagreement. The node's block
+	// number is an estimate that can run a block ahead of the chain, so at
+	// the first block of a round the contract, asked at the latest block,
+	// still reports the previous round. A commit sent then can be mined in
+	// the last block of that round and revert with CommitRoundNotStarted(),
+	// so waitForCommitRound waits until the contract reports the node's
+	// round (#838). A changed round length makes the two differ by far more
+	// than one.
+	//
+	// The wait holds commitLock, for at most commitRoundAttempts-1 block
+	// times. A commit published again from the sample phase waits behind
+	// it, as it does behind a commit being sent.
+	contractRound, send, err := a.waitForCommitRound(ctx, round)
+	if !send {
+		return nil
+	}
 	switch {
 	case err != nil:
 		a.logger.Debug("could not read the contract's round, committing on the node's own", "round", round, "error", err)
@@ -390,6 +405,42 @@ func (a *Agent) transactionService() transaction.Service {
 		return nil
 	}
 	return a.revealer.txService
+}
+
+// waitForCommitRound reads the contract's round before a commit. While the
+// contract reports exactly the round before the node's, the node is a block
+// ahead of the chain and a commit sent now could be mined in that round and
+// revert (#838), so it reads again after one block time, up to
+// commitRoundAttempts reads. It returns the last read's answer, and send
+// false when ctx ends during the wait, in which case no commit is sent. A
+// read error, a contract on the node's round, a contract ahead of it or a
+// contract more than one round away is returned at once. When every read
+// still reports the previous round, it returns that answer with one
+// warning: an endpoint lagging that long, not an early node, is the likely
+// cause, and the commit can still be mined in the right round.
+func (a *Agent) waitForCommitRound(ctx context.Context, round uint64) (contractRound uint64, send bool, err error) {
+	for attempt := 1; ; attempt++ {
+		contractRound, err = a.contract.CurrentRound(ctx)
+		if err != nil || contractRound+1 != round {
+			if err == nil && contractRound == round && attempt > 1 {
+				a.metrics.CommitRoundCaughtUp.Inc()
+			}
+			return contractRound, true, err
+		}
+		if attempt >= commitRoundAttempts {
+			a.logger.Warning("commit round wait ran out, committing", "round", round, "contract_round", contractRound, "attempts", attempt)
+			return contractRound, true, nil
+		}
+		a.metrics.CommitRoundWaits.Inc()
+		a.logger.Debug("contract still reports the previous round, reading again after one block", "round", round, "attempt", attempt)
+		timer := time.NewTimer(a.blockTime())
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return contractRound, false, nil
+		case <-timer.C:
+		}
+	}
 }
 
 // roundsDiffer reports whether the contract's round and the node's differ by
