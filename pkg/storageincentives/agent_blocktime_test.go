@@ -107,8 +107,29 @@ func TestAgentRoundCheck(t *testing.T) {
 		{
 			// At the first block of a round the node's estimated block can
 			// run one ahead of the chain, so the contract still reports the
-			// previous round. The commit is sent: it lands in the new round.
-			name: "contract one round behind",
+			// previous round. The node waits a block and reads again (#838);
+			// once the contract reports the node's round, the commit is sent.
+			name: "contract one round behind, then catches up",
+			round: func(b *mockchainBackend) func(context.Context) (uint64, error) {
+				var reads atomic.Int64
+				return func(context.Context) (uint64, error) {
+					b.mu.Lock()
+					defer b.mu.Unlock()
+					if reads.Add(1) == 1 {
+						return (b.block-1)/blocksPerRound - 1, nil
+					}
+					return (b.block - 1) / blocksPerRound, nil
+				}
+			},
+			wantCommit: true,
+		},
+		{
+			// A contract that keeps reporting the previous round is waited
+			// for (#838). Here the commit phase is 3 blocks, shorter than
+			// the commitRoundAttempts reads, so the phase ends during the
+			// wait and nothing is sent. Before #838 the commit was sent at
+			// once and could be mined in the previous round and revert.
+			name: "contract one round behind for the whole phase",
 			round: func(b *mockchainBackend) func(context.Context) (uint64, error) {
 				return func(context.Context) (uint64, error) {
 					b.mu.Lock()
@@ -116,7 +137,7 @@ func TestAgentRoundCheck(t *testing.T) {
 					return (b.block-1)/blocksPerRound - 1, nil
 				}
 			},
-			wantCommit: true,
+			wantCommit: false,
 		},
 		{
 			name: "contract disagrees",
