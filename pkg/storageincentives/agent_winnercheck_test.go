@@ -227,7 +227,16 @@ func TestWinnerCheckGivesUp(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		r := runWinnerCheck(t, context.Background(), func(int) (bool, error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		r := runWinnerCheck(t, ctx, func(call int) (bool, error) {
+			// Timers in the bubble fire at once, so a check without its
+			// attempt bound would loop for ever. Report it and end the
+			// claim phase instead.
+			if call > winnerCheckAttempts {
+				t.Errorf("IsWinner call %d, want at most %d", call, winnerCheckAttempts)
+				cancel()
+			}
 			return false, errNotClaimPhase
 		})
 		if !errors.Is(r.err, errNotClaimPhase) {
