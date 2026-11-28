@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -92,8 +93,20 @@ type winnerCheckRun struct {
 	errWinner float64
 	retries   float64
 	recovered float64
-	warnings  int // "winner check failed after retries" lines
+	warnings  int // "winner check failed after retries" lines at warning level
 	notWinner int // "not a winner" lines
+}
+
+// warningLines counts the captured log lines at warning level whose
+// message is msg.
+func warningLines(logs, msg string) int {
+	n := 0
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, `"level"="warning"`) && strings.Contains(line, `"msg"="`+msg+`"`) {
+			n++
+		}
+	}
+	return n
 }
 
 // runWinnerCheck runs one claim phase of a node that revealed, with the
@@ -123,9 +136,31 @@ func runWinnerCheck(t *testing.T, ctx context.Context, answer func(call int) (bo
 		errWinner: gaugeValue(t, f.agent.metrics.ErrWinner),
 		retries:   gaugeValue(t, f.agent.metrics.WinnerCheckRetries),
 		recovered: gaugeValue(t, f.agent.metrics.WinnerCheckRecovered),
-		warnings:  logs.count("winner check failed after retries"),
+		warnings:  warningLines(logs.String(), "winner check failed after retries"),
 		notWinner: logs.count("not a winner"),
 	}
+}
+
+// A true answer on the first call is the ordinary path: one call, one
+// claim, nothing retried, recovered, counted as an error or warned about.
+func TestWinnerCheckFirstCallWins(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		r := runWinnerCheck(t, context.Background(), func(int) (bool, error) {
+			return true, nil
+		})
+		if r.err != nil {
+			t.Fatalf("handleClaim: %v", r.err)
+		}
+		if r.calls != 1 || r.claims != 1 {
+			t.Fatalf("%d IsWinner calls and %d claims, want 1 and 1", r.calls, r.claims)
+		}
+		if r.retries != 0 || r.recovered != 0 || r.errWinner != 0 || r.warnings != 0 {
+			t.Fatalf("retries = %v, recovered = %v, win_phase_errors = %v, warnings = %d, want all 0",
+				r.retries, r.recovered, r.errWinner, r.warnings)
+		}
+	})
 }
 
 // Test 1: a NotClaimPhase() revert, then true. The node claims once in the
@@ -189,10 +224,11 @@ func TestWinnerCheckOtherRevertNotRetried(t *testing.T) {
 // Test 3: an error without revert data, then false. The check is asked
 // once more and ends with "not a winner"; nothing is claimed.
 //
-// This covers the agent's rule only. In a running node the claim phase's
-// context is marked persistent, so the failover backend keeps retrying a
-// transport error itself and rarely returns one to the agent before the
-// phase ends.
+// This covers the agent's rule only. In a running node with more than one
+// RPC endpoint the claim phase's context is marked persistent, so the
+// failover backend keeps retrying a transport error itself and rarely
+// returns one to the agent before the phase ends. A node with one endpoint
+// has no failover backend, and there the agent's retry is what applies.
 func TestWinnerCheckTransportErrorThenFalse(t *testing.T) {
 	t.Parallel()
 
@@ -225,6 +261,11 @@ func TestWinnerCheckTransportErrorThenFalse(t *testing.T) {
 // then the last error is returned, counted once and warned about once.
 func TestWinnerCheckGivesUp(t *testing.T) {
 	t.Parallel()
+
+	// The spec fixes the bound at 6 calls.
+	if winnerCheckAttempts != 6 {
+		t.Fatalf("winnerCheckAttempts = %d, want 6 as the spec sets it", winnerCheckAttempts)
+	}
 
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

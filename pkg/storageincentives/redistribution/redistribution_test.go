@@ -225,16 +225,24 @@ func TestRedistribution(t *testing.T) {
 	t.Run("revert named", func(t *testing.T) {
 		t.Parallel()
 
+		const unknown = "0x01020304"
+		isWinner := func(c redistribution.Contract) error { _, err := c.IsWinner(ctx); return err }
+		isPlaying := func(c redistribution.Contract) error { _, err := c.IsPlaying(ctx, 9); return err }
 		for _, tc := range []struct {
-			name      string
-			data      string
-			call      func(redistribution.Contract) error
-			want      string
+			name string
+			data string
+			call func(redistribution.Contract) error
+			// want is the name the error must contain before the revert.
+			want string
+			// exact, for an unknown selector, is the whole error text, as
+			// it was before #855.
+			exact     string
 			retryable func(error) bool
 		}{
-			{"IsWinner NotClaimPhase", "0x6f118d82", func(c redistribution.Contract) error { _, err := c.IsWinner(ctx); return err }, "NotClaimPhase() 0x6f118d82: ", redistribution.WinnerCheckRetryable},
-			{"IsPlaying WrongPhase", "0xe2586bcc", func(c redistribution.Contract) error { _, err := c.IsPlaying(ctx, 9); return err }, "WrongPhase() 0xe2586bcc: ", redistribution.PlayCheckRetryable},
-			{"IsWinner unknown selector", "0x01020304", func(c redistribution.Contract) error { _, err := c.IsWinner(ctx); return err }, "", nil},
+			{"IsWinner NotClaimPhase", "0x6f118d82", isWinner, "NotClaimPhase() 0x6f118d82: ", "", redistribution.WinnerCheckRetryable},
+			{"IsPlaying WrongPhase", "0xe2586bcc", isPlaying, "WrongPhase() 0xe2586bcc: ", "", redistribution.PlayCheckRetryable},
+			{"IsWinner unknown selector", unknown, isWinner, "", fmt.Sprintf("IsWinner: overlay %v : %v", common.BytesToHash(overlay.Bytes()), revertError{unknown}), nil},
+			{"IsPlaying unknown selector", unknown, isPlaying, "", fmt.Sprintf("IsPlaying: owner %v depth 9: %v", owner, revertError{unknown}), nil},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
@@ -253,12 +261,9 @@ func TestRedistribution(t *testing.T) {
 				if err == nil {
 					t.Fatal("expected an error")
 				}
-				if tc.want == "" {
-					// An unknown selector keeps the text the error had
-					// before #855.
-					want := fmt.Sprintf("IsWinner: overlay %v : %v", common.BytesToHash(overlay.Bytes()), revert)
-					if err.Error() != want {
-						t.Fatalf("error %q, want %q", err, want)
+				if tc.exact != "" {
+					if err.Error() != tc.exact {
+						t.Fatalf("error %q, want %q", err, tc.exact)
 					}
 				} else if !strings.Contains(err.Error(), tc.want+revert.Error()) {
 					t.Fatalf("error %q does not contain %q", err, tc.want+revert.Error())
