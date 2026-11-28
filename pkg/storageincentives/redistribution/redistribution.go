@@ -295,7 +295,6 @@ func (c *contract) sendAndWait(ctx context.Context, request *transaction.TxReque
 	return txHash, nil
 }
 
-// callTx simulates a transaction based on tx request.
 // revertName returns "Name() 0x<selector>: " when err carries revert data
 // whose selector is one of the Redistribution contract's errors, so that a
 // log line names the error instead of showing only the selector (#855). It
@@ -314,6 +313,7 @@ func (c *contract) revertName(err error) string {
 	return fmt.Sprintf("%s 0x%x: ", abiErr.Sig, id)
 }
 
+// callTx simulates a transaction based on tx request.
 func (c *contract) callTx(ctx context.Context, callData []byte) ([]byte, error) {
 	result, err := c.txService.Call(ctx, &transaction.TxRequest{
 		To:   &c.incentivesContractAddress,
