@@ -252,25 +252,57 @@ func TestWinnerCheckGivesUp(t *testing.T) {
 }
 
 // Test 5: the claim phase ends during the wait. The check returns the error
-// without asking again, instead of using up its attempts.
+// without asking again, instead of using up its attempts. Two cases: the
+// context has already ended when the first call fails, and the context ends
+// while the timer before the second call is pending.
 func TestWinnerCheckStopsAtPhaseEnd(t *testing.T) {
 	t.Parallel()
 
-	synctest.Test(t, func(t *testing.T) {
-		// A deadline already in the past cancels synchronously.
-		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-		defer cancel()
-		r := runWinnerCheck(t, ctx, func(int) (bool, error) {
-			return false, errNotClaimPhase
+	for _, tc := range []struct {
+		name string
+		// setup returns the claim phase's context, its cancel and the IsWinner
+		// answers.
+		setup func() (context.Context, context.CancelFunc, func(int) (bool, error))
+	}{
+		{"already ended", func() (context.Context, context.CancelFunc, func(int) (bool, error)) {
+			// A deadline already in the past cancels synchronously.
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			return ctx, cancel, func(int) (bool, error) { return false, errNotClaimPhase }
+		}},
+		{"ends during the wait", func() (context.Context, context.CancelFunc, func(int) (bool, error)) {
+			ctx, cancel := context.WithCancel(context.Background())
+			return ctx, cancel, func(call int) (bool, error) {
+				if call == 1 {
+					// The bubble's clock runs only when every goroutine
+					// waits, so this fires halfway through the one-block
+					// wait that follows this answer, before the retry.
+					time.AfterFunc(testBlockTime/2, cancel)
+				}
+				return false, errNotClaimPhase
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel, answer := tc.setup()
+				defer cancel()
+				start := time.Now()
+				r := runWinnerCheck(t, ctx, answer)
+				if !errors.Is(r.err, errNotClaimPhase) {
+					t.Fatalf("handleClaim = %v, want the NotClaimPhase() revert", r.err)
+				}
+				if r.calls != 1 {
+					t.Fatalf("%d IsWinner calls after the context ended, want 1", r.calls)
+				}
+				if r.errWinner != 1 || r.warnings != 1 {
+					t.Fatalf("win_phase_errors = %v, warnings = %d, want 1 and 1", r.errWinner, r.warnings)
+				}
+				if waited := time.Since(start); waited >= testBlockTime {
+					t.Fatalf("returned after %v, want before the %v retry timer", waited, testBlockTime)
+				}
+			})
 		})
-		if !errors.Is(r.err, errNotClaimPhase) {
-			t.Fatalf("handleClaim = %v, want the NotClaimPhase() revert", r.err)
-		}
-		if r.calls != 1 {
-			t.Fatalf("%d IsWinner calls after the context ended, want 1", r.calls)
-		}
-		if r.errWinner != 1 || r.warnings != 1 {
-			t.Fatalf("win_phase_errors = %v, warnings = %d, want 1 and 1", r.errWinner, r.warnings)
-		}
-	})
+	}
 }

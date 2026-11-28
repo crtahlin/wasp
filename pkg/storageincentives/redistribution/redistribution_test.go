@@ -254,8 +254,11 @@ func TestRedistribution(t *testing.T) {
 					t.Fatal("expected an error")
 				}
 				if tc.want == "" {
-					if strings.Contains(err.Error(), "()") {
-						t.Fatalf("error %q names an error for an unknown selector", err)
+					// An unknown selector keeps the text the error had
+					// before #855.
+					want := fmt.Sprintf("IsWinner: overlay %v : %v", common.BytesToHash(overlay.Bytes()), revert)
+					if err.Error() != want {
+						t.Fatalf("error %q, want %q", err, want)
 					}
 				} else if !strings.Contains(err.Error(), tc.want+revert.Error()) {
 					t.Fatalf("error %q does not contain %q", err, tc.want+revert.Error())
