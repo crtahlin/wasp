@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -214,6 +215,58 @@ func TestRedistribution(t *testing.T) {
 		}
 		if !isWinner {
 			t.Fatalf("expected true, got %t", isWinner)
+		}
+	})
+
+	// #855 test 7: a revert whose selector is one of the contract's errors
+	// is named in the returned error, which still unwraps to the revert, so
+	// the retry rules classify it as before. An unknown selector is left as
+	// it was.
+	t.Run("revert named", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			name      string
+			data      string
+			call      func(redistribution.Contract) error
+			want      string
+			retryable func(error) bool
+		}{
+			{"IsWinner NotClaimPhase", "0x6f118d82", func(c redistribution.Contract) error { _, err := c.IsWinner(ctx); return err }, "NotClaimPhase() 0x6f118d82: ", redistribution.WinnerCheckRetryable},
+			{"IsPlaying WrongPhase", "0xe2586bcc", func(c redistribution.Contract) error { _, err := c.IsPlaying(ctx, 9); return err }, "WrongPhase() 0xe2586bcc: ", redistribution.PlayCheckRetryable},
+			{"IsWinner unknown selector", "0x01020304", func(c redistribution.Contract) error { _, err := c.IsWinner(ctx); return err }, "", nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				revert := revertError{tc.data}
+				contract := redistribution.New(overlay, owner, log.Noop,
+					transactionMock.New(
+						transactionMock.WithCallFunc(func(context.Context, *transaction.TxRequest) ([]byte, error) {
+							return nil, revert
+						}),
+					),
+					redistributionContractAddress,
+					redistributionContractABI,
+					0,
+				)
+				err := tc.call(contract)
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				if tc.want == "" {
+					if strings.Contains(err.Error(), "()") {
+						t.Fatalf("error %q names an error for an unknown selector", err)
+					}
+				} else if !strings.Contains(err.Error(), tc.want+revert.Error()) {
+					t.Fatalf("error %q does not contain %q", err, tc.want+revert.Error())
+				}
+				if !errors.Is(err, revert) {
+					t.Fatalf("error %q does not unwrap to the revert", err)
+				}
+				if tc.retryable != nil && !tc.retryable(err) {
+					t.Fatalf("error %q is no longer retryable", err)
+				}
+			})
 		}
 	})
 

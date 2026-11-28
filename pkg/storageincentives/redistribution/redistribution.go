@@ -85,7 +85,7 @@ func (c *contract) IsPlaying(ctx context.Context, depth uint8) (bool, error) {
 
 	result, err := c.callTx(ctx, callData)
 	if err != nil {
-		return false, fmt.Errorf("IsPlaying: owner %v depth %d: %w", c.owner, depth, err)
+		return false, fmt.Errorf("IsPlaying: owner %v depth %d: %s%w", c.owner, depth, c.revertName(err), err)
 	}
 
 	results, err := c.incentivesContractABI.Unpack("isParticipatingInUpcomingRound", result)
@@ -105,7 +105,7 @@ func (c *contract) IsWinner(ctx context.Context) (isWinner bool, err error) {
 
 	result, err := c.callTx(ctx, callData)
 	if err != nil {
-		return false, fmt.Errorf("IsWinner: overlay %v : %w", common.BytesToHash(c.overlay.Bytes()), err)
+		return false, fmt.Errorf("IsWinner: overlay %v : %s%w", common.BytesToHash(c.overlay.Bytes()), c.revertName(err), err)
 	}
 
 	results, err := c.incentivesContractABI.Unpack("isWinner", result)
@@ -296,6 +296,24 @@ func (c *contract) sendAndWait(ctx context.Context, request *transaction.TxReque
 }
 
 // callTx simulates a transaction based on tx request.
+// revertName returns "Name() 0x<selector>: " when err carries revert data
+// whose selector is one of the Redistribution contract's errors, so that a
+// log line names the error instead of showing only the selector (#855). It
+// returns "" for any other error.
+func (c *contract) revertName(err error) string {
+	data, ok := revertData(err)
+	if !ok || len(data) < 4 {
+		return ""
+	}
+	var id [4]byte
+	copy(id[:], data[:4])
+	abiErr, lookupErr := c.incentivesContractABI.ErrorByID(id)
+	if lookupErr != nil {
+		return ""
+	}
+	return fmt.Sprintf("%s 0x%x: ", abiErr.Sig, id)
+}
+
 func (c *contract) callTx(ctx context.Context, callData []byte) ([]byte, error) {
 	result, err := c.txService.Call(ctx, &transaction.TxRequest{
 		To:   &c.incentivesContractAddress,

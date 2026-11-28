@@ -49,6 +49,11 @@ const (
 	// whether the node plays the coming round when the answer is an error
 	// that may pass a block later (#773).
 	playCheckAttempts = 6
+
+	// winnerCheckAttempts is how many times handleClaim asks the contract
+	// whether the node won when the answer is an error that may pass a block
+	// later (#855).
+	winnerCheckAttempts = 6
 )
 
 type ChainBackend interface {
@@ -432,7 +437,7 @@ func (a *Agent) handleClaim(ctx context.Context, round uint64) error {
 
 	a.metrics.ClaimPhase.Inc()
 
-	isWinner, err := a.contract.IsWinner(ctx)
+	isWinner, err := a.isWinner(ctx)
 	if err != nil {
 		a.metrics.ErrWinner.Inc()
 		return err
@@ -510,6 +515,45 @@ func (a *Agent) claim(ctx context.Context, round uint64, proofs redistribution.C
 		func(ctx context.Context, hook transaction.BeforeBroadcastFunc) (common.Hash, error) {
 			return a.contract.Claim(ctx, proofs, hook)
 		}, nil)
+}
+
+// isWinner asks the contract whether the node won the round. An error that
+// may pass a block later (redistribution.WinnerCheckRetryable), such as the
+// NotClaimPhase() revert of a call that lands on the last reveal block, is
+// asked again after one block time, up to winnerCheckAttempts calls, instead
+// of losing the claim on the first failure (#855). A true or false answer is
+// returned at once. Any other error is returned at once. When every attempt
+// fails, or the phase ends first, the last error is returned with one
+// warning; the caller counts it once.
+func (a *Agent) isWinner(ctx context.Context) (bool, error) {
+	for attempt := 1; ; attempt++ {
+		won, err := a.contract.IsWinner(ctx)
+		if err == nil {
+			if attempt > 1 {
+				a.metrics.WinnerCheckRecovered.Inc()
+			}
+			return won, nil
+		}
+		if !redistribution.WinnerCheckRetryable(err) {
+			return false, err
+		}
+		giveUp := attempt >= winnerCheckAttempts
+		if !giveUp {
+			a.metrics.WinnerCheckRetries.Inc()
+			a.logger.Debug("winner check failed, asking again after one block", "attempt", attempt, "error", err)
+			timer := time.NewTimer(a.blockTime())
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				giveUp = true
+			case <-timer.C:
+			}
+		}
+		if giveUp {
+			a.logger.Warning("winner check failed after retries", "attempts", attempt, "error", err)
+			return false, err
+		}
+	}
 }
 
 // isPlaying asks the contract whether the node plays the coming round. An
