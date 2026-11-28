@@ -49,3 +49,46 @@ func TestPlayCheckRetryable(t *testing.T) {
 		})
 	}
 }
+
+// TestWinnerCheckRetryable checks #855 test 6: the winner check retries a
+// NotClaimPhase() revert and an error without revert data, and nothing
+// else. The play check's selector is not retryable here, and the winner
+// check's selector is not retryable for the play check.
+func TestWinnerCheckRetryable(t *testing.T) {
+	t.Parallel()
+
+	const (
+		notClaimPhase  = "0x6f118d82" // keccak256("NotClaimPhase()")[:4]
+		alreadyClaimed = "0x646cf558" // keccak256("AlreadyClaimed()")[:4]
+		wrongPhase     = "0xe2586bcc" // keccak256("WrongPhase()")[:4]
+	)
+	for _, tc := range []struct {
+		name      string
+		err       error
+		winner    bool
+		playCheck bool
+	}{
+		{"nil", nil, false, false},
+		{"NotClaimPhase", revertError{notClaimPhase}, true, false},
+		{"NotClaimPhase wrapped", fmt.Errorf("IsWinner: overlay x : NotClaimPhase() %s: %w", notClaimPhase, revertError{notClaimPhase}), true, false},
+		{"NotClaimPhase with arguments", revertError{notClaimPhase + "00000000000000000000000000000000000000000000000000000000000000ff"}, true, false},
+		{"AlreadyClaimed", revertError{alreadyClaimed}, false, false},
+		{"WrongPhase", revertError{wrongPhase}, false, true},
+		{"short data", revertError{"0x6f11"}, true, true},
+		{"revert without data", revertError{"0x"}, true, true},
+		{"revert with non-string data", revertError{42}, true, true},
+		{"plain error", errors.New("connection reset"), true, true},
+		{"canceled", fmt.Errorf("IsWinner: %w", context.Canceled), false, false},
+		{"deadline", context.DeadlineExceeded, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := redistribution.WinnerCheckRetryable(tc.err); got != tc.winner {
+				t.Fatalf("WinnerCheckRetryable(%v) = %v, want %v", tc.err, got, tc.winner)
+			}
+			if got := redistribution.PlayCheckRetryable(tc.err); got != tc.playCheck {
+				t.Fatalf("PlayCheckRetryable(%v) = %v, want %v", tc.err, got, tc.playCheck)
+			}
+		})
+	}
+}

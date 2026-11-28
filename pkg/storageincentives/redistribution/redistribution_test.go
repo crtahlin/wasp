@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -214,6 +215,66 @@ func TestRedistribution(t *testing.T) {
 		}
 		if !isWinner {
 			t.Fatalf("expected true, got %t", isWinner)
+		}
+	})
+
+	// #855 test 7: a revert whose selector is one of the contract's errors
+	// is named in the returned error, which still unwraps to the revert, so
+	// the retry rules classify it as before. An unknown selector is left as
+	// it was.
+	t.Run("revert named", func(t *testing.T) {
+		t.Parallel()
+
+		const unknown = "0x01020304"
+		isWinner := func(c redistribution.Contract) error { _, err := c.IsWinner(ctx); return err }
+		isPlaying := func(c redistribution.Contract) error { _, err := c.IsPlaying(ctx, 9); return err }
+		for _, tc := range []struct {
+			name string
+			data string
+			call func(redistribution.Contract) error
+			// want is the name the error must contain before the revert.
+			want string
+			// exact, for an unknown selector, is the whole error text, as
+			// it was before #855.
+			exact     string
+			retryable func(error) bool
+		}{
+			{"IsWinner NotClaimPhase", "0x6f118d82", isWinner, "NotClaimPhase() 0x6f118d82: ", "", redistribution.WinnerCheckRetryable},
+			{"IsPlaying WrongPhase", "0xe2586bcc", isPlaying, "WrongPhase() 0xe2586bcc: ", "", redistribution.PlayCheckRetryable},
+			{"IsWinner unknown selector", unknown, isWinner, "", fmt.Sprintf("IsWinner: overlay %v : %v", common.BytesToHash(overlay.Bytes()), revertError{unknown}), nil},
+			{"IsPlaying unknown selector", unknown, isPlaying, "", fmt.Sprintf("IsPlaying: owner %v depth 9: %v", owner, revertError{unknown}), nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				revert := revertError{tc.data}
+				contract := redistribution.New(overlay, owner, log.Noop,
+					transactionMock.New(
+						transactionMock.WithCallFunc(func(context.Context, *transaction.TxRequest) ([]byte, error) {
+							return nil, revert
+						}),
+					),
+					redistributionContractAddress,
+					redistributionContractABI,
+					0,
+				)
+				err := tc.call(contract)
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				if tc.exact != "" {
+					if err.Error() != tc.exact {
+						t.Fatalf("error %q, want %q", err, tc.exact)
+					}
+				} else if !strings.Contains(err.Error(), tc.want+revert.Error()) {
+					t.Fatalf("error %q does not contain %q", err, tc.want+revert.Error())
+				}
+				if !errors.Is(err, revert) {
+					t.Fatalf("error %q does not unwrap to the revert", err)
+				}
+				if tc.retryable != nil && !tc.retryable(err) {
+					t.Fatalf("error %q is no longer retryable", err)
+				}
+			})
 		}
 	})
 
